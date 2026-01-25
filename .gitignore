@@ -1,7 +1,7 @@
 # Dev
 CLAUDE.md
 examples/basic_usage.ipynb
-examples/test.csv
+examples/test*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

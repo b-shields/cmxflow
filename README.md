@@ -20,13 +20,11 @@ cmxflow/
 │       ├── __init__.py
 │       ├── sources/           # Input readers
 │       │   ├── __init__.py
-│       │   ├── base.py        # Reader base class inheriting from block base
 │       │   ├── reader.py      # Main reader with format parsed by file extension
 │       │   ├── table.py       # Reading tabular files (.smi, .csv, .parquet)
 │       │   └── molecule.py    # Reading molecule files (.sdf, .sdf.gz)
 │       ├── sinks/             # Output writers
 │       │   ├── __init__.py
-│       │   ├── base.py        # Writer base class inheriting from block base
 │       │   ├── writer.py      # Main file writer with format parsed by file extension
 │       │   ├── table.py       # Writing tabular files (.smi, .csv, .parquet)
 │       │   └── molecule.py    # Writing molecule files (.sdf, .sdf.gz)

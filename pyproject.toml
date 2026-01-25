@@ -8,6 +8,9 @@ packages = [{include = "cmxflow", from = "src"}]
 
 [tool.poetry.dependencies]
 python = "^3.10"
+rdkit = "^2025.4"
+pandas = "^2.0"
+pyarrow = "*"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"

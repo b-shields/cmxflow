@@ -1,5 +1,7 @@
-# LLM
+# Dev
 CLAUDE.md
+examples/basic_usage.ipynb
+examples/test.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

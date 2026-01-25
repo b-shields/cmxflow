@@ -4,7 +4,16 @@ from typing import Any
 def generate_framed_block(
     name: str, parameters: dict[str, Any], max_width: int = 50
 ) -> str:
-    """Generate a framed text block with a name header and parameters."""
+    """Generate a framed text block with a name header and parameters.
+
+    Args:
+        name: Header name to display centered at the top of the block.
+        parameters: Dictionary of key-value pairs to display in the block.
+        max_width: Maximum width for parameter lines before truncation.
+
+    Returns:
+        A string containing the framed block with box-drawing characters.
+    """
     # Limit width of view
     limited_params = {}
     for key, value in parameters.items():

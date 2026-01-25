@@ -75,7 +75,17 @@ class Workflow:
             all_params += list(block.get_params().values())
         return all_params
 
-    def forward(self, input_path: Path, output_path: Path) -> None:
+    def check(self) -> None:
+        """Validate the workflow structure.
+
+        Ensures the workflow has a SourceBlock first, SinkBlock last,
+        and only Block instances in between.
+
+        Raises:
+            IndexError: If fewer than 2 blocks are present.
+            ValueError: If block types are in incorrect positions.
+        """
+        # Check for required structure
         if len(self.blocks) < 2:
             raise IndexError("A SourceBlock and SinkBlock are required")
         if not isinstance(self.blocks[0], SourceBlock):
@@ -85,6 +95,69 @@ class Workflow:
         for block in self.blocks[1:-1]:
             if not isinstance(block, Block):
                 raise ValueError("Operator blocks must be a Block")
+        # Compute properties
+        self._n = len(self.blocks)
+        self._operator_index = list(range(1, self._n - 1))
+
+    def get_required_input(self) -> dict[str, type]:
+        """Get all required inputs from blocks in the workflow.
+
+        Returns:
+            Dictionary mapping input keys to their expected types.
+            Keys are formatted as '{block_index}.{type}@{name}'.
+        """
+        self.check()
+        required: dict[str, type] = {}
+        for i in self._operator_index:
+            block = self.blocks[i]
+            if block.input_files is not None:
+                for key in block.input_files.keys():
+                    required[f"{i}.file@{key}"] = str
+                for key in block.input_text.keys():
+                    required[f"{i}.text@{key}"] = str
+        return required
+
+    def set_required_input(self, required_inputs: dict[str, str]) -> None:
+        """Set required inputs for blocks in the workflow.
+
+        Args:
+            required_inputs: Dictionary mapping input keys to values.
+                Keys should match those returned by get_required_input().
+
+        Raises:
+            KeyError: If a required input is missing.
+            FileNotFoundError: If a required input file does not exist.
+        """
+        required = self.get_required_input()
+        for key in required:
+            # Check for required input
+            if key not in required_inputs:
+                raise KeyError(f"Required inputs missing {key}")
+            uid, name = key.split("@")
+            bid_str, itype = uid.split(".")
+            bid = int(bid_str)
+            if itype == "file":
+                # Make sure file exists
+                path = Path(required_inputs[key])
+                if not path.is_file():
+                    raise FileNotFoundError(f"Required input file {key} does not exist")
+                self.blocks[bid].input_files[name] = path
+            elif itype == "text":
+                self.blocks[bid].input_text[name] = required_inputs[key]
+
+    def forward(self, input_path: Path | str, output_path: Path | str) -> None:
+        """Execute the workflow pipeline.
+
+        Args:
+            input_path: Path to the input file for the SourceBlock.
+            output_path: Path to the output file for the SinkBlock.
+        """
+        self.check()
+
+        if isinstance(input_path, str):
+            input_path = Path(input_path)
+        if isinstance(output_path, str):
+            output_path = Path(output_path)
 
         iter = self.blocks[0](input_path)
         for block in self.blocks[1:-1]:

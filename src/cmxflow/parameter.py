@@ -90,6 +90,14 @@ class Continuous(Parameter):
         return (self.low, self.high)
 
     def check(self, value: float) -> bool:
+        """Check if a value is within the continuous range.
+
+        Args:
+            value: Value to validate.
+
+        Returns:
+            True if value is a number within [low, high], False otherwise.
+        """
         if isinstance(value, (float, int)):
             return value >= self.low and value <= self.high
         return False
@@ -127,6 +135,14 @@ class Integer(Parameter):
         return (self.low, self.high)
 
     def check(self, value: int) -> bool:
+        """Check if a value is within the integer range.
+
+        Args:
+            value: Value to validate.
+
+        Returns:
+            True if value is an integer within [low, high], False otherwise.
+        """
         if isinstance(value, int):
             return value >= self.low and value <= self.high
         return False
@@ -161,4 +177,12 @@ class Categorical(Parameter):
         return self.choices
 
     def check(self, value: Any) -> bool:
+        """Check if a value is one of the allowed choices.
+
+        Args:
+            value: Value to validate.
+
+        Returns:
+            True if value is in the choices list, False otherwise.
+        """
         return value in self.choices

@@ -1,0 +1,33 @@
+[tool.poetry]
+name = "cmxflow"
+version = "0.1.0"
+description = "A Python package for building and optimizing cheminformatics workflows using Bayesian optimization and LLM agents"
+authors = ["Ben <ben@example.com>"]
+readme = "README.md"
+packages = [{include = "cmxflow", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+black = "^24.0"
+ruff = "^0.4"
+mypy = "^1.10"
+pre-commit = "^4.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "I", "W"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true

@@ -50,14 +50,20 @@ def write_csv(mols: Iterator[Chem.Mol], path: Path, chunksize: int = 1000) -> No
 
         if len(chunk) >= chunksize:
             df = pd.DataFrame(chunk)
-            df.to_csv(path, mode="a", header=first_chunk, index=False)
-            first_chunk = False
+            if first_chunk:
+                df.to_csv(path, index=False)
+                first_chunk = False
+            else:
+                df.to_csv(path, mode="a", header=False, index=False)
             chunk = []
 
     # Write remaining molecules
     if chunk:
         df = pd.DataFrame(chunk)
-        df.to_csv(path, mode="a", header=first_chunk, index=False)
+        if first_chunk:
+            df.to_csv(path, index=False)
+        else:
+            df.to_csv(path, mode="a", header=False, index=False)
 
 
 def write_parquet(mols: Iterator[Chem.Mol], path: Path, batch_size: int = 1000) -> None:

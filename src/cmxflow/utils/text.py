@@ -1,4 +1,62 @@
+import re
 from typing import Any
+
+# Regex to match ANSI escape sequences
+ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from a string.
+
+    Args:
+        text: String potentially containing ANSI escape codes.
+
+    Returns:
+        String with all ANSI escape codes removed.
+    """
+    return ANSI_ESCAPE_PATTERN.sub("", text)
+
+
+def visual_len(text: str) -> int:
+    """Return the visual width of a string (excluding ANSI codes).
+
+    Args:
+        text: String potentially containing ANSI escape codes.
+
+    Returns:
+        The visual width of the string as rendered in a terminal.
+    """
+    return len(strip_ansi(text))
+
+
+def visual_ljust(text: str, width: int) -> str:
+    """Left-justify a string to visual width, accounting for ANSI codes.
+
+    Args:
+        text: String to left-justify.
+        width: Target visual width.
+
+    Returns:
+        String padded with spaces to reach the target visual width.
+    """
+    padding = width - visual_len(text)
+    return text + " " * max(0, padding)
+
+
+def visual_center(text: str, width: int) -> str:
+    """Center a string to visual width, accounting for ANSI codes.
+
+    Args:
+        text: String to center.
+        width: Target visual width.
+
+    Returns:
+        String padded with spaces on both sides to center it.
+    """
+    padding = width - visual_len(text)
+    left_pad = padding // 2
+    right_pad = padding - left_pad
+    return " " * left_pad + text + " " * right_pad
 
 
 def generate_framed_block(
@@ -19,17 +77,24 @@ def generate_framed_block(
     for key, value in parameters.items():
         key = str(key)
         value = str(value)
-        width = len(f"{key}: {value}")
+        # Color text
+        if value in ["[FILE]", "[TEXT]"]:
+            if key in ["input", "output"]:
+                value = "\033[92m" + value + "\033[0m"
+            else:
+                value = "\033[31m" + value + "\033[0m"
+        width = visual_len(f"{key}: {value}")
         if width > max_width:
             remove = width - max_width
-            value = value[:-remove]
+            # Strip ANSI, truncate, but we lose color on truncated values
+            value = strip_ansi(value)[:-remove]
         limited_params[key] = value
 
     param_lines = [f"{key}: {value}" for key, value in limited_params.items()]
 
     # Calculate frame width based on content
     all_lines = [name] + param_lines
-    content_width = max(len(line) for line in all_lines)
+    content_width = max(visual_len(line) for line in all_lines)
     inner_width = content_width + 2  # padding on each side
 
     # Build the frame
@@ -38,10 +103,10 @@ def generate_framed_block(
     separator = "├" + "─" * inner_width + "┤"
 
     # Center the name
-    name_line = "│ " + name.center(content_width) + " │"
+    name_line = "│ " + visual_center(name, content_width) + " │"
 
     # Left-align parameters
-    param_output = [f"│ {line.ljust(content_width)} │" for line in param_lines]
+    param_output = [f"│ {visual_ljust(line, content_width)} │" for line in param_lines]
 
     # Assemble the block
     lines = [top_border, name_line, separator] + param_output + [bottom_border]
@@ -85,8 +150,8 @@ def left_merge_framed_block(left_block: str, right_block: str, arrow: str = "←
     # Total height of the merged output
     total_height = arrow_row + max(left_below, right_below) + 1
 
-    # Get the width of the left block
-    left_width = max(len(line) for line in left_lines)
+    # Get the width of the left block (visual width)
+    left_width = max(visual_len(line) for line in left_lines)
 
     # Calculate top padding for each block to align centers
     left_top_pad = arrow_row - left_center
@@ -104,15 +169,15 @@ def left_merge_framed_block(left_block: str, right_block: str, arrow: str = "←
         + [""] * (total_height - right_top_pad - right_height)
     )
 
-    # Get the width of the right block for consistent output
-    right_width = max(len(line) for line in right_lines)
+    # Get the width of the right block for consistent output (visual width)
+    right_width = max(visual_len(line) for line in right_lines)
 
     # Build the merged output
     arrow_spacer = " " * len(arrow)
     result_lines: list[str] = []
     for i in range(total_height):
-        left_line = left_padded[i].ljust(left_width)
-        right_line = right_padded[i].ljust(right_width)
+        left_line = visual_ljust(left_padded[i], left_width)
+        right_line = visual_ljust(right_padded[i], right_width)
 
         if i == arrow_row:
             connector = f" {arrow} "
@@ -143,14 +208,14 @@ def column_merge_framed_block(
     top_lines = top_block.split("\n")
     bottom_lines = bottom_block.split("\n")
 
-    # Get the width of each block (normalize lines within each block first)
-    top_width = max(len(line) for line in top_lines)
-    bottom_width = max(len(line) for line in bottom_lines)
+    # Get the width of each block (visual width, normalize lines within each block)
+    top_width = max(visual_len(line) for line in top_lines)
+    bottom_width = max(visual_len(line) for line in bottom_lines)
     max_width = max(top_width, bottom_width)
 
     # Normalize each block's lines to consistent width within the block
-    top_normalized = [line.ljust(top_width) for line in top_lines]
-    bottom_normalized = [line.ljust(bottom_width) for line in bottom_lines]
+    top_normalized = [visual_ljust(line, top_width) for line in top_lines]
+    bottom_normalized = [visual_ljust(line, bottom_width) for line in bottom_lines]
 
     # Calculate left padding to center each block as a whole
     top_left_pad = (max_width - top_width) // 2
@@ -169,7 +234,7 @@ def column_merge_framed_block(
     ]
 
     # Create the centered arrow line
-    arrow_line = arrow.center(max_width)
+    arrow_line = visual_center(arrow, max_width)
 
     # Combine all lines
     result_lines = top_padded + [arrow_line] + bottom_padded

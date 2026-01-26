@@ -6,6 +6,7 @@ from typing import Any
 from cmxflow.block import Block, BlockBase, SinkBlock, SourceBlock
 from cmxflow.parameter import Parameter
 from cmxflow.utils import text
+from cmxflow.utils.parallel import ParallelBlock
 
 
 class Workflow:
@@ -93,8 +94,8 @@ class Workflow:
         if not isinstance(self.blocks[-1], SinkBlock):
             raise ValueError("The final block bust be a SinkBlock")
         for block in self.blocks[1:-1]:
-            if not isinstance(block, Block):
-                raise ValueError("Operator blocks must be a Block")
+            if not isinstance(block, (Block, ParallelBlock)):
+                raise ValueError("Operator blocks must be a (Parallel)Block")
         # Compute properties
         self._n = len(self.blocks)
         self._operator_index = list(range(1, self._n - 1))

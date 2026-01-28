@@ -91,6 +91,106 @@ class MoleculeAlignBlock(MoleculeBlock):
                 f"No valid reference molecules found in query file: {query_path}"
             )
 
+    def _compute_mcs(
+        self,
+        mol: Chem.Mol,
+        ref: Chem.Mol,
+    ) -> str | None:
+        """Compute MCS SMARTS for a molecule-reference pair.
+
+        Args:
+            mol: Molecule to align.
+            ref: Reference molecule.
+
+        Returns:
+            MCS SMARTS string, or None if MCS is too small/invalid.
+        """
+        mcs_timeout = self.params["mcsTimeout"].get()
+        mcs_min_atoms = self.params["mcsMinAtoms"].get()
+
+        try:
+            mcs_result = rdFMCS.FindMCS(
+                [mol, ref],
+                timeout=mcs_timeout,
+                matchValences=False,
+                ringMatchesRingOnly=True,
+                completeRingsOnly=True,
+            )
+
+            if mcs_result.numAtoms < mcs_min_atoms:
+                logger.debug(
+                    f"MCS too small: {mcs_result.numAtoms} atoms < {mcs_min_atoms}"
+                )
+                return None
+
+            return str(mcs_result.smartsString)
+
+        except Exception as e:
+            logger.debug(f"MCS computation failed: {e}")
+            return None
+
+    def _find_best_mcs_alignment(
+        self,
+        mol: Chem.Mol,
+        conf_id: int,
+        ref: Chem.Mol,
+        ref_conf_id: int,
+        mcs_smarts: str,
+    ) -> tuple[float, float]:
+        """Find best alignment among all MCS substructure matches.
+
+        Args:
+            mol: Molecule to align.
+            conf_id: Conformer ID in mol.
+            ref: Reference molecule.
+            ref_conf_id: Conformer ID in reference.
+            mcs_smarts: MCS SMARTS pattern.
+
+        Returns:
+            Tuple of (best_shape_similarity, best_rmsd).
+        """
+        mcs_mol = Chem.MolFromSmarts(mcs_smarts)
+        if mcs_mol is None:
+            return 0.0, float("inf")
+
+        mol_matches = mol.GetSubstructMatches(mcs_mol)
+        ref_matches = ref.GetSubstructMatches(mcs_mol)
+
+        if not mol_matches or not ref_matches:
+            return 0.0, float("inf")
+
+        best_shape_sim = 0.0
+        best_rmsd = float("inf")
+
+        for mol_match in mol_matches:
+            for ref_match in ref_matches:
+                try:
+                    # Create copy for this alignment attempt
+                    mol_copy = Chem.Mol(mol)
+                    atom_map = list(zip(mol_match, ref_match))
+
+                    rmsd = AllChem.AlignMol(  # type: ignore[attr-defined]
+                        mol_copy,
+                        ref,
+                        prbCid=conf_id,
+                        refCid=ref_conf_id,
+                        atomMap=atom_map,
+                    )
+
+                    shape_sim = self._compute_shape_similarity(
+                        mol_copy, conf_id, ref, ref_conf_id
+                    )
+
+                    if shape_sim > best_shape_sim:
+                        best_shape_sim = shape_sim
+                        best_rmsd = rmsd
+
+                except Exception as e:
+                    logger.debug(f"MCS alignment attempt failed: {e}")
+                    continue
+
+        return best_shape_sim, best_rmsd
+
     def _align_crippen_o3a(
         self,
         mol: Chem.Mol,
@@ -154,61 +254,31 @@ class MoleculeAlignBlock(MoleculeBlock):
         conf_id: int,
         ref: Chem.Mol,
         ref_conf_id: int,
+        mcs_smarts: str | None = None,
     ) -> tuple[float, float]:
         """Align using maximum common substructure.
+
+        All substructure matches are evaluated to find the best-scoring
+        alignment.
 
         Args:
             mol: Molecule to align.
             conf_id: Conformer ID in mol.
             ref: Reference molecule.
             ref_conf_id: Conformer ID in reference.
+            mcs_smarts: Pre-computed MCS SMARTS pattern. If None, MCS will be
+                computed (less efficient for multiple conformers).
 
         Returns:
             Tuple of (shape_similarity, rmsd).
         """
-        mcs_timeout = self.params["mcsTimeout"].get()
-        mcs_min_atoms = self.params["mcsMinAtoms"].get()
+        if mcs_smarts is None:
+            mcs_smarts = self._compute_mcs(mol, ref)
 
-        try:
-            # Find MCS
-            mcs_result = rdFMCS.FindMCS(
-                [mol, ref],
-                timeout=mcs_timeout,
-                matchValences=False,
-                ringMatchesRingOnly=True,
-                completeRingsOnly=True,
-            )
-
-            if mcs_result.numAtoms < mcs_min_atoms:
-                logger.debug(
-                    f"MCS too small: {mcs_result.numAtoms} atoms < {mcs_min_atoms}"
-                )
-                return 0.0, float("inf")
-
-            # Get atom mapping from MCS
-            mcs_mol = Chem.MolFromSmarts(mcs_result.smartsString)
-            if mcs_mol is None:
-                return 0.0, float("inf")
-
-            mol_match = mol.GetSubstructMatch(mcs_mol)
-            ref_match = ref.GetSubstructMatch(mcs_mol)
-
-            if not mol_match or not ref_match:
-                return 0.0, float("inf")
-
-            # Create atom map for alignment
-            atom_map = list(zip(mol_match, ref_match))
-
-            # Align using the atom map
-            rmsd = AllChem.AlignMol(  # type: ignore[attr-defined]
-                mol, ref, prbCid=conf_id, refCid=ref_conf_id, atomMap=atom_map
-            )
-
-            shape_sim = self._compute_shape_similarity(mol, conf_id, ref, ref_conf_id)
-            return shape_sim, rmsd
-        except Exception as e:
-            logger.debug(f"MCS alignment failed: {e}")
+        if mcs_smarts is None:
             return 0.0, float("inf")
+
+        return self._find_best_mcs_alignment(mol, conf_id, ref, ref_conf_id, mcs_smarts)
 
     def _compute_shape_similarity(
         self,
@@ -229,8 +299,8 @@ class MoleculeAlignBlock(MoleculeBlock):
             Shape Tanimoto similarity (0-1, higher is better).
         """
         try:
-            # ShapeTanimotoDistance returns distance, convert to similarity
-            distance: float = rdShapeHelpers.ShapeTanimotoDistance(  # type: ignore[attr-defined]
+            # ShapeTanimotoDist returns distance, convert to similarity
+            distance: float = rdShapeHelpers.ShapeTanimotoDist(
                 mol, ref, confId1=conf_id, confId2=ref_conf_id
             )
             return 1.0 - distance
@@ -253,14 +323,21 @@ class MoleculeAlignBlock(MoleculeBlock):
         assert self._reference_mols is not None
 
         alignment_method = self.params["alignment_method"].get()
+        use_mcs = alignment_method == "mcs"
 
-        # Select alignment function
+        # Select alignment function for O3A methods
         if alignment_method == "crippen_o3a":
             align_func = self._align_crippen_o3a
         elif alignment_method == "mmff_o3a":
             align_func = self._align_mmff_o3a
-        else:  # mcs
-            align_func = self._align_mcs
+        else:
+            align_func = None  # MCS handled separately
+
+        # Pre-compute MCS for each reference (only for MCS method)
+        mcs_cache: dict[int, str | None] = {}
+        if use_mcs:
+            for ref_idx, ref in enumerate(self._reference_mols):
+                mcs_cache[ref_idx] = self._compute_mcs(mol, ref)
 
         best_conf_id = -1
         best_ref_idx = -1
@@ -274,7 +351,16 @@ class MoleculeAlignBlock(MoleculeBlock):
                 for ref_conf_id in range(ref.GetNumConformers()):
                     # Create a copy for alignment to avoid modifying original
                     mol_copy = Chem.Mol(mol)
-                    shape_sim, rmsd = align_func(mol_copy, conf_id, ref, ref_conf_id)
+
+                    if use_mcs:
+                        shape_sim, rmsd = self._align_mcs(
+                            mol_copy, conf_id, ref, ref_conf_id, mcs_cache[ref_idx]
+                        )
+                    else:
+                        assert align_func is not None
+                        shape_sim, rmsd = align_func(
+                            mol_copy, conf_id, ref, ref_conf_id
+                        )
 
                     if shape_sim > best_shape_sim:
                         best_shape_sim = shape_sim
@@ -310,7 +396,7 @@ class MoleculeAlignBlock(MoleculeBlock):
 
         return True
 
-    def forward(self, mol: Chem.Mol) -> Chem.Mol | None:
+    def _forward(self, mol: Chem.Mol) -> Chem.Mol | None:
         """Align molecule to reference molecules.
 
         Args:
@@ -331,7 +417,7 @@ class MoleculeAlignBlock(MoleculeBlock):
         # Validate input molecule has 3D conformers
         if not self._has_3d_conformer(mol):
             logger.debug(
-                "Input molecule does not have 3D conformers. " "Skipping alignment."
+                "Input molecule does not have 3D conformers. Skipping alignment."
             )
             return None
 
@@ -348,16 +434,17 @@ class MoleculeAlignBlock(MoleculeBlock):
         # Perform final alignment on the molecule we'll return
         ref = self._reference_mols[best_ref_idx]
 
-        # Select alignment function
-        if alignment_method == "crippen_o3a":
-            align_func = self._align_crippen_o3a
-        elif alignment_method == "mmff_o3a":
-            align_func = self._align_mmff_o3a
-        else:  # mcs
-            align_func = self._align_mcs
-
         # Final alignment
-        align_func(mol_with_conf, best_conf_id, ref, best_ref_conf_id)
+        mcs_smarts: str | None = None
+        if alignment_method == "crippen_o3a":
+            self._align_crippen_o3a(mol_with_conf, best_conf_id, ref, best_ref_conf_id)
+        elif alignment_method == "mmff_o3a":
+            self._align_mmff_o3a(mol_with_conf, best_conf_id, ref, best_ref_conf_id)
+        else:  # mcs
+            mcs_smarts = self._compute_mcs(mol_with_conf, ref)
+            self._align_mcs(
+                mol_with_conf, best_conf_id, ref, best_ref_conf_id, mcs_smarts
+            )
 
         # Keep only the best conformer
         best_conf = mol_with_conf.GetConformer(best_conf_id)
@@ -367,9 +454,11 @@ class MoleculeAlignBlock(MoleculeBlock):
 
         # Attach alignment properties
         output_mol.SetDoubleProp("alignment_shape_similarity", best_shape_sim)
-        output_mol.SetDoubleProp("alignment_rmsd", best_rmsd)
+        output_mol.SetDoubleProp("alignment_score", best_rmsd)
         output_mol.SetProp("alignment_reference", self._reference_names[best_ref_idx])
         output_mol.SetProp("alignment_method", alignment_method)
         output_mol.SetIntProp("alignment_ref_index", best_ref_idx)
+        if mcs_smarts:
+            output_mol.SetProp("alignment_mcs", mcs_smarts)
 
         return output_mol

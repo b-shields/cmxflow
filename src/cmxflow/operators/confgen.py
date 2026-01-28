@@ -23,13 +23,20 @@ class EnumerateStereoBlock(MoleculeBlock):
     This is a 1:N transform that yields all possible stereoisomers for each
     input molecule. Properties from the input molecule are copied to each
     output stereoisomer.
+
+    Note: This block overrides the standard forward() method since it's a
+    1:N transform (one input yields multiple outputs).
     """
 
     def __init__(self) -> None:
         """Initialize the stereoisomer enumeration block."""
         super().__init__()
 
-    def forward(self, mol: Chem.Mol) -> Iterator[Chem.Mol]:
+    def _forward(self, mol: Chem.Mol) -> Chem.Mol | None:
+        """Not used - this block overrides forward() directly."""
+        raise NotImplementedError("EnumerateStereoBlock uses forward() directly")
+
+    def forward(self, mol: Chem.Mol) -> Iterator[Chem.Mol]:  # type: ignore[override]
         """Enumerate all stereoisomers of a molecule.
 
         Args:
@@ -42,7 +49,7 @@ class EnumerateStereoBlock(MoleculeBlock):
         isomers = EnumerateStereoisomers(mol, options=opts)
 
         # Get properties from input molecule
-        props = mol.GetPropsAsDict()
+        props = mol.GetPropsAsDict(includePrivate=True)
 
         for isomer in isomers:
             # Copy properties to each stereoisomer
@@ -157,7 +164,7 @@ class ConformerGenerationBlock(MoleculeBlock):
 
         return True
 
-    def forward(self, mol: Chem.Mol) -> Chem.Mol:
+    def _forward(self, mol: Chem.Mol) -> Chem.Mol:
         """Generate 3D conformers for a molecule.
 
         Args:
@@ -185,7 +192,7 @@ class ConformerGenerationBlock(MoleculeBlock):
         params.randomSeed = 42
         params.pruneRmsThresh = prune_rms_thresh
         params.useRandomCoords = use_random_coords
-        params.numThreads = 0  # Use all available threads
+        params.numThreads = 1  # Use 1 for parallel call compatibility
 
         # Generate conformers
         rdDistGeom.EmbedMultipleConfs(mol, numConfs=num_confs, params=params)

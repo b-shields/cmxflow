@@ -116,7 +116,7 @@ class MoleculeSimilarityBlock(MoleculeBlock):
         if not self._query_fingerprints:
             raise ValueError(f"No valid molecules found in query file: {query_path}")
 
-    def forward(self, mol: Chem.Mol) -> Chem.Mol:
+    def _forward(self, mol: Chem.Mol) -> Chem.Mol:
         """Compute similarity between input molecule and query molecules.
 
         Args:

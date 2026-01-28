@@ -43,6 +43,8 @@ def write_csv(mols: Iterator[Chem.Mol], path: Path, chunksize: int = 1000) -> No
 
     for mol in mols:
         row = {"SMILES": Chem.MolToSmiles(mol)}
+        if mol.HasProp("_Name"):
+            row["_Name"] = mol.GetProp("_Name")
         row.update(mol.GetPropsAsDict())
         # Convert all values to strings for consistency
         row = {k: str(v) for k, v in row.items()}
@@ -81,6 +83,8 @@ def write_parquet(mols: Iterator[Chem.Mol], path: Path, batch_size: int = 1000) 
 
     for mol in mols:
         row = {"SMILES": Chem.MolToSmiles(mol)}
+        if mol.HasProp("_Name"):
+            row["_Name"] = mol.GetProp("_Name")
         row.update(mol.GetPropsAsDict())
         row = {k: str(v) for k, v in row.items()}
         batch.append(row)

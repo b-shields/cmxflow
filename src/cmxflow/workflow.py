@@ -30,7 +30,7 @@ class Workflow:
         self.name = name
         self.blocks: list[BlockBase] = []
 
-    def add(self, *blocks: BlockBase) -> "Workflow":
+    def add(self, *blocks: Any) -> "Workflow":
         """Add a block to the end of the workflow.
 
         Args:

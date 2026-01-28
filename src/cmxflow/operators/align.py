@@ -82,7 +82,7 @@ class MoleculeAlignBlock(MoleculeBlock):
                     "All reference molecules must have pre-generated 3D conformers."
                 )
 
-            mol_with_h = Chem.AddHs(mol)
+            mol_with_h = Chem.AddHs(mol, addCoords=True)
             self._reference_mols.append(mol_with_h)
             self._reference_names.append(name)
 
@@ -421,7 +421,7 @@ class MoleculeAlignBlock(MoleculeBlock):
             )
             return None
 
-        mol_with_conf = Chem.AddHs(Chem.Mol(mol))
+        mol_with_conf = Chem.AddHs(Chem.Mol(mol), addCoords=True)
 
         # Find best alignment
         result = self._find_best_alignment(mol_with_conf)

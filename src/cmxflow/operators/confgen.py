@@ -11,6 +11,7 @@ from rdkit.Chem.EnumerateStereoisomers import (
     StereoEnumerationOptions,
 )
 
+from cmxflow import Mol, wrap_mol
 from cmxflow.operators.base import MoleculeBlock
 from cmxflow.parameter import Categorical, Continuous, Integer
 
@@ -36,7 +37,7 @@ class EnumerateStereoBlock(MoleculeBlock):
         """Not used - this block overrides forward() directly."""
         raise NotImplementedError("EnumerateStereoBlock uses forward() directly")
 
-    def forward(self, mol: Chem.Mol) -> Iterator[Chem.Mol]:  # type: ignore[override]
+    def forward(self, mol: Chem.Mol | Mol) -> Iterator[Mol]:  # type: ignore[override]
         """Enumerate all stereoisomers of a molecule.
 
         Args:
@@ -49,11 +50,15 @@ class EnumerateStereoBlock(MoleculeBlock):
         isomers = EnumerateStereoisomers(mol, options=opts)
 
         # Get properties from input molecule
-        props = mol.GetPropsAsDict(includePrivate=True)
+        if isinstance(mol, Mol):
+            input_props = mol._prop_cache.copy()
+        else:
+            input_props = mol.GetPropsAsDict(includePrivate=True)
 
         for isomer in isomers:
+            isomer = wrap_mol(isomer)
             # Copy properties to each stereoisomer
-            for key, value in props.items():
+            for key, value in input_props.items():
                 if isinstance(value, float):
                     isomer.SetDoubleProp(key, value)
                 elif isinstance(value, int):
@@ -62,7 +67,7 @@ class EnumerateStereoBlock(MoleculeBlock):
                     isomer.SetProp(key, str(value))
             yield isomer
 
-    def __call__(self, iter: Iterator[Any]) -> Iterator[Chem.Mol]:
+    def __call__(self, iter: Iterator[Any]) -> Iterator[Mol]:
         """Execute the block on an iterator of molecules.
 
         Overrides the base __call__ to handle 1:N transformation where
@@ -177,9 +182,6 @@ class ConformerGenerationBlock(MoleculeBlock):
         num_confs = self.params["numConfs"].get()
         prune_rms_thresh = self.params["pruneRmsThresh"].get()
         use_random_coords = self.params["useRandomCoords"].get()
-
-        # Work on a copy to avoid modifying the input
-        mol = Chem.Mol(mol)
 
         # Remove existing conformers
         mol.RemoveAllConformers()

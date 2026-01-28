@@ -6,8 +6,10 @@ from pathlib import Path
 
 from rdkit import Chem
 
+from cmxflow import Mol
 
-def split_conformers(mols: Iterator[Chem.Mol]) -> Iterator[Chem.Mol]:
+
+def split_conformers(mols: Iterator[Chem.Mol | Mol]) -> Iterator[Chem.Mol]:
     """Split molecules with multiple conformers into separate molecules.
 
     Each conformer becomes a separate molecule with all properties copied
@@ -41,8 +43,15 @@ def split_conformers(mols: Iterator[Chem.Mol]) -> Iterator[Chem.Mol]:
                 yield new_mol
 
 
+class SDWriter(Chem.SDWriter):
+    def write(self, mol: Chem.Mol | Mol, **kwargs: bool) -> None:
+        if isinstance(mol, Mol):
+            mol.restore_properties()
+        super().write(mol, **kwargs)
+
+
 def write_sdf(
-    mols: Iterator[Chem.Mol], path: Path, *, split_confs: bool = True
+    mols: Iterator[Chem.Mol | Mol], path: Path, *, split_confs: bool = True
 ) -> None:
     """Write molecules to an SDF file.
 
@@ -54,7 +63,7 @@ def write_sdf(
     """
     if split_confs:
         mols = split_conformers(mols)
-    writer = Chem.SDWriter(str(path))
+    writer = SDWriter(str(path))
     try:
         for mol in mols:
             writer.write(mol)
@@ -76,7 +85,7 @@ def write_sdf_gz(
     if split_confs:
         mols = split_conformers(mols)
     with gzip.open(path, "wt") as f:
-        writer = Chem.SDWriter(f)
+        writer = SDWriter(f)
         try:
             for mol in mols:
                 writer.write(mol)

@@ -57,6 +57,11 @@ class Mol(Chem.Mol):
             else:
                 self.SetProp(key, str(value))
 
+    def GetPropsAsDict(self, **kwargs: bool) -> dict[str, Any]:
+        self.restore_properties()
+        result: dict[str, Any] = super().GetPropsAsDict(**kwargs)
+        return result
+
 
 def wrap_mol(mol: Chem.Mol) -> Mol:
     """Wrap an RDKit Mol in a Mol for property preservation.

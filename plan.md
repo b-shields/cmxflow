@@ -1,107 +1,114 @@
-# Plan: Implement sim3d.py with Molecule3DSimilarityBlock
+# Plan: cmxflow.scores.automatic Module
 
 ## Overview
-Create a new operator module for computing 3D molecular similarity using RDKit's shape and USR-based methods. The block will compare input molecules against query references (both with pre-existing 3D conformers) and attach similarity scores as molecule properties.
+Create a new module for automatic scoring of molecular workflows using enrichment metrics. The module provides a ready-to-use `EnrichmentScoreBlock` that converts molecule iterators to DataFrames and computes enrichment curve metrics.
 
-## Available RDKit 3D Similarity Methods
+## Files to Create
+1. `src/cmxflow/scores/__init__.py` - Package init with exports
+2. `src/cmxflow/scores/automatic.py` - Main module
 
-### Shape-based (rdShapeHelpers)
-- **ShapeTanimotoDist**: Tanimoto distance measuring shape overlap (0=identical, 1=no overlap)
-- **ShapeTverskyIndex**: Asymmetric similarity with alpha/beta parameters
-- **ShapeProtrudeDist**: Measures how much one shape protrudes from another
+## Module: automatic.py
 
-### USR-based (rdMolDescriptors)
-- **USR**: Ultrafast Shape Recognition - encodes 3D shape as a 12-element descriptor
-- **USRCAT**: USR with CREDO Atom Types - adds pharmacophoric information (60 elements)
-
-## Implementation Details
-
-### File: `src/cmxflow/operators/sim3d.py`
-
+### Imports
 ```python
-"""3D molecular similarity block."""
-
-from pathlib import Path
+import logging
+from collections.abc import Iterator
 from typing import Any
 
+import numpy as np
+import pandas as pd
 from rdkit import Chem
-from rdkit.Chem import rdMolDescriptors, rdShapeHelpers
 
-from cmxflow.operators.base import MoleculeBlock
-from cmxflow.parameter import Categorical, Continuous
-from cmxflow.sources.reader import read_molecules
+from cmxflow.block import ScoreBlock
+from cmxflow.cmxmol import Mol as CmxMol
 ```
 
-### Class: Molecule3DSimilarityBlock
+### Function: `mol_to_dataframe(mols: Iterator[Chem.Mol | CmxMol]) -> pd.DataFrame`
 
-**Inherits from**: `MoleculeBlock`
+**Purpose:** Convert iterator of molecules to DataFrame, keeping only numeric columns.
 
-**Input files**: `queries` - file containing reference molecules with 3D conformers
+**Logic:**
+1. Iterate through molecules, extract properties via `GetPropsAsDict()`
+2. Build list of property dictionaries
+3. Create DataFrame from list
+4. Identify numeric columns using `pd.api.types.is_numeric_dtype()`
+5. Log dropped non-numeric columns to debug channel
+6. Log retained numeric columns to debug channel
+7. Return DataFrame with only numeric columns
 
-**Mutable parameters**:
-| Parameter | Type | Default | Choices/Range |
-|-----------|------|---------|---------------|
-| `method` | Categorical | `"shape_tanimoto"` | `["shape_tanimoto", "shape_tversky", "usr", "usrcat"]` |
-| `tversky_alpha` | Continuous | `1.0` | `[0.0, 1.0]` |
-| `tversky_beta` | Continuous | `1.0` | `[0.0, 1.0]` |
+**Edge cases:**
+- Empty iterator → return empty DataFrame
+- No numeric columns → return empty DataFrame (log warning)
+- Mixed types in same column → pandas will infer, may become object type
 
-### Methods
+### Function: `enrichment_auc(scores: np.ndarray, labels: np.ndarray) -> float`
 
-#### `__init__(self)`
-- Call `super().__init__(input_files=["queries"])`
-- Set `self.name = "Molecule3DSimilarity"`
-- Register mutable parameters
-- Initialize lazy-loaded caches: `_query_mols`, `_query_names`, `_query_descriptors`
+**Purpose:** Compute area under the enrichment curve.
 
-#### `_load_queries(self)`
-- Load query molecules from input file
-- Validate each has 3D conformers
-- For USR/USRCAT methods, precompute descriptors and cache them
+**Definition:** Enrichment curve plots:
+- X-axis: Fraction of library screened (0 to 1)
+- Y-axis: Fraction of hits found (0 to 1)
 
-#### `_compute_shape_similarity(self, mol, conf_id, ref, ref_conf_id) -> float`
-- For `shape_tanimoto`: Use `rdShapeHelpers.ShapeTanimotoDist()`, convert distance to similarity (1 - dist)
-- For `shape_tversky`: Use `rdShapeHelpers.ShapeTverskyIndex()` with alpha/beta params
+When molecules are ranked by score (descending), the enrichment curve shows how quickly we find hits. AUC of 0.5 = random, AUC of 1.0 = perfect (all hits ranked first).
 
-#### `_compute_usr_similarity(self, mol, conf_id, ref_descriptor) -> float`
-- Compute USR or USRCAT descriptor for mol conformer
-- Use `rdMolDescriptors.GetUSRScore()` to compare with cached reference descriptor
+**Logic:**
+1. Sort indices by scores (descending - higher score = better)
+2. Reorder labels by sorted indices
+3. Compute cumulative sum of hits at each position
+4. Normalize: x = position/total, y = cumulative_hits/total_hits
+5. Compute AUC using trapezoidal rule (np.trapz)
 
-#### `_forward(self, mol: Chem.Mol) -> Chem.Mol`
-- Lazy load queries
-- For each (mol_conformer, query, query_conformer) combination:
-  - Compute similarity using selected method
-  - Track best similarity and corresponding query
-- Attach properties:
-  - `similarity_3d`: Best similarity score
-  - `most_similar_query_3d`: Name of most similar query
-  - `similarity_3d_method`: Method used
+**Edge cases:**
+- No hits (all labels=0) → return 0.0 or handle gracefully
+- All hits (all labels=1) → return 1.0
+- Empty arrays → return 0.0
 
-#### `check_input(self, arg: Any) -> bool`
-- Call `super().check_input(arg)`
-- Verify molecule has at least one 3D conformer
+### Class: `EnrichmentScoreBlock(ScoreBlock)`
 
-### Output Properties
-| Property | Type | Description |
-|----------|------|-------------|
-| `similarity_3d` | float | Best 3D similarity score (0-1, higher=more similar) |
-| `most_similar_query_3d` | str | Name of most similar reference molecule |
-| `similarity_3d_method` | str | Method used for comparison |
-| `similarity_3d_conf_id` | int | Conformer ID that gave best similarity |
+**Purpose:** Pre-configured ScoreBlock for enrichment-based scoring.
 
-## Key Design Decisions
+**Implementation:**
+```python
+class EnrichmentScoreBlock(ScoreBlock):
+    """ScoreBlock configured for enrichment-based molecular scoring."""
 
-1. **Conformer handling**: Compare all conformer pairs between input and reference, report the best match
-2. **Similarity normalization**: Convert all metrics to 0-1 scale where 1=most similar
-3. **USR descriptor caching**: Pre-compute USR/USRCAT descriptors for queries to avoid redundant computation
-4. **No alignment**: Assume molecules are pre-aligned or use alignment-independent methods (USR/USRCAT)
+    def __init__(self) -> None:
+        """Initialize with molecule pooler and enrichment AUC metric."""
+        super().__init__(
+            pooler=mol_to_dataframe,
+            metric=enrichment_auc,
+        )
+```
 
-## Files to Create/Modify
-- **Create**: `src/cmxflow/operators/sim3d.py`
-- **Modify**: `src/cmxflow/operators/__init__.py` (add export)
+Only overrides `__init__` - inherits all other behavior from ScoreBlock.
 
-## Testing
-- Test with shape_tanimoto on aligned conformers
-- Test USR/USRCAT on unaligned conformers (should still work)
-- Verify properties are correctly attached
-- Test with multiple conformers per molecule
-- Test parallel execution preserves properties
+## Package: __init__.py
+
+```python
+"""Scoring blocks for workflow optimization."""
+
+from cmxflow.scores.automatic import EnrichmentScoreBlock, enrichment_auc, mol_to_dataframe
+
+__all__ = [
+    "EnrichmentScoreBlock",
+    "enrichment_auc",
+    "mol_to_dataframe",
+]
+```
+
+## Type Signatures
+
+```python
+def mol_to_dataframe(mols: Iterator[Chem.Mol | CmxMol]) -> pd.DataFrame: ...
+
+def enrichment_auc(scores: np.ndarray, labels: np.ndarray) -> float: ...
+
+class EnrichmentScoreBlock(ScoreBlock):
+    def __init__(self) -> None: ...
+```
+
+## Testing Considerations
+- Test mol_to_dataframe with molecules having mixed property types
+- Test enrichment_auc with known enrichment scenarios (perfect, random, worst)
+- Test empty inputs
+- Test integration with ScoreBlock caching behavior

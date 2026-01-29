@@ -44,7 +44,10 @@ def split_conformers(mols: Iterator[Chem.Mol | Mol]) -> Iterator[Chem.Mol]:
 
 
 class SDWriter(Chem.SDWriter):
+    """SDWriter that restores cached properties before writing."""
+
     def write(self, mol: Chem.Mol | Mol, **kwargs: bool) -> None:
+        """Write molecule to SDF, restoring CmxMol properties first."""
         if isinstance(mol, Mol):
             mol.restore_properties()
         super().write(mol, **kwargs)

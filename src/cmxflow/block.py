@@ -2,10 +2,15 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+from itertools import combinations
 from pathlib import Path
 from typing import Any, Callable
 
-from cmxflow.parameter import Parameter
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+
+from cmxflow.parameter import Categorical, Integer, Parameter
 from cmxflow.utils import text
 
 
@@ -186,7 +191,7 @@ class SourceBlock(BlockBase):
 
 
 class SinkBlock(BlockBase):
-    """Block that consumes items and writes to a destination."""
+    """Block that terminates a workflow by writing to a file."""
 
     def __init__(self, writer: Callable[[Iterator[Any], Path], None]) -> None:
         """Initialize a sink block with a writer function.
@@ -217,3 +222,69 @@ class SinkBlock(BlockBase):
 
     def __repr__(self) -> str:
         return text.generate_framed_block(self.name, {"output": "[FILE]"})
+
+
+class ScoreBlock(BlockBase):
+    """Block that scores workflow outputs against a target.
+
+    Pools iterator results into a DataFrame, computes scores, and evaluates
+    against a target using a metric function. Caches results by unique ID.
+    """
+
+    def __init__(
+        self,
+        pooler: Callable[[Iterator[Any]], pd.DataFrame],
+        metric: Callable[[np.ndarray, np.ndarray], float],
+    ) -> None:
+        """Initialize with pooler, scorer, and metric functions."""
+        super().__init__(input_text=["target"])
+        self.pooler = pooler
+        self.metric = metric
+        self._cache: dict[tuple[str, ...], pd.DataFrame] = {}
+        self._scaler: None | MinMaxScaler = None
+        self._score_components: tuple[str, ...] | None = None
+        self.mutable(
+            Categorical("compose", "geometric", ["arithmetic", "geometric"]),
+            Integer("combinations", 1, 1, 5),
+        )
+
+    def __call__(
+        self, iter: Iterator[Any], uid: tuple[str, ...]
+    ) -> tuple[float, tuple[str, ...] | None]:
+        """Score iterator results against target, using cache if available."""
+        target = self.input_text.get("target")
+        if not target:
+            raise ValueError("ScoreBlock requires a 'target' as input")
+
+        # Collect cached result if possible
+        if uid in self._cache:
+            del iter
+            df = self._cache[uid]
+        else:
+            df = self.pooler(iter)
+            self._scaler = MinMaxScaler()
+            cols = df.columns.values
+            df[cols] = self._scaler.fit_transform(df)
+            self._cache[uid] = df
+
+        # Compute scores for different combinations
+        comb = self.params["combinations"].get()
+        compose = self.params["compose"]
+        possible = combinations(df.columns.values, min(df.shape[1], comb))
+        best_score = -np.inf
+        best_cols: tuple[str, ...] | None = None
+        for cols in possible:
+            if compose == "arithmetic":
+                score = df[cols].mean(axis=1).to_numpy()
+            elif compose == "geometric":
+                score = df[cols].prod(axis=1).to_numpy() ** (1 / len(cols))
+            else:
+                raise ValueError(f"{compose} is not a valid compose setting")
+            metric = self.metric(score, df[target].to_numpy())
+            if metric > best_score:
+                best_score = metric
+                best_cols = cols
+
+        self._score_components = best_cols
+
+        return best_score, best_cols

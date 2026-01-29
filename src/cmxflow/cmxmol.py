@@ -29,19 +29,23 @@ class Mol(Chem.Mol):
         super().__init__(mol)
         self._prop_cache: dict[str, Any] = super().GetPropsAsDict(includePrivate=True)
 
-    def SetProp(self, key: str, value: str, **kwargs):
+    def SetProp(self, key: str, value: str, **kwargs: bool) -> None:
+        """Set a string property, caching for pickle preservation."""
         self._prop_cache[key] = value
         super().SetProp(key, value, **kwargs)
 
-    def SetDoubleProp(self, key: str, value: float, **kwargs):
+    def SetDoubleProp(self, key: str, value: float, **kwargs: bool) -> None:
+        """Set a float property, caching for pickle preservation."""
         self._prop_cache[key] = value
         super().SetDoubleProp(key, value, **kwargs)
 
-    def SetBoolProp(self, key: str, value: bool, **kwargs):
+    def SetBoolProp(self, key: str, value: bool, **kwargs: bool) -> None:
+        """Set a bool property, caching for pickle preservation."""
         self._prop_cache[key] = value
         super().SetBoolProp(key, value, **kwargs)
 
-    def SetIntProp(self, key: str, value: int, **kwargs):
+    def SetIntProp(self, key: str, value: int, **kwargs: bool) -> None:
+        """Set an int property, caching for pickle preservation."""
         self._prop_cache[key] = value
         super().SetIntProp(key, value, **kwargs)
 
@@ -58,6 +62,7 @@ class Mol(Chem.Mol):
                 self.SetProp(key, str(value))
 
     def GetPropsAsDict(self, **kwargs: bool) -> dict[str, Any]:
+        """Get properties as dict, restoring cached properties first."""
         self.restore_properties()
         result: dict[str, Any] = super().GetPropsAsDict(**kwargs)
         return result

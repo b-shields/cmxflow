@@ -39,8 +39,7 @@ class MoleculeSimilarityBlock(MoleculeBlock):
 
     def __init__(self) -> None:
         """Initialize the similarity search block."""
-        super().__init__(input_files=["queries"])
-        self.name = "MoleculeSimilarity"
+        super().__init__(name="Molecule2DSimilarity", input_files=["queries"])
 
         # Register mutable parameters
         self.mutable(

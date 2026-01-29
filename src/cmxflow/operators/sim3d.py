@@ -34,8 +34,7 @@ class Molecule3DSimilarityBlock(MoleculeBlock):
 
     def __init__(self) -> None:
         """Initialize the 3D similarity block."""
-        super().__init__(input_files=["query"])
-        self.name = "Molecule3DSimilarity"
+        super().__init__(name="Molecule3DSimilarity", input_files=["query"])
 
         # Register mutable parameters
         self.mutable(

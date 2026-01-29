@@ -31,8 +31,7 @@ class MoleculeAlignBlock(MoleculeBlock):
 
     def __init__(self) -> None:
         """Initialize the molecular alignment block."""
-        super().__init__(input_files=["query"])
-        self.name = "MoleculeAlign"
+        super().__init__(name="MoleculeAlign", input_files=["query"])
 
         # Register mutable parameters
         self.mutable(

@@ -31,7 +31,7 @@ class EnumerateStereoBlock(MoleculeBlock):
 
     def __init__(self) -> None:
         """Initialize the stereoisomer enumeration block."""
-        super().__init__()
+        super().__init__(name="EnumerateStereochemistry")
 
     def _forward(self, mol: Chem.Mol) -> Chem.Mol | None:
         """Not used - this block overrides forward() directly."""
@@ -100,7 +100,7 @@ class ConformerGenerationBlock(MoleculeBlock):
 
     def __init__(self) -> None:
         """Initialize the conformer generation block."""
-        super().__init__()
+        super().__init__(name="ConformerGeneration")
 
         # Register mutable parameters
         self.mutable(

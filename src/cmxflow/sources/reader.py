@@ -7,8 +7,24 @@ from rdkit import Chem
 
 from cmxflow.block import SourceBlock
 from cmxflow.cmxmol import Mol, wrap_mol
-from cmxflow.sources.molecule import read_sdf, read_sdf_gz
-from cmxflow.sources.table import read_csv, read_parquet, read_smi
+from cmxflow.sources.molecule import read_mol2, read_sdf, read_sdf_gz
+from cmxflow.sources.table import read_csv, read_parquet, read_smi, read_smi_gz
+
+
+def _parse_suffix(path: Path) -> tuple[str, bool]:
+    """Parse file suffix and detect gzip compression.
+
+    Args:
+        path: Path to parse.
+
+    Returns:
+        Tuple of (base_suffix, is_gzipped).
+        Example: ".sdf.gz" -> (".sdf", True)
+    """
+    suffixes = [s.lower() for s in path.suffixes]
+    if suffixes and suffixes[-1] == ".gz":
+        return "".join(suffixes[:-1]), True
+    return "".join(suffixes), False
 
 
 def read_molecules(path: Path, wrap: bool = True) -> Iterator[Chem.Mol | Mol]:
@@ -17,8 +33,12 @@ def read_molecules(path: Path, wrap: bool = True) -> Iterator[Chem.Mol | Mol]:
     Supported formats:
         - .sdf: SDF files
         - .sdf.gz: Gzipped SDF files
+        - .mol2: Mol2 files
+        - .mol2.gz: Gzipped Mol2 files
         - .smi: SMILES files (space/tab separated)
+        - .smi.gz: Gzipped SMILES files
         - .csv: CSV files with SMILES column
+        - .csv.gz: Gzipped CSV files with SMILES column
         - .parquet: Parquet files with SMILES column
 
     Args:
@@ -34,20 +54,26 @@ def read_molecules(path: Path, wrap: bool = True) -> Iterator[Chem.Mol | Mol]:
         ValueError: If the file extension is not supported.
         FileNotFoundError: If the file does not exist.
     """
-    suffix = "".join(path.suffixes).lower()
+    base_suffix, is_gzipped = _parse_suffix(path)
 
-    if suffix == ".sdf.gz":
-        mols = read_sdf_gz(path)
-    elif suffix == ".sdf":
-        mols = read_sdf(path)
-    elif suffix == ".smi":
-        mols = read_smi(path)
-    elif suffix == ".csv":
-        mols = read_csv(path)
-    elif suffix == ".parquet":
+    if base_suffix == ".sdf":
+        mols = read_sdf_gz(path) if is_gzipped else read_sdf(path)
+    elif base_suffix == ".mol2":
+        if is_gzipped:
+            raise ValueError("Gzipped mol2 not supported.")
+        mols = read_mol2(path)
+    elif base_suffix == ".smi":
+        mols = read_smi_gz(path) if is_gzipped else read_smi(path)
+    elif base_suffix == ".csv":
+        mols = read_csv(path)  # pandas handles gzip automatically
+    elif base_suffix == ".parquet":
+        if is_gzipped:
+            raise ValueError(
+                "Gzipped parquet not supported; parquet has internal compression"
+            )
         mols = read_parquet(path)
     else:
-        raise ValueError(f"Unsupported file extension: {suffix}")
+        raise ValueError(f"Unsupported file extension: {base_suffix}")
 
     if wrap:
         for mol in mols:
@@ -59,7 +85,7 @@ def read_molecules(path: Path, wrap: bool = True) -> Iterator[Chem.Mol | Mol]:
 class MoleculeSourceBlock(SourceBlock):
     """Source block for reading molecules from various file formats.
 
-    Supports SDF, gzipped SDF, SMILES, CSV, and Parquet files.
+    Supports SDF, gzipped SDF, Mol2, SMILES, CSV, and Parquet files.
     File format is automatically detected based on extension.
 
     Args:

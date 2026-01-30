@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Any
 
-from cmxflow.block import Block, BlockBase, SinkBlock, SourceBlock
+from cmxflow.block import Block, BlockBase, ScoreBlock, SinkBlock, SourceBlock
 from cmxflow.parameter import Parameter
 from cmxflow.utils import text
 from cmxflow.utils.parallel import ParallelBlock
@@ -91,7 +91,7 @@ class Workflow:
             raise IndexError("A SourceBlock and SinkBlock are required")
         if not isinstance(self.blocks[0], SourceBlock):
             raise ValueError("The first block must be a SourceBlock")
-        if not isinstance(self.blocks[-1], SinkBlock):
+        if not isinstance(self.blocks[-1], (SinkBlock, ScoreBlock)):
             raise ValueError("The final block bust be a SinkBlock")
         for block in self.blocks[1:-1]:
             if not isinstance(block, (Block, ParallelBlock)):
@@ -114,8 +114,20 @@ class Workflow:
             if block.input_files is not None:
                 for key in block.input_files.keys():
                     required[f"{i}.file@{key}"] = str
+            if block.input_text is not None:
                 for key in block.input_text.keys():
                     required[f"{i}.text@{key}"] = str
+
+        if isinstance(self.blocks[-1], ScoreBlock):
+            i = len(self.blocks) - 1
+            block = self.blocks[-1]
+            if block.input_files is not None:
+                for key in block.input_files.keys():
+                    required[f"{i}.file@{key}"] = str
+            if block.input_text is not None:
+                for key in block.input_text.keys():
+                    required[f"{i}.text@{key}"] = str
+
         return required
 
     def set_required_input(self, required_inputs: dict[str, str]) -> None:
@@ -146,7 +158,9 @@ class Workflow:
             elif itype == "text":
                 self.blocks[bid].input_text[name] = required_inputs[key]
 
-    def forward(self, input_path: Path | str, output_path: Path | str) -> None:
+    def forward(
+        self, input_path: Path | str, output_path: Path | str = ""
+    ) -> tuple[float, tuple[str, ...] | None] | None:
         """Execute the workflow pipeline.
 
         Args:
@@ -164,13 +178,20 @@ class Workflow:
         for block in self.blocks[1:-1]:
             iter = block(iter)
 
-        self.blocks[-1](iter, output_path)
+        if isinstance(self.blocks[-1], SinkBlock):
+            self.blocks[-1](iter, output_path)
+            return None
+        elif isinstance(self.blocks[-1], ScoreBlock):
+            uid = tuple([str(p) for p in self.get_params()])
+            return self.blocks[-1](iter, uid)
+        return None
 
-    def __call__(self, input_path: Path, output_path: Path) -> Any:
+    def __call__(self, input_path: Path | str, output_path: Path | str = "") -> Any:
         """Execute the workflow.
 
         Args:
-            *args: Input arguments for the first block.
+            input_path: Input path.
+            output_path: Output path (optional).
 
         Returns:
             Output from the final block.

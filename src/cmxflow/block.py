@@ -263,17 +263,20 @@ class ScoreBlock(BlockBase):
         else:
             df = self.pooler(iter)
             self._scaler = MinMaxScaler()
-            cols = df.columns.values
-            df[cols] = self._scaler.fit_transform(df)
+            cols = df.drop(target, axis=1).columns.values
+            df[cols] = self._scaler.fit_transform(df[cols])
             self._cache[uid] = df
 
         # Compute scores for different combinations
         comb = self.params["combinations"].get()
-        compose = self.params["compose"]
-        possible = combinations(df.columns.values, min(df.shape[1], comb))
+        compose = self.params["compose"].get()
+        possible = combinations(
+            df.drop(target, axis=1).columns.values, min(df.shape[1], comb)
+        )
         best_score = -np.inf
-        best_cols: tuple[str, ...] | None = None
+        best_cols: list[str] | None = None
         for cols in possible:
+            cols = list(cols)
             if compose == "arithmetic":
                 score = df[cols].mean(axis=1).to_numpy()
             elif compose == "geometric":
@@ -285,6 +288,6 @@ class ScoreBlock(BlockBase):
                 best_score = metric
                 best_cols = cols
 
-        self._score_components = best_cols
+        self._score_components = tuple(best_cols) if best_cols is not None else None
 
-        return best_score, best_cols
+        return best_score, self._score_components

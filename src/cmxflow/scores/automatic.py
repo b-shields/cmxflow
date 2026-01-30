@@ -100,7 +100,7 @@ def enrichment_auc(scores: np.ndarray, labels: np.ndarray) -> float:
     y = cumulative_hits / total_hits  # Fraction of hits found
 
     # Compute AUC using trapezoidal rule
-    auc: float = float(np.trapz(y, x))
+    auc: float = float(np.trapezoid(y, x))
     return auc
 
 

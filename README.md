@@ -69,3 +69,5 @@ Ideas:
     - Surfaces required input files from constituent blocks
     - Surfaces mutable parameters and allows them to be set across blocks
     - Has a `__repr__` method that generates a nice colored text view of how blocks are connected
+
+Plan the implementation of `cmxflow.operators.align`. It should include a `MoleculeAlignBlock` class that inherits from `MoleculeBlock`. It should require a input_file called query with molecules (and compute 3D conformers only if not no present in the input) and compute align molecules in different ways (crippen, mmff, mcs and anything else in rdkit) controled by mutable parameters. If should align all conformers of an input molecule to all references and return only the conformer with the highest shape similarity (delete the others).

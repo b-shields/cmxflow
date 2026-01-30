@@ -1,11 +1,37 @@
 """Reader functions for tabular files containing SMILES."""
 
+import gzip
 from collections.abc import Iterator
 from pathlib import Path
+from typing import IO
 
 import pandas as pd
 import pyarrow.parquet as pq
 from rdkit import Chem
+
+
+def _read_smi_from_handle(handle: IO[str]) -> Iterator[Chem.Mol]:
+    """Read molecules from a SMILES file handle.
+
+    Args:
+        handle: File handle opened in text mode.
+
+    Yields:
+        RDKit Mol objects for each valid SMILES in the content.
+    """
+    for line in handle:
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        smiles = parts[0]
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is not None:
+            if len(parts) > 1:
+                mol.SetProp("_Name", parts[1])
+            for i, value in enumerate(parts[2:], start=2):
+                mol.SetProp(f"Column_{i}", value)
+            yield mol
 
 
 def read_smi(path: Path) -> Iterator[Chem.Mol]:
@@ -25,19 +51,27 @@ def read_smi(path: Path) -> Iterator[Chem.Mol]:
         FileNotFoundError: If the file does not exist.
     """
     with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split()
-            smiles = parts[0]
-            mol = Chem.MolFromSmiles(smiles)
-            if mol is not None:
-                if len(parts) > 1:
-                    mol.SetProp("_Name", parts[1])
-                for i, value in enumerate(parts[2:], start=2):
-                    mol.SetProp(f"Column_{i}", value)
-                yield mol
+        yield from _read_smi_from_handle(f)
+
+
+def read_smi_gz(path: Path) -> Iterator[Chem.Mol]:
+    """Read molecules from a gzipped SMILES file.
+
+    Expects space or tab separated format with no header.
+    SMILES should be in the first column. Additional columns
+    are attached as molecule properties.
+
+    Args:
+        path: Path to the gzipped SMILES file (.smi.gz).
+
+    Yields:
+        RDKit Mol objects for each valid SMILES in the file.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+    """
+    with gzip.open(path, "rt") as f:
+        yield from _read_smi_from_handle(f)
 
 
 def read_csv(path: Path, chunksize: int = 1000) -> Iterator[Chem.Mol]:

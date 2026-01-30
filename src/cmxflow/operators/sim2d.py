@@ -67,6 +67,10 @@ class MoleculeSimilarityBlock(MoleculeBlock):
         self._query_fingerprints: list[ExplicitBitVect] | None = None
         self._query_names: list[str] | None = None
 
+    def reset_cache(self) -> None:
+        self._query_fingerprints = None
+        self._query_names = None
+
     def _get_fingerprint_func(self) -> FingerprintFunc:
         """Get the fingerprint function based on current parameters.
 

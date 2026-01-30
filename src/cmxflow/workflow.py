@@ -160,7 +160,7 @@ class Workflow:
 
     def forward(
         self, input_path: Path | str, output_path: Path | str = ""
-    ) -> tuple[float, tuple[str, ...] | None] | None:
+    ) -> tuple[float, list[str] | None] | None:
         """Execute the workflow pipeline.
 
         Args:

@@ -12,6 +12,7 @@ rdkit = "^2025.4"
 pandas = "^2.0"
 pyarrow = "*"
 scikit-learn = "^1.7"
+optuna = "^3.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"

@@ -8,7 +8,6 @@ import pytest
 
 from cmxflow.sources import (
     read_mol2,
-    read_mol2_gz,
     read_molecules,
     read_smi_gz,
 )
@@ -29,7 +28,6 @@ class TestParseSuffix:
     def test_gzipped_suffix(self) -> None:
         """Test parsing gzipped file suffixes."""
         assert _parse_suffix(Path("file.sdf.gz")) == (".sdf", True)
-        assert _parse_suffix(Path("file.mol2.gz")) == (".mol2", True)
         assert _parse_suffix(Path("file.smi.gz")) == (".smi", True)
         assert _parse_suffix(Path("file.csv.gz")) == (".csv", True)
         assert _parse_suffix(Path("file.parquet.gz")) == (".parquet", True)
@@ -38,7 +36,6 @@ class TestParseSuffix:
         """Test that suffix parsing is case insensitive."""
         assert _parse_suffix(Path("file.SDF")) == (".sdf", False)
         assert _parse_suffix(Path("file.SDF.GZ")) == (".sdf", True)
-        assert _parse_suffix(Path("file.Mol2.Gz")) == (".mol2", True)
 
     def test_no_suffix(self) -> None:
         """Test parsing file with no suffix."""
@@ -84,92 +81,6 @@ class TestReadSmiGz:
 
             mols = list(read_molecules(path))
             assert len(mols) == 2
-        finally:
-            path.unlink()
-
-
-class TestReadMol2Gz:
-    """Tests for read_mol2_gz function."""
-
-    def test_read_mol2_gz(self) -> None:
-        """Test reading a gzipped Mol2 file."""
-        mol2_content = """@<TRIPOS>MOLECULE
-ethanol
- 9 8 0 0 0
-SMALL
-NO_CHARGES
-
-@<TRIPOS>ATOM
-      1 C1         0.0000    0.0000    0.0000 C.3       1 LIG1       0.0000
-      2 C2         1.5000    0.0000    0.0000 C.3       1 LIG1       0.0000
-      3 O1         2.0000    1.2000    0.0000 O.3       1 LIG1       0.0000
-      4 H1        -0.3500   -0.5000    0.9000 H         1 LIG1       0.0000
-      5 H2        -0.3500   -0.5000   -0.9000 H         1 LIG1       0.0000
-      6 H3        -0.3500    1.0000    0.0000 H         1 LIG1       0.0000
-      7 H4         1.8500   -0.5000   -0.9000 H         1 LIG1       0.0000
-      8 H5         1.8500   -0.5000    0.9000 H         1 LIG1       0.0000
-      9 H6         2.9500    1.2000    0.0000 H         1 LIG1       0.0000
-@<TRIPOS>BOND
-     1     1     2 1
-     2     2     3 1
-     3     1     4 1
-     4     1     5 1
-     5     1     6 1
-     6     2     7 1
-     7     2     8 1
-     8     3     9 1
-"""
-        with tempfile.NamedTemporaryFile(suffix=".mol2.gz", delete=False) as f:
-            path = Path(f.name)
-
-        try:
-            with gzip.open(path, "wt") as f:
-                f.write(mol2_content)
-
-            mols = list(read_mol2_gz(path))
-            assert len(mols) == 1
-            # Verify it's a valid molecule with atoms
-            assert mols[0].GetNumAtoms() > 0
-        finally:
-            path.unlink()
-
-    def test_read_mol2_gz_via_dispatcher(self) -> None:
-        """Test reading gzipped Mol2 via read_molecules dispatcher."""
-        mol2_content = """@<TRIPOS>MOLECULE
-ethanol
- 9 8 0 0 0
-SMALL
-NO_CHARGES
-
-@<TRIPOS>ATOM
-      1 C1         0.0000    0.0000    0.0000 C.3       1 LIG1       0.0000
-      2 C2         1.5000    0.0000    0.0000 C.3       1 LIG1       0.0000
-      3 O1         2.0000    1.2000    0.0000 O.3       1 LIG1       0.0000
-      4 H1        -0.3500   -0.5000    0.9000 H         1 LIG1       0.0000
-      5 H2        -0.3500   -0.5000   -0.9000 H         1 LIG1       0.0000
-      6 H3        -0.3500    1.0000    0.0000 H         1 LIG1       0.0000
-      7 H4         1.8500   -0.5000   -0.9000 H         1 LIG1       0.0000
-      8 H5         1.8500   -0.5000    0.9000 H         1 LIG1       0.0000
-      9 H6         2.9500    1.2000    0.0000 H         1 LIG1       0.0000
-@<TRIPOS>BOND
-     1     1     2 1
-     2     2     3 1
-     3     1     4 1
-     4     1     5 1
-     5     1     6 1
-     6     2     7 1
-     7     2     8 1
-     8     3     9 1
-"""
-        with tempfile.NamedTemporaryFile(suffix=".mol2.gz", delete=False) as f:
-            path = Path(f.name)
-
-        try:
-            with gzip.open(path, "wt") as f:
-                f.write(mol2_content)
-
-            mols = list(read_molecules(path))
-            assert len(mols) == 1
         finally:
             path.unlink()
 

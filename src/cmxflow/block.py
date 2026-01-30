@@ -89,6 +89,10 @@ class BlockBase(ABC):
     @abstractmethod
     def __call__(self, *arg: Any) -> Any: ...
 
+    def reset_cache(self) -> None:
+        """Method called in each optimization iteration."""
+        pass
+
 
 class Block(BlockBase):
     """Block that transforms items from an iterator.
@@ -242,7 +246,7 @@ class ScoreBlock(BlockBase):
         self.metric = metric
         self._cache: dict[tuple[str, ...], pd.DataFrame] = {}
         self._scaler: None | MinMaxScaler = None
-        self._score_components: tuple[str, ...] | None = None
+        self._score_components: list[str] | None = None
         self.mutable(
             Categorical("compose", "geometric", ["arithmetic", "geometric"]),
             Integer("combinations", 1, 1, 5),
@@ -250,7 +254,7 @@ class ScoreBlock(BlockBase):
 
     def __call__(
         self, iter: Iterator[Any], uid: tuple[str, ...]
-    ) -> tuple[float, tuple[str, ...] | None]:
+    ) -> tuple[float, list[str] | None]:
         """Score iterator results against target, using cache if available."""
         target = self.input_text.get("target")
         if not target:
@@ -288,6 +292,6 @@ class ScoreBlock(BlockBase):
                 best_score = metric
                 best_cols = cols
 
-        self._score_components = tuple(best_cols) if best_cols is not None else None
+        self._score_components = list(best_cols) if best_cols is not None else None
 
         return best_score, self._score_components

@@ -121,10 +121,9 @@ class Optimizer:
             block.reset_cache()
         self._suggest_params(trial)
         try:
-            result = self.workflow.forward(self.input_path)
-            if result is None:
+            score = self.workflow.forward(self.input_path)
+            if score is None:
                 raise optuna.TrialPruned("Workflow returned None")
-            score, _ = result
             return score
         except Exception as e:
             raise optuna.TrialPruned(f"Trial failed: {e}") from e

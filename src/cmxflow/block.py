@@ -2,15 +2,10 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from itertools import combinations
 from pathlib import Path
 from typing import Any, Callable
 
-import numpy as np
-import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
-
-from cmxflow.parameter import Categorical, Integer, Parameter
+from cmxflow.parameter import Parameter
 from cmxflow.utils import text
 
 
@@ -229,69 +224,87 @@ class SinkBlock(BlockBase):
 
 
 class ScoreBlock(BlockBase):
-    """Block that scores workflow outputs against a target.
+    """Block with state-dependent behavior for optimization vs normal execution.
 
-    Pools iterator results into a DataFrame, computes scores, and evaluates
-    against a target using a metric function. Caches results by unique ID.
+    During optimization (when uid is provided), computes a score via objective().
+    During normal execution, passes items through via forward().
+
+    Subclasses must implement objective() for optimization scoring.
+    Optionally override forward() to transform items during normal execution.
     """
 
     def __init__(
         self,
-        pooler: Callable[[Iterator[Any]], pd.DataFrame],
-        metric: Callable[[np.ndarray, np.ndarray], float],
+        name: str | None = None,
+        input_files: list[str] | None = None,
+        input_text: list[str] | None = None,
     ) -> None:
-        """Initialize with pooler, scorer, and metric functions."""
-        super().__init__(input_text=["target"])
-        self.pooler = pooler
-        self.metric = metric
-        self._cache: dict[tuple[str, ...], pd.DataFrame] = {}
-        self._scaler: None | MinMaxScaler = None
-        self._score_components: list[str] | None = None
-        self.mutable(
-            Categorical("compose", "geometric", ["arithmetic", "geometric"]),
-            Integer("combinations", 1, 1, 5),
-        )
+        """Initialize the score block.
+
+        Args:
+            name: Optional name for the block.
+            input_files: Optional files required at run time.
+            input_text: Optional text required at run time.
+        """
+        super().__init__(name=name, input_files=input_files, input_text=input_text)
+        self._cache: dict[tuple[str, ...], Any] = {}
+
+    @abstractmethod
+    def objective(self, iter: Iterator[Any]) -> float:
+        """Compute the optimization objective score.
+
+        Called only during optimization. Must be implemented by subclasses.
+
+        Args:
+            iter: Iterator of items to score.
+
+        Returns:
+            Score value (higher is better for maximize, lower for minimize).
+        """
+        ...
+
+    def forward(self, item: Any) -> Any:
+        """Transform a single item during normal (non-optimization) execution.
+
+        Default implementation passes items through unchanged.
+        Override to filter or transform items.
+
+        Args:
+            item: Input item.
+
+        Returns:
+            Transformed item, or None to filter it out.
+        """
+        return item
 
     def __call__(
-        self, iter: Iterator[Any], uid: tuple[str, ...]
-    ) -> tuple[float, list[str] | None]:
-        """Score iterator results against target, using cache if available."""
-        target = self.input_text.get("target")
-        if not target:
-            raise ValueError("ScoreBlock requires a 'target' as input")
+        self, iter: Iterator[Any], uid: tuple[str, ...] | None = None
+    ) -> float | Iterator[Any]:
+        """Execute the score block.
 
-        # Collect cached result if possible
-        if uid in self._cache:
-            del iter
-            df = self._cache[uid]
+        Args:
+            iter: Iterator of input items.
+            uid: Unique identifier for caching (present during optimization).
+
+        Returns:
+            If uid is provided (optimization mode): float score.
+            If uid is None (normal mode): Iterator of transformed items.
+        """
+        if uid is not None:
+            return self.objective(iter)
         else:
-            df = self.pooler(iter)
-            self._scaler = MinMaxScaler()
-            cols = df.drop(target, axis=1).columns.values
-            df[cols] = self._scaler.fit_transform(df[cols])
-            self._cache[uid] = df
+            return self._forward_iter(iter)
 
-        # Compute scores for different combinations
-        comb = self.params["combinations"].get()
-        compose = self.params["compose"].get()
-        possible = combinations(
-            df.drop(target, axis=1).columns.values, min(df.shape[1], comb)
-        )
-        best_score = -np.inf
-        best_cols: list[str] | None = None
-        for cols in possible:
-            cols = list(cols)
-            if compose == "arithmetic":
-                score = df[cols].mean(axis=1).to_numpy()
-            elif compose == "geometric":
-                score = df[cols].prod(axis=1).to_numpy() ** (1 / len(cols))
-            else:
-                raise ValueError(f"{compose} is not a valid compose setting")
-            metric = self.metric(score, df[target].to_numpy())
-            if metric > best_score:
-                best_score = metric
-                best_cols = cols
+    def _forward_iter(self, iter: Iterator[Any]) -> Iterator[Any]:
+        """Apply forward() to each item in the iterator.
 
-        self._score_components = list(best_cols) if best_cols is not None else None
+        Args:
+            iter: Iterator of input items.
 
-        return best_score, self._score_components
+        Yields:
+            Transformed items (items where forward returns None are filtered).
+        """
+        for item in iter:
+            result = self.forward(item)
+            if result is not None:
+                yield result

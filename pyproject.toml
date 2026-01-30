@@ -13,6 +13,10 @@ pandas = "^2.0"
 pyarrow = "*"
 scikit-learn = "^1.7"
 optuna = "^3.0"
+fastmcp = "^2.0"
+
+[tool.poetry.scripts]
+cmxflow-mcp = "cmxflow.mcp:run"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"

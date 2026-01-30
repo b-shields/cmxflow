@@ -27,17 +27,6 @@ def dummy_writer(iter: Iterator[Any], _path: Path) -> None:
         pass
 
 
-def dummy_pooler(iter: Iterator[Any]) -> pd.DataFrame:
-    """Dummy pooler that collects results into a DataFrame."""
-    data = list(iter)
-    return pd.DataFrame(data)
-
-
-def dummy_metric(pred: np.ndarray, target: np.ndarray) -> float:
-    """Dummy metric that computes correlation."""
-    return float(np.corrcoef(pred, target)[0, 1])
-
-
 class TransformBlock(Block):
     """Block that applies a parameterized transformation."""
 
@@ -87,17 +76,32 @@ class NoParamBlock(Block):
         return item
 
 
+class DummyScoreBlock(ScoreBlock):
+    """Concrete ScoreBlock for testing that computes correlation."""
+
+    def objective(self, iter: Iterator[Any]) -> float:
+        """Compute correlation between value and target columns."""
+        data = list(iter)
+        if not data:
+            return 0.0
+        df = pd.DataFrame(data)
+        if "value" not in df.columns or "target" not in df.columns:
+            return 0.0
+        pred = df["value"].to_numpy()
+        target = df["target"].to_numpy()
+        if len(pred) < 2:
+            return 0.0
+        corr = np.corrcoef(pred, target)[0, 1]
+        return float(corr) if not np.isnan(corr) else 0.0
+
+
 class NoParamScoreBlock(ScoreBlock):
     """ScoreBlock without any parameters for testing."""
 
-    def __init__(
-        self,
-        pooler: Any,
-        metric: Any,
-    ) -> None:
-        """Initialize without registering parameters."""
-        super().__init__(pooler, metric)
-        self.params.clear()
+    def objective(self, iter: Iterator[Any]) -> float:
+        """Return zero score."""
+        list(iter)  # Consume iterator
+        return 0.0
 
 
 class TestOptimizerInit:
@@ -109,9 +113,8 @@ class TestOptimizerInit:
         workflow.add(
             SourceBlock(dummy_reader),
             TransformBlock(),
-            ScoreBlock(dummy_pooler, dummy_metric),
+            DummyScoreBlock(),
         )
-        workflow.blocks[-1].input_text["target"] = "target"
 
         optimizer = Optimizer(workflow, input_path="test.csv")
         assert optimizer.workflow is workflow
@@ -135,7 +138,7 @@ class TestOptimizerInit:
         workflow.add(
             SourceBlock(dummy_reader),
             NoParamBlock(),
-            NoParamScoreBlock(dummy_pooler, dummy_metric),
+            NoParamScoreBlock(),
         )
 
         with pytest.raises(ValueError, match="no optimizable parameters"):
@@ -147,9 +150,8 @@ class TestOptimizerInit:
         workflow.add(
             SourceBlock(dummy_reader),
             TransformBlock(),
-            ScoreBlock(dummy_pooler, dummy_metric),
+            DummyScoreBlock(),
         )
-        workflow.blocks[-1].input_text["target"] = "target"
 
         optimizer = Optimizer(workflow, input_path="test.csv")
         assert isinstance(optimizer.input_path, Path)
@@ -164,9 +166,8 @@ class TestOptimizerOptimize:
         workflow.add(
             SourceBlock(dummy_reader),
             TransformBlock(),
-            ScoreBlock(dummy_pooler, dummy_metric),
+            DummyScoreBlock(),
         )
-        workflow.blocks[-1].input_text["target"] = "target"
 
         optimizer = Optimizer(workflow, input_path="test.csv")
         study = optimizer.optimize(n_trials=3, show_progress_bar=False)
@@ -180,9 +181,8 @@ class TestOptimizerOptimize:
         workflow.add(
             SourceBlock(dummy_reader),
             TransformBlock(),
-            ScoreBlock(dummy_pooler, dummy_metric),
+            DummyScoreBlock(),
         )
-        workflow.blocks[-1].input_text["target"] = "target"
 
         optimizer = Optimizer(workflow, input_path="test.csv")
         study = optimizer.optimize(
@@ -197,9 +197,8 @@ class TestOptimizerOptimize:
         workflow.add(
             SourceBlock(dummy_reader),
             CategoricalBlock(),
-            ScoreBlock(dummy_pooler, dummy_metric),
+            DummyScoreBlock(),
         )
-        workflow.blocks[-1].input_text["target"] = "target"
 
         optimizer = Optimizer(workflow, input_path="test.csv")
         study = optimizer.optimize(n_trials=3, show_progress_bar=False)
@@ -217,9 +216,8 @@ class TestOptimizerProperties:
         workflow.add(
             SourceBlock(dummy_reader),
             TransformBlock(),
-            ScoreBlock(dummy_pooler, dummy_metric),
+            DummyScoreBlock(),
         )
-        workflow.blocks[-1].input_text["target"] = "target"
 
         optimizer = Optimizer(workflow, input_path="test.csv")
 
@@ -232,9 +230,8 @@ class TestOptimizerProperties:
         workflow.add(
             SourceBlock(dummy_reader),
             TransformBlock(),
-            ScoreBlock(dummy_pooler, dummy_metric),
+            DummyScoreBlock(),
         )
-        workflow.blocks[-1].input_text["target"] = "target"
 
         optimizer = Optimizer(workflow, input_path="test.csv")
 
@@ -247,9 +244,8 @@ class TestOptimizerProperties:
         workflow.add(
             SourceBlock(dummy_reader),
             TransformBlock(),
-            ScoreBlock(dummy_pooler, dummy_metric),
+            DummyScoreBlock(),
         )
-        workflow.blocks[-1].input_text["target"] = "target"
 
         optimizer = Optimizer(workflow, input_path="test.csv")
 
@@ -262,9 +258,8 @@ class TestOptimizerProperties:
         workflow.add(
             SourceBlock(dummy_reader),
             TransformBlock(),
-            ScoreBlock(dummy_pooler, dummy_metric),
+            DummyScoreBlock(),
         )
-        workflow.blocks[-1].input_text["target"] = "target"
 
         optimizer = Optimizer(workflow, input_path="test.csv")
         optimizer.optimize(n_trials=2, show_progress_bar=False)
@@ -279,9 +274,8 @@ class TestOptimizerProperties:
         workflow.add(
             SourceBlock(dummy_reader),
             TransformBlock(),
-            ScoreBlock(dummy_pooler, dummy_metric),
+            DummyScoreBlock(),
         )
-        workflow.blocks[-1].input_text["target"] = "target"
 
         optimizer = Optimizer(workflow, input_path="test.csv")
         optimizer.optimize(n_trials=2, show_progress_bar=False)
@@ -299,9 +293,8 @@ class TestSetBestParams:
         workflow.add(
             SourceBlock(dummy_reader),
             TransformBlock(),
-            ScoreBlock(dummy_pooler, dummy_metric),
+            DummyScoreBlock(),
         )
-        workflow.blocks[-1].input_text["target"] = "target"
 
         optimizer = Optimizer(workflow, input_path="test.csv")
 
@@ -315,9 +308,8 @@ class TestSetBestParams:
         workflow.add(
             SourceBlock(dummy_reader),
             transform_block,
-            ScoreBlock(dummy_pooler, dummy_metric),
+            DummyScoreBlock(),
         )
-        workflow.blocks[-1].input_text["target"] = "target"
 
         optimizer = Optimizer(workflow, input_path="test.csv")
         optimizer.optimize(n_trials=3, show_progress_bar=False)
@@ -338,9 +330,8 @@ class TestSuggestParam:
         workflow.add(
             SourceBlock(dummy_reader),
             TransformBlock(),
-            ScoreBlock(dummy_pooler, dummy_metric),
+            DummyScoreBlock(),
         )
-        workflow.blocks[-1].input_text["target"] = "target"
 
         optimizer = Optimizer(workflow, input_path="test.csv")
 

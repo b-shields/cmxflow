@@ -2,7 +2,7 @@
 
 import logging
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -10,6 +10,7 @@ from rdkit import Chem
 
 from cmxflow.block import ScoreBlock
 from cmxflow.cmxmol import Mol as CmxMol
+from cmxflow.parameter import Categorical
 
 logger = logging.getLogger(__name__)
 
@@ -105,15 +106,68 @@ def enrichment_auc(scores: np.ndarray, labels: np.ndarray) -> float:
 
 
 class EnrichmentScoreBlock(ScoreBlock):
-    """ScoreBlock configured for enrichment-based molecular scoring.
+    """ScoreBlock for enrichment-based molecular scoring.
 
     Uses molecule properties as features and computes enrichment AUC as the
     optimization metric. Non-numeric properties are automatically filtered.
     """
 
-    def __init__(self) -> None:
-        """Initialize with molecule pooler and enrichment AUC metric."""
-        super().__init__(
-            pooler=mol_to_dataframe,
-            metric=enrichment_auc,
-        )
+    def __init__(
+        self,
+        pooler: Callable[[Iterator[Any]], pd.DataFrame] = mol_to_dataframe,
+        metric: Callable[[np.ndarray, np.ndarray], float] = enrichment_auc,
+    ) -> None:
+        """Initialize with scoring configuration.
+
+        Args:
+            score_column: Name of the column to use as the score.
+            target_column: Name of the column containing target labels.
+            pooler: Function to convert iterator to DataFrame.
+            metric: Function to compute metric from scores and labels.
+        """
+        super().__init__(input_text=["target"])
+        self.pooler = pooler
+        self.metric = metric
+
+    def objective(self, iter: Iterator[Chem.Mol | CmxMol]) -> float:
+        """Compute enrichment AUC for the given molecules.
+
+        Args:
+            iter: Iterator of molecules with properties.
+
+        Returns:
+            Enrichment AUC score.
+        """
+        df = self.pooler(iter)
+        target_col = self.input_text["target"]
+
+        if df.empty:
+            logger.warning("Empty DataFrame, returning 0.0")
+            return 0.0
+
+        # Dynamically set score parameter from columns
+        if not self.get_params():
+            cols = list(df.drop(target_col, axis=1).columns)
+            self.mutable(Categorical("score", cols[0], cols))
+
+        score_col = self.get_params()["score"].get()
+
+        if score_col not in df.columns:
+            raise ValueError(f"Score column '{score_col}' not found in data")
+        if target_col not in df.columns:
+            raise ValueError(f"Target column '{target_col}' not found in data")
+
+        scores = df[score_col].to_numpy()
+        labels = df[target_col].to_numpy()
+
+        return self.metric(scores, labels)
+
+    def forward(self, mol: Chem.Mol | CmxMol) -> Chem.Mol | CmxMol:
+        if not self.get_params():
+            return mol
+
+        score = mol.GetPropsAsDict().get(self.get_params()["score"].get())
+        if score is not None:
+            mol.SetDoubleProp("workflow_score", float(score))
+
+        return mol

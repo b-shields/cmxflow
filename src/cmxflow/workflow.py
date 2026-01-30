@@ -30,6 +30,10 @@ class Workflow:
         self.name = name
         self.blocks: list[BlockBase] = []
 
+    def reset_cache(self) -> None:
+        for block in self.blocks:
+            block.reset_cache()
+
     def add(self, *blocks: Any) -> "Workflow":
         """Add a block to the end of the workflow.
 
@@ -41,6 +45,7 @@ class Workflow:
         """
         for block in blocks:
             self.blocks.append(block)
+        self.reset_cache()
         return self
 
     def insert(self, index: int, block: BlockBase) -> "Workflow":
@@ -92,9 +97,9 @@ class Workflow:
         if not isinstance(self.blocks[0], SourceBlock):
             raise ValueError("The first block must be a SourceBlock")
         if not isinstance(self.blocks[-1], (SinkBlock, ScoreBlock)):
-            raise ValueError("The final block bust be a SinkBlock")
+            raise ValueError("The final block bust be a SinkBlock or ScoreBlock")
         for block in self.blocks[1:-1]:
-            if not isinstance(block, (Block, ParallelBlock)):
+            if not isinstance(block, (Block, ParallelBlock, ScoreBlock)):
                 raise ValueError("Operator blocks must be a (Parallel)Block")
         # Compute properties
         self._n = len(self.blocks)
@@ -160,12 +165,15 @@ class Workflow:
 
     def forward(
         self, input_path: Path | str, output_path: Path | str = ""
-    ) -> tuple[float, list[str] | None] | None:
+    ) -> float | None:
         """Execute the workflow pipeline.
 
         Args:
             input_path: Path to the input file for the SourceBlock.
             output_path: Path to the output file for the SinkBlock.
+
+        Returns:
+            Score value if workflow ends with ScoreBlock, None otherwise.
         """
         self.check()
 
@@ -183,7 +191,10 @@ class Workflow:
             return None
         elif isinstance(self.blocks[-1], ScoreBlock):
             uid = tuple([str(p) for p in self.get_params()])
-            return self.blocks[-1](iter, uid)
+            result = self.blocks[-1](iter, uid)
+            if isinstance(result, float):
+                return result
+            return None
         return None
 
     def __call__(self, input_path: Path | str, output_path: Path | str = "") -> Any:

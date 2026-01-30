@@ -34,7 +34,6 @@ def read_molecules(path: Path, wrap: bool = True) -> Iterator[Chem.Mol | Mol]:
         - .sdf: SDF files
         - .sdf.gz: Gzipped SDF files
         - .mol2: Mol2 files
-        - .mol2.gz: Gzipped Mol2 files
         - .smi: SMILES files (space/tab separated)
         - .smi.gz: Gzipped SMILES files
         - .csv: CSV files with SMILES column

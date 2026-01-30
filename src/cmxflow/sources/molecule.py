@@ -56,19 +56,3 @@ def read_sdf_gz(path: Path) -> Iterator[Chem.Mol]:
         for mol in supplier:
             if mol is not None:
                 yield mol
-
-
-def read_mol2_gz(path: Path) -> Iterator[Chem.Mol]:
-    """Read molecule from a gzipped Mol2 file.
-
-    Args:
-        path: Path to the gzipped Mol2 file (.mol2.gz).
-
-    Yields:
-        RDKit Mol object.
-    """
-    with gzip.open(path, "rt") as f:
-        mol2_block = f.read()
-    mol = Chem.MolFromMol2Block(mol2_block)
-    if mol is not None:
-        yield mol

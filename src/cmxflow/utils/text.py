@@ -1,3 +1,5 @@
+"""Text formatting utilities for workflow visualization."""
+
 import re
 from typing import Any
 

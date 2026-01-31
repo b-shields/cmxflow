@@ -10,10 +10,12 @@ from cmxflow.block import ScoreBlock, SinkBlock
 from cmxflow.mcp.state import (
     get_available_blocks,
     get_block_descriptions,
+    get_executor,
     get_global_state,
     reset_global_state,
 )
 from cmxflow.operators import RDKitBlock
+from cmxflow.opt import Optimizer
 from cmxflow.sinks import MoleculeSinkBlock
 from cmxflow.sources import MoleculeSourceBlock
 
@@ -428,4 +430,329 @@ def run_workflow(
         inputs=inputs,
         input_file=input_file,
         output_file=output_file,
+    )
+
+
+def _run_optimization(
+    optimizer: Optimizer,
+    n_trials: int,
+    direction: str,
+    timeout: float | None,
+) -> None:
+    """Run optimization in background thread.
+
+    Args:
+        optimizer: The optimizer instance.
+        n_trials: Number of optimization trials.
+        direction: Optimization direction ("maximize" or "minimize").
+        timeout: Optional timeout in seconds.
+    """
+    optimizer.optimize(
+        n_trials=n_trials,
+        direction=direction,
+        timeout=timeout,
+        show_progress_bar=False,
+        n_jobs=1,
+    )
+
+
+def _optimize_workflow_impl(
+    action: str,
+    n_trials: int | None = None,
+    input_file: str | None = None,
+    inputs: dict[str, str] | None = None,
+    direction: str = "maximize",
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Implementation of optimize_workflow logic.
+
+    Args:
+        action: One of "start", "status", "get_best_params", "set_best_params",
+            "cancel".
+        n_trials: Number of optimization trials (required for "start").
+        input_file: Path to input molecule file (required for "start").
+        inputs: Optional required inputs (files/text) for workflow blocks.
+        direction: "maximize" or "minimize" (default: "maximize").
+        timeout: Optional timeout in seconds.
+
+    Returns:
+        Optimization status or results.
+    """
+    state = get_global_state()
+
+    if action == "start":
+        # Validation checks
+        if state.workflow is None:
+            return {
+                "status": "error",
+                "message": "No workflow exists. "
+                "Use build_workflow(action='create') first.",
+            }
+
+        if not state.validated:
+            return {
+                "status": "error",
+                "message": "Workflow not validated. "
+                "Use build_workflow(action='validate') first.",
+            }
+
+        # Check workflow ends with ScoreBlock
+        if not state.workflow.blocks or not isinstance(
+            state.workflow.blocks[-1], ScoreBlock
+        ):
+            last_block = (
+                type(state.workflow.blocks[-1]).__name__
+                if state.workflow.blocks
+                else "None"
+            )
+            return {
+                "status": "error",
+                "message": f"Workflow must end with ScoreBlock for optimization. "
+                f"Current ending: {last_block}",
+            }
+
+        # Check for optimizable parameters
+        if not state.workflow.get_params():
+            return {
+                "status": "error",
+                "message": "Workflow has no optimizable parameters",
+            }
+
+        # Check if optimization already running
+        if (
+            state.optimization_future is not None
+            and not state.optimization_future.done()
+        ):
+            return {
+                "status": "error",
+                "message": "Optimization already in progress. "
+                "Use action='status' to check progress.",
+            }
+
+        # Validate required parameters
+        if n_trials is None:
+            return {
+                "status": "error",
+                "message": "Must provide n_trials for start action",
+            }
+
+        if input_file is None:
+            return {
+                "status": "error",
+                "message": "Must provide input_file for start action",
+            }
+
+        input_path = Path(input_file)
+        if not input_path.is_file():
+            return {
+                "status": "error",
+                "message": f"Input file not found: {input_file}",
+            }
+
+        # Validate direction early
+        if direction not in ("maximize", "minimize"):
+            return {
+                "status": "error",
+                "message": f"Invalid direction: {direction}. "
+                "Must be 'maximize' or 'minimize'.",
+            }
+
+        # Set inputs if provided
+        if inputs is not None:
+            try:
+                state.workflow.set_required_input(inputs)
+                state.inputs_set = True
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "message": f"Failed to set inputs: {e}",
+                }
+
+        # Check if required inputs are set
+        required = state.workflow.get_required_input()
+        if required and not state.inputs_set:
+            return {
+                "status": "error",
+                "message": "Required inputs not set. "
+                "Provide inputs parameter or use run_workflow(action='set_inputs').",
+                "required_inputs": {k: str(v) for k, v in required.items()},
+            }
+
+        # Start optimization
+        try:
+            state.optimizer = Optimizer(state.workflow, input_path)
+            state.optimization_error = None
+            executor = get_executor()
+            state.optimization_future = executor.submit(
+                _run_optimization,
+                state.optimizer,
+                n_trials,
+                direction,
+                timeout,
+            )
+            return {
+                "status": "started",
+                "message": f"Optimization started with {n_trials} trials",
+                "n_trials": n_trials,
+                "direction": direction,
+            }
+        except ValueError as e:
+            return {
+                "status": "error",
+                "message": str(e),
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Failed to start optimization: {e}",
+            }
+
+    elif action == "status":
+        if state.optimization_future is None:
+            return {
+                "status": "no_optimization",
+                "message": "No optimization running",
+            }
+
+        if state.optimization_future.done():
+            try:
+                state.optimization_future.result()
+                if state.optimizer is None:
+                    return {
+                        "status": "failed",
+                        "error": "Optimizer was not initialized",
+                    }
+                return {
+                    "status": "completed",
+                    "message": "Optimization completed successfully",
+                    "best_params": state.optimizer.best_params,
+                    "best_score": state.optimizer.best_score,
+                }
+            except Exception as e:
+                state.optimization_error = str(e)
+                return {
+                    "status": "failed",
+                    "error": str(e),
+                }
+
+        # Future exists but not done - it's either pending or running
+        return {
+            "status": "running",
+            "message": "Optimization in progress",
+        }
+
+    elif action == "get_best_params":
+        if state.optimizer is None:
+            return {
+                "status": "error",
+                "message": "No optimization has been run",
+            }
+
+        if state.optimization_future and not state.optimization_future.done():
+            return {
+                "status": "error",
+                "message": "Optimization still running",
+            }
+
+        try:
+            return {
+                "status": "success",
+                "best_params": state.optimizer.best_params,
+                "best_score": state.optimizer.best_score,
+            }
+        except RuntimeError as e:
+            return {
+                "status": "error",
+                "message": str(e),
+            }
+
+    elif action == "set_best_params":
+        if state.optimizer is None:
+            return {
+                "status": "error",
+                "message": "No optimization has been run",
+            }
+
+        if state.optimization_future and not state.optimization_future.done():
+            return {
+                "status": "error",
+                "message": "Optimization still running",
+            }
+
+        try:
+            state.optimizer.set_best_params()
+            return {
+                "status": "success",
+                "message": "Best parameters applied to workflow",
+                "best_params": state.optimizer.best_params,
+            }
+        except RuntimeError as e:
+            return {
+                "status": "error",
+                "message": str(e),
+            }
+
+    elif action == "cancel":
+        if state.optimization_future is None:
+            return {
+                "status": "error",
+                "message": "No optimization running",
+            }
+
+        if state.optimization_future.done():
+            return {
+                "status": "error",
+                "message": "Optimization already completed",
+            }
+
+        cancelled = state.optimization_future.cancel()
+        if cancelled:
+            return {
+                "status": "success",
+                "message": "Optimization cancelled",
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Could not cancel optimization (already running)",
+            }
+
+    else:
+        return {
+            "status": "error",
+            "message": f"Unknown action: {action}. "
+            "Valid actions: start, status, get_best_params, set_best_params, cancel",
+        }
+
+
+@mcp.tool
+def optimize_workflow(
+    action: str,
+    n_trials: int | None = None,
+    input_file: str | None = None,
+    inputs: dict[str, str] | None = None,
+    direction: str = "maximize",
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Optimize a workflow using Bayesian optimization.
+
+    Args:
+        action: One of "start", "status", "get_best_params", "set_best_params",
+            "cancel".
+        n_trials: Number of optimization trials (required for "start").
+        input_file: Path to input molecule file (required for "start").
+        inputs: Optional required inputs (files/text) for workflow blocks.
+        direction: "maximize" or "minimize" (default: "maximize").
+        timeout: Optional timeout in seconds.
+
+    Returns:
+        Optimization status or results.
+    """
+    return _optimize_workflow_impl(
+        action=action,
+        n_trials=n_trials,
+        input_file=input_file,
+        inputs=inputs,
+        direction=direction,
+        timeout=timeout,
     )

@@ -1,11 +1,20 @@
 """Tests for the cmxflow MCP server."""
 
+import time
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
 import pytest
 
-from cmxflow.mcp.server import _build_workflow_impl, _run_workflow_impl
+from cmxflow.mcp.server import (
+    _build_workflow_impl,
+    _optimize_workflow_impl,
+    _run_workflow_impl,
+)
 from cmxflow.mcp.state import (
     get_available_blocks,
     get_block_descriptions,
+    get_global_state,
     reset_global_state,
 )
 
@@ -304,3 +313,404 @@ class TestIntegration:
         result = _build_workflow_impl(action="show")
         assert result["validated"] is True
         assert result["num_blocks"] == 4  # source + 2 operators + sink
+
+
+class TestOptimizeWorkflow:
+    """Tests for the optimize_workflow tool."""
+
+    def test_optimize_no_workflow(self) -> None:
+        """Test optimization when no workflow exists."""
+        result = _optimize_workflow_impl(action="start", n_trials=10)
+
+        assert result["status"] == "error"
+        assert "No workflow exists" in result["message"]
+
+    def test_optimize_workflow_not_validated(self) -> None:
+        """Test optimization when workflow not validated."""
+        _build_workflow_impl(action="create")
+        result = _optimize_workflow_impl(action="start", n_trials=10)
+
+        assert result["status"] == "error"
+        assert "not validated" in result["message"]
+
+    def test_optimize_workflow_ends_with_sink(self) -> None:
+        """Test optimization fails when workflow ends with SinkBlock."""
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(action="validate")  # Auto-adds sink
+
+        result = _optimize_workflow_impl(
+            action="start",
+            n_trials=10,
+            input_file="test.sdf",
+        )
+
+        assert result["status"] == "error"
+        assert "must end with ScoreBlock" in result["message"]
+
+    def test_optimize_workflow_no_params(self) -> None:
+        """Test optimization fails when no optimizable parameters."""
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="EnrichmentScoreBlock",
+        )
+        _build_workflow_impl(action="validate")
+
+        result = _optimize_workflow_impl(
+            action="start",
+            n_trials=10,
+            input_file="test.sdf",
+        )
+
+        assert result["status"] == "error"
+        assert "no optimizable parameters" in result["message"]
+
+    def test_optimize_missing_n_trials(self) -> None:
+        """Test optimization fails when n_trials not provided."""
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="ConformerGenerationBlock",
+        )
+        _build_workflow_impl(
+            action="add_block",
+            block_type="EnrichmentScoreBlock",
+        )
+        _build_workflow_impl(action="validate")
+
+        result = _optimize_workflow_impl(action="start", input_file="test.sdf")
+
+        assert result["status"] == "error"
+        assert "Must provide n_trials" in result["message"]
+
+    def test_optimize_missing_input_file(self) -> None:
+        """Test optimization fails when input_file not provided."""
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="ConformerGenerationBlock",
+        )
+        _build_workflow_impl(
+            action="add_block",
+            block_type="EnrichmentScoreBlock",
+        )
+        _build_workflow_impl(action="validate")
+
+        result = _optimize_workflow_impl(action="start", n_trials=10)
+
+        assert result["status"] == "error"
+        assert "Must provide input_file" in result["message"]
+
+    def test_optimize_input_file_not_found(self) -> None:
+        """Test optimization fails when input file doesn't exist."""
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="ConformerGenerationBlock",
+        )
+        _build_workflow_impl(
+            action="add_block",
+            block_type="EnrichmentScoreBlock",
+        )
+        _build_workflow_impl(action="validate")
+
+        result = _optimize_workflow_impl(
+            action="start",
+            n_trials=10,
+            input_file="/nonexistent/file.sdf",
+        )
+
+        assert result["status"] == "error"
+        assert "not found" in result["message"]
+
+    def test_optimize_invalid_direction(self) -> None:
+        """Test optimization fails with invalid direction."""
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="ConformerGenerationBlock",
+        )
+        _build_workflow_impl(
+            action="add_block",
+            block_type="EnrichmentScoreBlock",
+        )
+        _build_workflow_impl(action="validate")
+
+        # Need a valid input file for this test
+        with patch.object(Path, "is_file", return_value=True):
+            result = _optimize_workflow_impl(
+                action="start",
+                n_trials=10,
+                input_file="test.sdf",
+                direction="invalid",
+            )
+
+        assert result["status"] == "error"
+        assert "Invalid direction" in result["message"]
+
+    def test_optimize_status_no_optimization(self) -> None:
+        """Test status when no optimization running."""
+        result = _optimize_workflow_impl(action="status")
+
+        assert result["status"] == "no_optimization"
+
+    def test_optimize_get_best_params_no_optimization(self) -> None:
+        """Test get_best_params when no optimization has been run."""
+        result = _optimize_workflow_impl(action="get_best_params")
+
+        assert result["status"] == "error"
+        assert "No optimization has been run" in result["message"]
+
+    def test_optimize_set_best_params_no_optimization(self) -> None:
+        """Test set_best_params when no optimization has been run."""
+        result = _optimize_workflow_impl(action="set_best_params")
+
+        assert result["status"] == "error"
+        assert "No optimization has been run" in result["message"]
+
+    def test_optimize_cancel_no_optimization(self) -> None:
+        """Test cancel when no optimization running."""
+        result = _optimize_workflow_impl(action="cancel")
+
+        assert result["status"] == "error"
+        assert "No optimization running" in result["message"]
+
+    def test_optimize_unknown_action(self) -> None:
+        """Test unknown action returns error."""
+        result = _optimize_workflow_impl(action="unknown")
+
+        assert result["status"] == "error"
+        assert "Unknown action" in result["message"]
+
+    def test_optimize_start_success(self, tmp_path: Path) -> None:
+        """Test starting optimization successfully."""
+        # Create a test input file
+        input_file = tmp_path / "test.sdf"
+        input_file.write_text("")
+
+        # Build workflow with ScoreBlock
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="ConformerGenerationBlock",
+        )
+        _build_workflow_impl(
+            action="add_block",
+            block_type="EnrichmentScoreBlock",
+        )
+        _build_workflow_impl(action="validate")
+
+        # Mock the Optimizer to avoid actual optimization
+        with patch("cmxflow.mcp.server.Optimizer") as mock_optimizer_class:
+            mock_optimizer = MagicMock()
+            mock_optimizer_class.return_value = mock_optimizer
+
+            result = _optimize_workflow_impl(
+                action="start",
+                n_trials=10,
+                input_file=str(input_file),
+                inputs={"2.text@target": "is_active"},
+            )
+
+        assert result["status"] == "started"
+        assert result["n_trials"] == 10
+        assert result["direction"] == "maximize"
+
+    def test_optimize_status_running(self, tmp_path: Path) -> None:
+        """Test status while optimization is running."""
+        input_file = tmp_path / "test.sdf"
+        input_file.write_text("")
+
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="ConformerGenerationBlock",
+        )
+        _build_workflow_impl(
+            action="add_block",
+            block_type="EnrichmentScoreBlock",
+        )
+        _build_workflow_impl(action="validate")
+
+        # Mock optimization to take time
+        def slow_optimize(*args, **kwargs):
+            time.sleep(0.5)
+
+        with patch("cmxflow.mcp.server.Optimizer") as mock_optimizer_class:
+            mock_optimizer = MagicMock()
+            mock_optimizer.optimize = slow_optimize
+            mock_optimizer_class.return_value = mock_optimizer
+
+            _optimize_workflow_impl(
+                action="start",
+                n_trials=10,
+                input_file=str(input_file),
+                inputs={"2.text@target": "is_active"},
+            )
+
+            # Check status immediately (should be running)
+            result = _optimize_workflow_impl(action="status")
+
+            # Could be running or completed depending on timing
+            assert result["status"] in ("running", "completed")
+
+    def test_optimize_status_completed(self, tmp_path: Path) -> None:
+        """Test status when optimization is completed."""
+        input_file = tmp_path / "test.sdf"
+        input_file.write_text("")
+
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="ConformerGenerationBlock",
+        )
+        _build_workflow_impl(
+            action="add_block",
+            block_type="EnrichmentScoreBlock",
+        )
+        _build_workflow_impl(action="validate")
+
+        with patch("cmxflow.mcp.server.Optimizer") as mock_optimizer_class:
+            mock_optimizer = MagicMock()
+            mock_optimizer.best_params = {"num_conformers": 5}
+            mock_optimizer.best_score = 0.85
+            mock_optimizer_class.return_value = mock_optimizer
+
+            _optimize_workflow_impl(
+                action="start",
+                n_trials=10,
+                input_file=str(input_file),
+                inputs={"2.text@target": "is_active"},
+            )
+
+            # Wait for completion
+            state = get_global_state()
+            assert state.optimization_future is not None
+            state.optimization_future.result(timeout=5)
+
+            result = _optimize_workflow_impl(action="status")
+
+        assert result["status"] == "completed"
+        assert result["best_params"] == {"num_conformers": 5}
+        assert result["best_score"] == 0.85
+
+    def test_optimize_get_best_params_success(self, tmp_path: Path) -> None:
+        """Test getting best params after optimization."""
+        input_file = tmp_path / "test.sdf"
+        input_file.write_text("")
+
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="ConformerGenerationBlock",
+        )
+        _build_workflow_impl(
+            action="add_block",
+            block_type="EnrichmentScoreBlock",
+        )
+        _build_workflow_impl(action="validate")
+
+        with patch("cmxflow.mcp.server.Optimizer") as mock_optimizer_class:
+            mock_optimizer = MagicMock()
+            mock_optimizer.best_params = {"num_conformers": 10}
+            mock_optimizer.best_score = 0.92
+            mock_optimizer_class.return_value = mock_optimizer
+
+            _optimize_workflow_impl(
+                action="start",
+                n_trials=10,
+                input_file=str(input_file),
+                inputs={"2.text@target": "is_active"},
+            )
+
+            # Wait for completion
+            state = get_global_state()
+            assert state.optimization_future is not None
+            state.optimization_future.result(timeout=5)
+
+            result = _optimize_workflow_impl(action="get_best_params")
+
+        assert result["status"] == "success"
+        assert result["best_params"] == {"num_conformers": 10}
+        assert result["best_score"] == 0.92
+
+    def test_optimize_set_best_params_success(self, tmp_path: Path) -> None:
+        """Test setting best params after optimization."""
+        input_file = tmp_path / "test.sdf"
+        input_file.write_text("")
+
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="ConformerGenerationBlock",
+        )
+        _build_workflow_impl(
+            action="add_block",
+            block_type="EnrichmentScoreBlock",
+        )
+        _build_workflow_impl(action="validate")
+
+        with patch("cmxflow.mcp.server.Optimizer") as mock_optimizer_class:
+            mock_optimizer = MagicMock()
+            mock_optimizer.best_params = {"num_conformers": 7}
+            mock_optimizer_class.return_value = mock_optimizer
+
+            _optimize_workflow_impl(
+                action="start",
+                n_trials=10,
+                input_file=str(input_file),
+                inputs={"2.text@target": "is_active"},
+            )
+
+            # Wait for completion
+            state = get_global_state()
+            assert state.optimization_future is not None
+            state.optimization_future.result(timeout=5)
+
+            result = _optimize_workflow_impl(action="set_best_params")
+
+        assert result["status"] == "success"
+        assert "Best parameters applied" in result["message"]
+        mock_optimizer.set_best_params.assert_called_once()
+
+    def test_optimize_already_running(self, tmp_path: Path) -> None:
+        """Test starting optimization when one is already running."""
+        input_file = tmp_path / "test.sdf"
+        input_file.write_text("")
+
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="ConformerGenerationBlock",
+        )
+        _build_workflow_impl(
+            action="add_block",
+            block_type="EnrichmentScoreBlock",
+        )
+        _build_workflow_impl(action="validate")
+
+        def slow_optimize(*args, **kwargs):
+            time.sleep(1)
+
+        with patch("cmxflow.mcp.server.Optimizer") as mock_optimizer_class:
+            mock_optimizer = MagicMock()
+            mock_optimizer.optimize = slow_optimize
+            mock_optimizer_class.return_value = mock_optimizer
+
+            # Start first optimization
+            _optimize_workflow_impl(
+                action="start",
+                n_trials=10,
+                input_file=str(input_file),
+                inputs={"2.text@target": "is_active"},
+            )
+
+            # Try to start another
+            result = _optimize_workflow_impl(
+                action="start",
+                n_trials=5,
+                input_file=str(input_file),
+            )
+
+        assert result["status"] == "error"
+        assert "already in progress" in result["message"]

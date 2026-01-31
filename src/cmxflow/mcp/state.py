@@ -1,8 +1,13 @@
 """State management for the cmxflow MCP server."""
 
-from dataclasses import dataclass
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from cmxflow import Workflow
+
+if TYPE_CHECKING:
+    from cmxflow.opt import Optimizer
 from cmxflow.operators import (
     ConformerGenerationBlock,
     EnumerateStereoBlock,
@@ -24,15 +29,36 @@ class WorkflowState:
         workflow: The current workflow being built.
         validated: Whether the workflow has passed validation.
         inputs_set: Whether required inputs have been set.
+        optimizer: The optimizer instance for Bayesian optimization.
+        optimization_future: Future for background optimization task.
+        optimization_error: Error message if optimization failed.
     """
 
     workflow: Workflow | None = None
     validated: bool = False
     inputs_set: bool = False
+    optimizer: "Optimizer | None" = field(default=None)
+    optimization_future: Future | None = field(default=None)
+    optimization_error: str | None = field(default=None)
 
 
 # Global state instance for persistence across tool calls
 _global_state: WorkflowState | None = None
+
+# Thread pool executor for background tasks
+_executor: ThreadPoolExecutor | None = None
+
+
+def get_executor() -> ThreadPoolExecutor:
+    """Get or create the thread pool executor.
+
+    Returns:
+        The shared ThreadPoolExecutor instance.
+    """
+    global _executor
+    if _executor is None:
+        _executor = ThreadPoolExecutor(max_workers=1)
+    return _executor
 
 
 def get_global_state() -> WorkflowState:

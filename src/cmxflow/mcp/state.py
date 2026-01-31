@@ -151,16 +151,16 @@ def get_block_descriptions() -> dict[str, str]:
             "Generate 3D conformers using RDKit. YOU MUST have the "
             "EnumerateStereoBlock before the ConformerGenerationBlock."
         ),
-        "EnumerateStereoBlock": (
-            "Enumerate all possible stereoisomers of molecules. "
-            "Required preprocessing step before conformer generation."
-        ),
+        "EnumerateStereoBlock": ("Enumerate all possible stereoisomers of molecules."),
         "Molecule3DSimilarityBlock": (
             "Compute 3D shape similarity between molecules and a reference. YOU "
-            "MUST have the MoleculeAlignBlock before the Molecule3DSimilarityBlock."
+            "MUST have the EnumerateStereoBlock, CoformerGenerationBlock, and "
+            "MoleculeAlignBlock before the Molecule3DSimilarityBlock."
         ),
         "MoleculeAlignBlock": (
-            "Align molecules to a reference structure using 3D coordinates."
+            "Align molecules to a reference structure using 3D coordinates. YOU "
+            "MUST have the EnumerateStereoBlock and ConformerGenerationBlock before "
+            "the MoleculeAlignBlock."
         ),
         "MoleculeSimilarityBlock": (
             "Compute 2D fingerprint similarity between molecules and a reference."

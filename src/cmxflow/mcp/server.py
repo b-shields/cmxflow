@@ -409,6 +409,10 @@ def _run_workflow_impl(
                 "Use build_workflow(action='validate') first.",
             }
 
+        # Make sure the final block is a sink
+        if not isinstance(state.workflow.blocks[-1], MoleculeSinkBlock):
+            state.workflow.add(MoleculeSinkBlock())
+
         # Check if inputs are required but not set
         required = state.workflow.get_required_input()
         if required and not state.inputs_set:
@@ -468,10 +472,11 @@ def build_workflow(
 ) -> dict[str, Any]:
     """Build a cheminformatics workflow step-by-step.
 
-    Note
-    ----
-    YOU MUST "show" the workflow structure after running "validate" action.
-    Annotate the output of the "show" action and print the result.
+    YOU MUST "show" the workflow structure before using the run_workflow or
+    optimize_workflow tools. Annotate the output of the "show" action and print
+    the result.
+
+    IMPORTANT: Do not use the "clear" or "create" actions after optimizing a workflow.
 
     Args:
         action: One of "create", "add_block", "remove_block", "list_blocks",
@@ -839,6 +844,8 @@ def optimize_workflow(
     timeout: float | None = None,
 ) -> dict[str, Any]:
     """Optimize a workflow using Bayesian optimization.
+
+    Offer to use this tool if a user doesn't like the output of a workflow.
 
     IMPORTANT: After starting optimization, do NOT poll status automatically.
     Only check status when the user explicitly asks for progress or results.

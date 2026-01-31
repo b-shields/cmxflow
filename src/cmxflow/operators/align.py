@@ -8,7 +8,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem, rdFMCS, rdMolAlign, rdShapeHelpers
 
 from cmxflow.operators.base import MoleculeBlock
-from cmxflow.parameter import Categorical, Integer
+from cmxflow.parameter import Categorical
 from cmxflow.sources.reader import read_molecules
 
 logger = logging.getLogger(__name__)
@@ -39,9 +39,7 @@ class MoleculeAlignBlock(MoleculeBlock):
                 "alignment_method",
                 default="crippen_o3a",
                 choices=["crippen_o3a", "mmff_o3a", "mcs"],
-            ),
-            Integer("mcsTimeout", default=3, low=1, high=30),
-            Integer("mcsMinAtoms", default=3, low=1, high=10),
+            )
         )
 
         # Lazy-loaded reference molecules with conformers
@@ -104,13 +102,12 @@ class MoleculeAlignBlock(MoleculeBlock):
         Returns:
             MCS SMARTS string, or None if MCS is too small/invalid.
         """
-        mcs_timeout = self.params["mcsTimeout"].get()
-        mcs_min_atoms = self.params["mcsMinAtoms"].get()
+        mcs_min_atoms: int = 3
 
         try:
             mcs_result = rdFMCS.FindMCS(
                 [mol, ref],
-                timeout=mcs_timeout,
+                timeout=3,
                 matchValences=False,
                 ringMatchesRingOnly=True,
                 completeRingsOnly=True,

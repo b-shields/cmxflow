@@ -1,5 +1,6 @@
 """Workflow class for dynamically building and executing block pipelines."""
 
+import pickle
 from pathlib import Path
 from typing import Any
 
@@ -229,3 +230,58 @@ class Workflow:
             result = text.column_merge_framed_block(result, block_repr)
 
         return "\n" + result
+
+
+class WorkflowValidationError(Exception):
+    """Raised when a workflow fails validation during save or load."""
+
+    pass
+
+
+def save_workflow(workflow: Workflow, path: Path | str) -> None:
+    """Save a workflow to a file.
+
+    Args:
+        workflow: The workflow to save.
+        path: Path to save the workflow to.
+
+    Raises:
+        WorkflowValidationError: If the workflow fails validation.
+    """
+    try:
+        workflow.check()
+    except (IndexError, ValueError) as e:
+        raise WorkflowValidationError(f"Cannot save invalid workflow: {e}") from e
+
+    if isinstance(path, str):
+        path = Path(path)
+
+    with open(path, "wb") as f:
+        pickle.dump(workflow, f)
+
+
+def load_workflow(path: Path | str) -> Workflow:
+    """Load a workflow from a file.
+
+    Args:
+        path: Path to load the workflow from.
+
+    Returns:
+        The loaded workflow.
+
+    Raises:
+        WorkflowValidationError: If the loaded workflow fails validation.
+        FileNotFoundError: If the file does not exist.
+    """
+    if isinstance(path, str):
+        path = Path(path)
+
+    with open(path, "rb") as f:
+        workflow: Workflow = pickle.load(f)
+
+    try:
+        workflow.check()
+    except (IndexError, ValueError) as e:
+        raise WorkflowValidationError(f"Loaded workflow is invalid: {e}") from e
+
+    return workflow

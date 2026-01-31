@@ -31,6 +31,28 @@ class WorkflowState:
     inputs_set: bool = False
 
 
+# Global state instance for persistence across tool calls
+_global_state: WorkflowState | None = None
+
+
+def get_global_state() -> WorkflowState:
+    """Get or create the global workflow state.
+
+    Returns:
+        The current global workflow state.
+    """
+    global _global_state
+    if _global_state is None:
+        _global_state = WorkflowState()
+    return _global_state
+
+
+def reset_global_state() -> None:
+    """Reset the global state to a fresh instance."""
+    global _global_state
+    _global_state = WorkflowState()
+
+
 def get_available_blocks() -> dict[str, type]:
     """Return registry of all available block types.
 

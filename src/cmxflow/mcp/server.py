@@ -1,51 +1,23 @@
 """FastMCP server for building and running cmxflow workflows."""
 
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-from fastmcp import Context, FastMCP
+from fastmcp import FastMCP
 
 from cmxflow import Workflow
 from cmxflow.block import ScoreBlock, SinkBlock
 from cmxflow.mcp.state import (
-    WorkflowState,
     get_available_blocks,
     get_block_descriptions,
+    get_global_state,
+    reset_global_state,
 )
 from cmxflow.operators import RDKitBlock
 from cmxflow.sinks import MoleculeSinkBlock
 from cmxflow.sources import MoleculeSourceBlock
 
 mcp = FastMCP(name="cmxflow")
-
-STATE_KEY = "workflow_state"
-
-
-def _get_state(ctx: Context) -> WorkflowState:
-    """Get or create workflow state from context.
-
-    Args:
-        ctx: FastMCP context.
-
-    Returns:
-        Current workflow state.
-    """
-    raw_state = ctx.get_state(STATE_KEY)
-    if raw_state is None or not isinstance(raw_state, WorkflowState):
-        state = WorkflowState()
-        ctx.set_state(STATE_KEY, state)
-        return state
-    return cast(WorkflowState, raw_state)
-
-
-def _set_state(ctx: Context, state: WorkflowState) -> None:
-    """Update workflow state in context.
-
-    Args:
-        ctx: FastMCP context.
-        state: New workflow state.
-    """
-    ctx.set_state(STATE_KEY, state)
 
 
 def _format_workflow(workflow: Workflow) -> str:
@@ -63,7 +35,6 @@ def _format_workflow(workflow: Workflow) -> str:
 
 
 def _build_workflow_impl(
-    ctx: Context,
     action: str,
     block_type: str | None = None,
     block_config: dict[str, Any] | None = None,
@@ -73,7 +44,6 @@ def _build_workflow_impl(
     """Implementation of build_workflow logic.
 
     Args:
-        ctx: Context object with state management.
         action: One of "create", "add_block", "remove_block", "list_blocks",
             "validate", "clear", "show".
         block_type: Block class name (e.g., "ConformerGenerationBlock").
@@ -85,16 +55,17 @@ def _build_workflow_impl(
     Returns:
         Status message and current workflow state.
     """
-    state = _get_state(ctx)
+    state = get_global_state()
 
     if action == "create":
         # Initialize new workflow with source block
+        reset_global_state()
+        state = get_global_state()
         workflow = Workflow(name="MCP Workflow")
         workflow.add(MoleculeSourceBlock())
         state.workflow = workflow
         state.validated = False
         state.inputs_set = False
-        _set_state(ctx, state)
         return {
             "status": "success",
             "message": "Created new workflow with MoleculeSourceBlock",
@@ -145,7 +116,6 @@ def _build_workflow_impl(
 
             state.validated = False
             state.inputs_set = False
-            _set_state(ctx, state)
 
             return {
                 "status": "success",
@@ -182,7 +152,6 @@ def _build_workflow_impl(
         removed = state.workflow.blocks.pop(index)
         state.validated = False
         state.inputs_set = False
-        _set_state(ctx, state)
 
         return {
             "status": "success",
@@ -214,7 +183,6 @@ def _build_workflow_impl(
         try:
             state.workflow.check()
             state.validated = True
-            _set_state(ctx, state)
             return {
                 "status": "success",
                 "message": "Workflow is valid",
@@ -222,7 +190,6 @@ def _build_workflow_impl(
             }
         except Exception as e:
             state.validated = False
-            _set_state(ctx, state)
             return {
                 "status": "error",
                 "message": f"Validation failed: {e}",
@@ -230,10 +197,7 @@ def _build_workflow_impl(
             }
 
     elif action == "clear":
-        state.workflow = None
-        state.validated = False
-        state.inputs_set = False
-        _set_state(ctx, state)
+        reset_global_state()
         return {
             "status": "success",
             "message": "Workflow cleared",
@@ -267,7 +231,6 @@ def _build_workflow_impl(
 
 
 def _run_workflow_impl(
-    ctx: Context,
     action: str,
     inputs: dict[str, str] | None = None,
     input_file: str | None = None,
@@ -276,7 +239,6 @@ def _run_workflow_impl(
     """Implementation of run_workflow logic.
 
     Args:
-        ctx: Context object with state management.
         action: One of "get_inputs", "set_inputs", "execute".
         inputs: Input values for "set_inputs" action. Keys should match
             the format returned by get_inputs (e.g., "1.file@reference").
@@ -286,7 +248,7 @@ def _run_workflow_impl(
     Returns:
         Required inputs dict, execution status, or results.
     """
-    state = _get_state(ctx)
+    state = get_global_state()
 
     if state.workflow is None:
         return {
@@ -336,7 +298,6 @@ def _run_workflow_impl(
         try:
             state.workflow.set_required_input(inputs)
             state.inputs_set = True
-            _set_state(ctx, state)
             return {
                 "status": "success",
                 "message": "Inputs set successfully",
@@ -419,7 +380,6 @@ def build_workflow(
     block_config: dict[str, Any] | None = None,
     rdkit_method: str | None = None,
     index: int | None = None,
-    ctx: Context = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """Build a cheminformatics workflow step-by-step.
 
@@ -431,13 +391,11 @@ def build_workflow(
         rdkit_method: For RDKitBlock, the method path
             (e.g., "rdkit.Chem.Descriptors.MolWt").
         index: Position for insert/remove operations.
-        ctx: FastMCP context (injected).
 
     Returns:
         Status message and current workflow state.
     """
     return _build_workflow_impl(
-        ctx=ctx,
         action=action,
         block_type=block_type,
         block_config=block_config,
@@ -452,7 +410,6 @@ def run_workflow(
     inputs: dict[str, str] | None = None,
     input_file: str | None = None,
     output_file: str | None = None,
-    ctx: Context = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """Execute a validated workflow.
 
@@ -462,13 +419,11 @@ def run_workflow(
             the format returned by get_inputs (e.g., "1.file@reference").
         input_file: Path to input molecule file for "execute" action.
         output_file: Path for output file for "execute" action.
-        ctx: FastMCP context (injected).
 
     Returns:
         Required inputs dict, execution status, or results.
     """
     return _run_workflow_impl(
-        ctx=ctx,
         action=action,
         inputs=inputs,
         input_file=input_file,

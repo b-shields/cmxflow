@@ -2,6 +2,8 @@
 CLAUDE.md
 examples/basic_usage.ipynb
 examples/test*
+.claude/*
+.vscode/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

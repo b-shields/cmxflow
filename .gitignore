@@ -4,6 +4,7 @@ examples/basic_usage.ipynb
 examples/test*
 .claude/*
 .vscode/*
+.DS_Store
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

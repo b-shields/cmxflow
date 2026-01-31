@@ -102,3 +102,14 @@ class MoleculeSourceBlock(SourceBlock):
         self._wrap = wrap
         super().__init__(reader=lambda p: read_molecules(p, wrap=self._wrap))
         self.name = "MoleculeSource"
+
+    def __getstate__(self) -> dict:
+        """Get state for pickling, excluding the lambda."""
+        state = self.__dict__.copy()
+        state.pop("reader", None)
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore state from pickle, recreating the lambda."""
+        self.__dict__.update(state)
+        self.reader = lambda p: read_molecules(p, wrap=self._wrap)

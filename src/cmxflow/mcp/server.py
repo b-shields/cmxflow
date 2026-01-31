@@ -23,6 +23,7 @@ from cmxflow.sinks import MoleculeSinkBlock
 from cmxflow.sources import MoleculeSourceBlock
 from cmxflow.utils.parallel import ParallelBlock, make_parallel
 from cmxflow.utils.pymol import open_pymol_session
+from cmxflow.workflow import WorkflowValidationError, load_workflow, save_workflow
 
 _PYMOL_AVAILABLE = shutil.which("pymol") is not None
 
@@ -54,11 +55,12 @@ def _build_workflow_impl(
 
     Args:
         action: One of "create", "add_block", "remove_block", "list_blocks",
-            "validate", "clear", "show", "make_parallel".
+            "validate", "clear", "show", "make_parallel", "save", "load".
         block_type: Block class name (e.g., "ConformerGenerationBlock").
         block_config: Block initialization parameters. For "make_parallel" action,
             this specifies parallel execution options: max_workers, chunk_size,
-            ordered, error_handling.
+            ordered, error_handling. For "save" and "load" actions, this should
+            contain "path" key with the file path.
         rdkit_method: For RDKitBlock, the method path
             (e.g., "rdkit.Chem.Descriptors.MolWt").
         index: Position for insert/remove/make_parallel operations.
@@ -304,12 +306,65 @@ def _build_workflow_impl(
             "workflow": _format_workflow(state.workflow),
         }
 
+    elif action == "save":
+        if state.workflow is None:
+            return {
+                "status": "error",
+                "message": "No workflow exists. Use action='create' first.",
+            }
+
+        if block_config is None or "path" not in block_config:
+            return {
+                "status": "error",
+                "message": "Must provide path in block_config for save action",
+            }
+
+        try:
+            save_workflow(state.workflow, block_config["path"])
+            return {
+                "status": "success",
+                "message": f"Workflow saved to {block_config['path']}",
+            }
+        except WorkflowValidationError as e:
+            return {
+                "status": "error",
+                "message": str(e),
+            }
+
+    elif action == "load":
+        if block_config is None or "path" not in block_config:
+            return {
+                "status": "error",
+                "message": "Must provide path in block_config for load action",
+            }
+
+        try:
+            workflow = load_workflow(block_config["path"])
+            state.workflow = workflow
+            state.validated = True  # load_workflow validates
+            state.inputs_set = False  # Inputs need to be re-set
+            return {
+                "status": "success",
+                "message": f"Workflow loaded from {block_config['path']}",
+                "workflow": _format_workflow(workflow),
+            }
+        except FileNotFoundError:
+            return {
+                "status": "error",
+                "message": f"File not found: {block_config['path']}",
+            }
+        except WorkflowValidationError as e:
+            return {
+                "status": "error",
+                "message": str(e),
+            }
+
     else:
         return {
             "status": "error",
             "message": f"Unknown action: {action}. "
             "Valid actions: create, add_block, remove_block, list_blocks, "
-            "validate, clear, show, make_parallel",
+            "validate, clear, show, make_parallel, save, load",
         }
 
 
@@ -480,11 +535,12 @@ def build_workflow(
 
     Args:
         action: One of "create", "add_block", "remove_block", "list_blocks",
-            "validate", "clear", "show", "make_parallel".
+            "validate", "clear", "show", "make_parallel", "save", "load".
         block_type: Block class name (e.g., "ConformerGenerationBlock").
         block_config: Block initialization parameters. For "make_parallel" action,
             this specifies parallel execution options: max_workers, chunk_size,
-            ordered, error_handling.
+            ordered, error_handling. For "save" and "load" actions, this should
+            contain "path" key with a file path ending in ".pkl".
         rdkit_method: For RDKitBlock, the method path
             (e.g., "rdkit.Chem.Descriptors.MolWt").
         index: Position for insert/remove/make_parallel operations.

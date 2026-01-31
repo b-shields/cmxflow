@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import optuna
 from fastmcp import FastMCP
 
 from cmxflow import Workflow
@@ -725,10 +726,24 @@ def _optimize_workflow_impl(
                 }
 
         # Future exists but not done - it's either pending or running
-        return {
+        # Include progress info if available
+        progress: dict[str, Any] = {
             "status": "running",
             "message": "Optimization in progress",
         }
+        if state.optimizer is not None and state.optimizer._study is not None:
+            study = state.optimizer._study
+            trials = study.trials
+            progress["completed_trials"] = len(trials)
+            if trials:
+                # Get best score so far from completed trials
+                completed = [
+                    t for t in trials if t.state == optuna.trial.TrialState.COMPLETE
+                ]
+                if completed:
+                    progress["best_score_so_far"] = study.best_value
+                    progress["best_params_so_far"] = dict(study.best_params)
+        return progress
 
     elif action == "get_best_params":
         if state.optimizer is None:
@@ -824,6 +839,10 @@ def optimize_workflow(
     timeout: float | None = None,
 ) -> dict[str, Any]:
     """Optimize a workflow using Bayesian optimization.
+
+    IMPORTANT: After starting optimization, do NOT poll status automatically.
+    Only check status when the user explicitly asks for progress or results.
+    Optimization may take a while depending on the number of trials.
 
     Args:
         action: One of "start", "status", "get_best_params", "set_best_params",

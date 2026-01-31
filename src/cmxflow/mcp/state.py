@@ -144,7 +144,6 @@ def get_block_descriptions() -> dict[str, str]:
         ),
         # Scores
         "EnrichmentScoreBlock": (
-            "Compute enrichment AUC for scoring molecules. "
-            "Used for optimization workflows."
+            "Compute enrichment AUC for scoring molecules. Used to optimize workflows."
         ),
     }

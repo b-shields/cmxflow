@@ -1,7 +1,7 @@
 name: cmxflow
 channels:
   - conda-forge
-  - defaults
 dependencies:
+  - pymol-open-source>=3.1
   - python>=3.10
   - poetry

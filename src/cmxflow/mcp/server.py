@@ -1,5 +1,6 @@
 """FastMCP server for building and running cmxflow workflows."""
 
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -13,12 +14,16 @@ from cmxflow.mcp.state import (
     get_executor,
     get_global_state,
     reset_global_state,
+    workflow_has_3d_blocks,
 )
 from cmxflow.operators import RDKitBlock
 from cmxflow.opt import Optimizer
 from cmxflow.sinks import MoleculeSinkBlock
 from cmxflow.sources import MoleculeSourceBlock
 from cmxflow.utils.parallel import ParallelBlock, make_parallel
+from cmxflow.utils.pymol import open_pymol_session
+
+_PYMOL_AVAILABLE = shutil.which("pymol") is not None
 
 mcp = FastMCP(name="cmxflow")
 
@@ -430,6 +435,8 @@ def _run_workflow_impl(
 
         try:
             result = state.workflow(input_path, output_path)
+            if output_file:
+                state.last_output_file = str(output_path)
             return {
                 "status": "success",
                 "message": "Workflow executed successfully",
@@ -838,3 +845,71 @@ def optimize_workflow(
         direction=direction,
         timeout=timeout,
     )
+
+
+if _PYMOL_AVAILABLE:
+
+    @mcp.tool
+    def view_structures(
+        files: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Open 3D structure files in PyMOL for visualization.
+
+        IMPORTANT: Only use this tool after executing a workflow that contains
+        3D blocks (ConformerGenerationBlock, MoleculeAlignBlock, etc.).
+
+        Before calling this tool, you MUST:
+        1. Confirm with the user which 3D output file(s) to open
+        2. Ask if they want to include additional structure files (e.g., PDB)
+
+        Args:
+            files: List of file paths to open. If not provided, opens the last
+                workflow output file. Can include additional structure files
+                (PDB, SDF, MOL2, etc.) alongside workflow output.
+
+        Returns:
+            Status message indicating success or failure.
+        """
+        state = get_global_state()
+
+        if not workflow_has_3d_blocks():
+            return {
+                "status": "error",
+                "message": "Cannot view structures: workflow has no 3D blocks "
+                "(ConformerGenerationBlock, MoleculeAlignBlock, etc.)",
+            }
+
+        # Determine files to open
+        files_to_open: list[str] = []
+
+        if files:
+            files_to_open = files
+        elif state.last_output_file:
+            files_to_open = [state.last_output_file]
+        else:
+            return {
+                "status": "error",
+                "message": "No files specified and no workflow output available. "
+                "Either provide files or execute a workflow first.",
+            }
+
+        # Validate files exist
+        missing = [f for f in files_to_open if not Path(f).exists()]
+        if missing:
+            return {
+                "status": "error",
+                "message": f"Files not found: {missing}",
+            }
+
+        try:
+            open_pymol_session(*files_to_open)
+            return {
+                "status": "success",
+                "message": f"Opened {len(files_to_open)} file(s) in PyMOL",
+                "files": files_to_open,
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Failed to open PyMOL: {e}",
+            }

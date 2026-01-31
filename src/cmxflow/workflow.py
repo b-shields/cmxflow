@@ -228,4 +228,4 @@ class Workflow:
             block_repr = str(block)
             result = text.column_merge_framed_block(result, block_repr)
 
-        return result
+        return "\n" + result

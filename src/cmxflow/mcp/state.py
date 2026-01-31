@@ -121,16 +121,16 @@ def get_block_descriptions() -> dict[str, str]:
         ),
         # Operators
         "ConformerGenerationBlock": (
-            "Generate 3D conformers using RDKit's ETKDGv3 algorithm. "
-            "Molecules must have fully specified stereochemistry."
+            "Generate 3D conformers using RDKit. YOU MUST have the "
+            "EnumerateStereoBlock before the ConformerGenerationBlock."
         ),
         "EnumerateStereoBlock": (
             "Enumerate all possible stereoisomers of molecules. "
-            "1:N transform that yields multiple outputs per input."
+            "Required preprocessing step before conformer generation."
         ),
         "Molecule3DSimilarityBlock": (
-            "Compute 3D shape similarity between molecules and a reference. "
-            "Requires 3D conformers."
+            "Compute 3D shape similarity between molecules and a reference. YOU "
+            "MUST have the MoleculeAlignBlock before the Molecule3DSimilarityBlock."
         ),
         "MoleculeAlignBlock": (
             "Align molecules to a reference structure using 3D coordinates."

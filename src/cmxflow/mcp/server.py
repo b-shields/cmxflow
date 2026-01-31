@@ -460,6 +460,11 @@ def build_workflow(
 ) -> dict[str, Any]:
     """Build a cheminformatics workflow step-by-step.
 
+    Note
+    ----
+    YOU MUST "show" the workflow structure after running "validate" action.
+    Annotate the output of the "show" action and print the result.
+
     Args:
         action: One of "create", "add_block", "remove_block", "list_blocks",
             "validate", "clear", "show", "make_parallel".

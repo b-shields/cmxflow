@@ -194,6 +194,135 @@ class TestBuildWorkflow:
         assert result["status"] == "error"
         assert "Unknown action" in result["message"]
 
+    def test_make_parallel_no_workflow(self) -> None:
+        """Test make_parallel when no workflow exists."""
+        result = _build_workflow_impl(action="make_parallel", index=0)
+
+        assert result["status"] == "error"
+        assert "No workflow exists" in result["message"]
+
+    def test_make_parallel_no_index(self) -> None:
+        """Test make_parallel without providing index."""
+        _build_workflow_impl(action="create")
+        result = _build_workflow_impl(action="make_parallel")
+
+        assert result["status"] == "error"
+        assert "Must provide index" in result["message"]
+
+    def test_make_parallel_index_out_of_range(self) -> None:
+        """Test make_parallel with out-of-range index."""
+        _build_workflow_impl(action="create")
+        result = _build_workflow_impl(action="make_parallel", index=10)
+
+        assert result["status"] == "error"
+        assert "out of range" in result["message"]
+
+    def test_make_parallel_source_block(self) -> None:
+        """Test make_parallel fails on SourceBlock."""
+        _build_workflow_impl(action="create")
+        result = _build_workflow_impl(action="make_parallel", index=0)
+
+        assert result["status"] == "error"
+        assert "Cannot parallelize" in result["message"]
+        assert "SourceBlock" in result["message"]
+
+    def test_make_parallel_sink_block(self) -> None:
+        """Test make_parallel fails on SinkBlock."""
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(action="validate")  # Auto-adds sink
+        # Sink is at index 1
+        result = _build_workflow_impl(action="make_parallel", index=1)
+
+        assert result["status"] == "error"
+        assert "Cannot parallelize" in result["message"]
+        assert "SinkBlock" in result["message"]
+
+    def test_make_parallel_score_block(self) -> None:
+        """Test make_parallel fails on ScoreBlock."""
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="EnrichmentScoreBlock",
+        )
+        # ScoreBlock is at index 1
+        result = _build_workflow_impl(action="make_parallel", index=1)
+
+        assert result["status"] == "error"
+        assert "Cannot parallelize" in result["message"]
+        assert "ScoreBlock" in result["message"]
+
+    def test_make_parallel_success(self) -> None:
+        """Test successfully parallelizing a processing block."""
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="ConformerGenerationBlock",
+        )
+        # ConformerGenerationBlock is at index 1
+        result = _build_workflow_impl(action="make_parallel", index=1)
+
+        assert result["status"] == "success"
+        assert "Parallelized" in result["message"]
+        assert "ConformerGeneration" in result["message"]
+        assert "workflow" in result
+
+    def test_make_parallel_with_config(self) -> None:
+        """Test parallelizing with custom configuration."""
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="ConformerGenerationBlock",
+        )
+        result = _build_workflow_impl(
+            action="make_parallel",
+            index=1,
+            block_config={
+                "max_workers": 4,
+                "chunk_size": 10,
+                "ordered": False,
+                "error_handling": "log",
+            },
+        )
+
+        assert result["status"] == "success"
+        assert "Parallelized" in result["message"]
+
+    def test_make_parallel_already_parallel(self) -> None:
+        """Test make_parallel fails on already parallelized block."""
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="ConformerGenerationBlock",
+        )
+        # Parallelize the block first
+        _build_workflow_impl(action="make_parallel", index=1)
+
+        # Try to parallelize again
+        result = _build_workflow_impl(action="make_parallel", index=1)
+
+        assert result["status"] == "error"
+        assert "already parallelized" in result["message"]
+
+    def test_make_parallel_invalidates_workflow(self) -> None:
+        """Test that make_parallel resets validated and inputs_set state."""
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="ConformerGenerationBlock",
+        )
+        _build_workflow_impl(action="validate")
+
+        # Verify validated is True
+        show_result = _build_workflow_impl(action="show")
+        assert show_result["validated"] is True
+
+        # Parallelize the block
+        _build_workflow_impl(action="make_parallel", index=1)
+
+        # Verify validated is now False
+        show_result = _build_workflow_impl(action="show")
+        assert show_result["validated"] is False
+
 
 class TestRunWorkflow:
     """Tests for the run_workflow tool."""

@@ -6,7 +6,7 @@ from typing import Any
 from fastmcp import FastMCP
 
 from cmxflow import Workflow
-from cmxflow.block import ScoreBlock, SinkBlock
+from cmxflow.block import Block, ScoreBlock, SinkBlock, SourceBlock
 from cmxflow.mcp.state import (
     get_available_blocks,
     get_block_descriptions,
@@ -18,6 +18,7 @@ from cmxflow.operators import RDKitBlock
 from cmxflow.opt import Optimizer
 from cmxflow.sinks import MoleculeSinkBlock
 from cmxflow.sources import MoleculeSourceBlock
+from cmxflow.utils.parallel import ParallelBlock, make_parallel
 
 mcp = FastMCP(name="cmxflow")
 
@@ -47,12 +48,14 @@ def _build_workflow_impl(
 
     Args:
         action: One of "create", "add_block", "remove_block", "list_blocks",
-            "validate", "clear", "show".
+            "validate", "clear", "show", "make_parallel".
         block_type: Block class name (e.g., "ConformerGenerationBlock").
-        block_config: Block initialization parameters.
+        block_config: Block initialization parameters. For "make_parallel" action,
+            this specifies parallel execution options: max_workers, chunk_size,
+            ordered, error_handling.
         rdkit_method: For RDKitBlock, the method path
             (e.g., "rdkit.Chem.Descriptors.MolWt").
-        index: Position for insert/remove operations.
+        index: Position for insert/remove/make_parallel operations.
 
     Returns:
         Status message and current workflow state.
@@ -223,12 +226,84 @@ def _build_workflow_impl(
             "num_blocks": len(state.workflow.blocks),
         }
 
+    elif action == "make_parallel":
+        if state.workflow is None:
+            return {
+                "status": "error",
+                "message": "No workflow exists. Use action='create' first.",
+            }
+
+        if index is None:
+            return {
+                "status": "error",
+                "message": "Must provide index for make_parallel action",
+            }
+
+        if index < 0 or index >= len(state.workflow.blocks):
+            return {
+                "status": "error",
+                "message": f"Index {index} out of range. "
+                f"Workflow has {len(state.workflow.blocks)} blocks (0-indexed).",
+            }
+
+        target_block = state.workflow.blocks[index]
+
+        # Check block type - only regular Block can be parallelized
+        if isinstance(target_block, (SourceBlock, SinkBlock, ScoreBlock)):
+            return {
+                "status": "error",
+                "message": f"Cannot parallelize {type(target_block).__name__}. "
+                "Only processing blocks can be parallelized.",
+            }
+
+        if isinstance(target_block, ParallelBlock):
+            return {
+                "status": "error",
+                "message": f"Block at index {index} is already parallelized.",
+            }
+
+        # Verify it's actually a Block instance
+        if not isinstance(target_block, Block):
+            return {
+                "status": "error",
+                "message": f"Cannot parallelize {type(target_block).__name__}. "
+                "Only processing blocks can be parallelized.",
+            }
+
+        # Extract parallel config from block_config
+        config = block_config or {}
+        try:
+            parallel_block = make_parallel(
+                target_block,
+                max_workers=config.get("max_workers"),
+                chunk_size=config.get("chunk_size", 1),
+                ordered=config.get("ordered", True),
+                error_handling=config.get("error_handling", "skip"),
+            )
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Failed to parallelize block: {e}",
+            }
+
+        # ParallelBlock wraps BlockBase but isn't a subclass; workflow.add()
+        # accepts Any, so this is safe at runtime
+        state.workflow.blocks[index] = parallel_block  # type: ignore[call-overload]
+        state.validated = False
+        state.inputs_set = False
+
+        return {
+            "status": "success",
+            "message": f"Parallelized {target_block.name} at index {index}",
+            "workflow": _format_workflow(state.workflow),
+        }
+
     else:
         return {
             "status": "error",
             "message": f"Unknown action: {action}. "
             "Valid actions: create, add_block, remove_block, list_blocks, "
-            "validate, clear, show",
+            "validate, clear, show, make_parallel",
         }
 
 
@@ -387,12 +462,14 @@ def build_workflow(
 
     Args:
         action: One of "create", "add_block", "remove_block", "list_blocks",
-            "validate", "clear", "show".
+            "validate", "clear", "show", "make_parallel".
         block_type: Block class name (e.g., "ConformerGenerationBlock").
-        block_config: Block initialization parameters.
+        block_config: Block initialization parameters. For "make_parallel" action,
+            this specifies parallel execution options: max_workers, chunk_size,
+            ordered, error_handling.
         rdkit_method: For RDKitBlock, the method path
             (e.g., "rdkit.Chem.Descriptors.MolWt").
-        index: Position for insert/remove operations.
+        index: Position for insert/remove/make_parallel operations.
 
     Returns:
         Status message and current workflow state.

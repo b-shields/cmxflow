@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "mcp__cmxflow__build_workflow",
-      "mcp__cmxflow__run_workflow"
+      "mcp__cmxflow__run_workflow",
+      "Bash(chemscii:*)"
     ]
   }
 }

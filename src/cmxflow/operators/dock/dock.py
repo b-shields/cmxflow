@@ -13,12 +13,14 @@ import numpy as np
 from rdkit import Chem
 
 from cmxflow.operators.base import MoleculeBlock
-from cmxflow.operators.dock import (
-    AtomTyping,
+from cmxflow.operators.dock.pose import (
     PoseParams,
+    optimize_pose_cached,
+)
+from cmxflow.operators.dock.score import (
+    AtomTyping,
     VinardoParams,
     get_atom_typing,
-    optimize_pose_cached,
     vinardo_score_cached,
 )
 from cmxflow.parameter import (
@@ -184,6 +186,7 @@ class MoleculeDockBlock(MoleculeBlock):
         pose_params = PoseParams(
             max_iterations=self.get_param("max_iterations"),
             translation_bounds=(-box_size, box_size),
+            optimize_torsions=not self.get_param("rigid"),
         )
 
         # Dock

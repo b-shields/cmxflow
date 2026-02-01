@@ -175,8 +175,8 @@ def get_block_descriptions() -> dict[str, str]:
             "This step should always come somewhere AFTER a MoleculeAlignBlock."
         ),
         "MoleculeDockBlock": (
-            "Dock an aligned 3D conformer against a protein receptor from a .pdb file. "
-            "IMPORTANT: This step should always come somewhere AFTER a "
+            "Dock an aligned 3D molecule conformer against a protein receptor from a "
+            ".pdb file. IMPORTANT: This step should always come somewhere AFTER a "
             "MoleculeAlignBlock. It is a slow block and you should offer to make it "
             "parallel."
         ),

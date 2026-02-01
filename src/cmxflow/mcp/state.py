@@ -13,6 +13,7 @@ from cmxflow.operators import (
     EnumerateStereoBlock,
     Molecule3DSimilarityBlock,
     MoleculeAlignBlock,
+    MoleculeDockBlock,
     MoleculeSimilarityBlock,
     RDKitBlock,
 )
@@ -99,6 +100,7 @@ def get_available_blocks() -> dict[str, type]:
         "MoleculeAlignBlock": MoleculeAlignBlock,
         "MoleculeSimilarityBlock": MoleculeSimilarityBlock,
         "RDKitBlock": RDKitBlock,
+        "MoleculeDockBlock": MoleculeDockBlock,
         # Scores
         "EnrichmentScoreBlock": EnrichmentScoreBlock,
         "ShapeOverlayScoreBlock": ShapeOverlayScoreBlock,
@@ -110,7 +112,7 @@ def workflow_has_3d_blocks() -> bool:
 
     Returns:
         True if workflow contains ConformerGenerationBlock, MoleculeAlignBlock,
-        Molecule3DSimilarityBlock, or ShapeOverlayScoreBlock.
+        Molecule3DSimilarityBlock, ShapeOverlayScoreBlock or MoleculeDockBlock.
     """
     state = get_global_state()
     if state.workflow is None:
@@ -121,6 +123,7 @@ def workflow_has_3d_blocks() -> bool:
         MoleculeAlignBlock,
         Molecule3DSimilarityBlock,
         ShapeOverlayScoreBlock,
+        MoleculeDockBlock,
     )
 
     for block in state.workflow.blocks:
@@ -147,21 +150,6 @@ def get_block_descriptions() -> dict[str, str]:
             "(SDF, SMILES, CSV, Parquet)."
         ),
         # Operators
-        "ConformerGenerationBlock": (
-            "Generate 3D conformers using RDKit. YOU MUST have the "
-            "EnumerateStereoBlock before the ConformerGenerationBlock."
-        ),
-        "EnumerateStereoBlock": ("Enumerate all possible stereoisomers of molecules."),
-        "Molecule3DSimilarityBlock": (
-            "Compute 3D shape similarity between molecules and a reference. YOU "
-            "MUST have the EnumerateStereoBlock, CoformerGenerationBlock, and "
-            "MoleculeAlignBlock before the Molecule3DSimilarityBlock."
-        ),
-        "MoleculeAlignBlock": (
-            "Align molecules to a reference structure using 3D coordinates. YOU "
-            "MUST have the EnumerateStereoBlock and ConformerGenerationBlock before "
-            "the MoleculeAlignBlock."
-        ),
         "MoleculeSimilarityBlock": (
             "Compute 2D fingerprint similarity between molecules and a reference."
         ),
@@ -169,12 +157,36 @@ def get_block_descriptions() -> dict[str, str]:
             "Apply an arbitrary RDKit method to molecules. Provide the method "
             "as a string path (e.g., 'rdkit.Chem.Descriptors.MolWt')."
         ),
+        "EnumerateStereoBlock": (
+            "Enumerate all possible stereoisomers of molecules. IMPORTANT: This step "
+            "should always come somewhere BEFORE a ConformerGenerationBlock."
+        ),
+        "ConformerGenerationBlock": (
+            "Generate 3D conformers. IMPORTANT: This step should always come somewhere "
+            "AFTER a EnumerateStereoBlock."
+        ),
+        "MoleculeAlignBlock": (
+            "Align molecules to a reference structure using 3D coordinates. IMPORTANT: "
+            "This step should always come somewhere BEFORE a Molecule3DSimlarityBlock, "
+            "MoleculeDockBlock, or ShapeOverlayScoreBlock."
+        ),
+        "Molecule3DSimilarityBlock": (
+            "Compute 3D shape similarity between molecules and a reference. IMPORTANT: "
+            "This step should always come somewhere AFTER a MoleculeAlignBlock."
+        ),
+        "MoleculeDockBlock": (
+            "Dock an aligned 3D conformer against a protein receptor from a .pdb file. "
+            "IMPORTANT: This step should always come somewhere AFTER a "
+            "MoleculeAlignBlock. It is a slow block and you should offer to make it "
+            "parallel."
+        ),
         # Scores
         "EnrichmentScoreBlock": (
             "Compute enrichment AUC for scoring molecules. Used to optimize workflows."
         ),
         "ShapeOverlayScoreBlock": (
             "Score shape similarity with references to optimize for good overlays. "
-            "YOU MUST have MoleculeAlignBlock before the ShapeOverlayScoreBlock."
+            "IMPORTANT: This step should always come somewhere AFTER a "
+            "MoleculeAlignBlock."
         ),
     }

@@ -5,7 +5,11 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Callable
 
-from cmxflow.parameter import Parameter
+from cmxflow.parameter import (
+    Categorical,
+    Continuous,
+    Integer,
+)
 from cmxflow.utils import text
 
 
@@ -42,7 +46,7 @@ class BlockBase(ABC):
             key: Path(".") for key in input_files
         }
         self.input_text: dict[str, str] = {key: "" for key in input_text}
-        self.params: dict[str, Parameter] = {}
+        self.params: dict[str, Continuous | Categorical | Integer] = {}
 
     def get_params(self) -> dict[str, Any]:
         """Get all mutable parameters for this block.
@@ -52,7 +56,12 @@ class BlockBase(ABC):
         """
         return self.params
 
-    def mutable(self, *parameters: Parameter) -> None:
+    def get_param(self, key: str) -> Any:
+        if key not in self.params:
+            raise KeyError(f"{key} is not a valid parameter.")
+        return self.params[key].get()
+
+    def mutable(self, *parameters: Continuous | Integer | Categorical) -> None:
         """Register parameters as mutable for optimization.
 
         Args:

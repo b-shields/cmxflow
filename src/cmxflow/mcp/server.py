@@ -528,10 +528,15 @@ def build_workflow(
     """Build a cheminformatics workflow step-by-step.
 
     YOU MUST "show" the workflow structure before using the run_workflow or
-    optimize_workflow tools. Annotate the output of the "show" action and print
-    the result.
+    optimize_workflow tools. It may include some annotations and added
+    context but the text graphic MUST INCLUDE:
+    1. A header with a fun name for the workflow (be creative).
+    2. The output of the "show" action should be mostly maintained.
 
     IMPORTANT: Do not use the "clear" or "create" actions after optimizing a workflow.
+
+    If adding a ScoreBlock YOU MUST ask users to confirm which ScoreBlock and if it
+    should be minimized or maximized.
 
     Args:
         action: One of "create", "add_block", "remove_block", "list_blocks",
@@ -659,7 +664,8 @@ def _optimize_workflow_impl(
             return {
                 "status": "error",
                 "message": f"Workflow must end with ScoreBlock for optimization. "
-                f"Current ending: {last_block}",
+                f"Current ending: {last_block}. IMPORTANT: Ask user which score to "
+                "use.",
             }
 
         # Check for optimizable parameters
@@ -903,9 +909,14 @@ def optimize_workflow(
 
     Offer to use this tool if a user doesn't like the output of a workflow.
 
-    IMPORTANT: After starting optimization, do NOT poll status automatically.
-    Only check status when the user explicitly asks for progress or results.
-    Optimization may take a while depending on the number of trials.
+    IMPORTANT: The following rules MUST BE FOLLOWED:
+    1. YOU MUST confirm selection of n_trials. Typically 30 is good but users
+       may want more or less.
+    2. YOU MUST ask if any steps should be parallel before using "start" action.
+    3. After starting optimization, DO NOT poll status automatically. Only check
+       status when the user explicitly asks for progress or results.
+    4. NEVER use the any other tool (especailly build_workflow) while
+       optimize workflow is running
 
     Args:
         action: One of "start", "status", "get_best_params", "set_best_params",
@@ -937,10 +948,10 @@ if _PYMOL_AVAILABLE:
     ) -> dict[str, Any]:
         """Open 3D structure files in PyMOL for visualization.
 
-        IMPORTANT: Only use this tool after executing a workflow that contains
-        3D blocks (ConformerGenerationBlock, MoleculeAlignBlock, etc.).
+        IMPORTANT: Offer to use this tool after executing a workflow that
+        generates 3D input (e.g., conformer generation, alignment, docking)
 
-        Before calling this tool, you MUST:
+        Before calling this tool, YOU MUST:
         1. Confirm with the user which 3D output file(s) to open
         2. Ask if they want to include additional structure files (e.g., PDB)
 

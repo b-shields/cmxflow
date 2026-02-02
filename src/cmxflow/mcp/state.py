@@ -17,7 +17,11 @@ from cmxflow.operators import (
     MoleculeSimilarityBlock,
     RDKitBlock,
 )
-from cmxflow.scores import EnrichmentScoreBlock, ShapeOverlayScoreBlock
+from cmxflow.scores import (
+    AverageScoreBlock,
+    EnrichmentScoreBlock,
+    ShapeOverlayScoreBlock,
+)
 from cmxflow.sinks import MoleculeSinkBlock
 from cmxflow.sources import MoleculeSourceBlock
 
@@ -102,6 +106,7 @@ def get_available_blocks() -> dict[str, type]:
         "RDKitBlock": RDKitBlock,
         "MoleculeDockBlock": MoleculeDockBlock,
         # Scores
+        "AvergeScoreBlock": AverageScoreBlock,
         "EnrichmentScoreBlock": EnrichmentScoreBlock,
         "ShapeOverlayScoreBlock": ShapeOverlayScoreBlock,
     }
@@ -181,12 +186,19 @@ def get_block_descriptions() -> dict[str, str]:
             "parallel."
         ),
         # Scores
+        "AverageScoreBlock": (
+            "Compute the average of a property as a score. Used to optimize physically "
+            "meaningful scores (e.g., ligand affinity). IMPORTANT: Ask if the score "
+            "should be minimized or maximized (e.g, 'docking_score' should be "
+            "minimized)."
+        ),
         "EnrichmentScoreBlock": (
-            "Compute enrichment AUC for scoring molecules. Used to optimize workflows."
+            "Compute enrichment AUC for scoring molecules. Used to optimize virtual "
+            "screening workflows. IMPORTANT: This score should be maximized."
         ),
         "ShapeOverlayScoreBlock": (
             "Score shape similarity with references to optimize for good overlays. "
-            "IMPORTANT: This step should always come somewhere AFTER a "
+            "IMPORTANT: This score should be maximized always come somewhere AFTER a "
             "MoleculeAlignBlock."
         ),
     }

@@ -171,3 +171,56 @@ class EnrichmentScoreBlock(ScoreBlock):
             mol.SetDoubleProp("workflow_score", float(score))
 
         return mol
+
+
+class AverageScoreBlock(ScoreBlock):
+    """ScoreBlock that computes average of a molecular property.
+
+    Uses the same pooler approach as EnrichmentScoreBlock to convert
+    molecules to a DataFrame, then computes the mean of the specified
+    property column.
+    """
+
+    def __init__(
+        self,
+        pooler: Callable[[Iterator[Any]], pd.DataFrame] = mol_to_dataframe,
+    ) -> None:
+        """Initialize with pooler configuration.
+
+        Args:
+            pooler: Function to convert molecule iterator to DataFrame.
+        """
+        super().__init__(input_text=["property"])
+        self.pooler = pooler
+
+    def objective(self, iter: Iterator[Chem.Mol | CmxMol]) -> float:
+        """Compute average of the specified property.
+
+        Args:
+            iter: Iterator of molecules with properties.
+
+        Returns:
+            Mean value of the specified property column.
+        """
+        df = self.pooler(iter)
+        property_col = self.input_text["property"]
+
+        if df.empty:
+            logger.warning("Empty DataFrame, returning 0.0")
+            return 0.0
+
+        if property_col not in df.columns:
+            raise ValueError(f"Property column '{property_col}' not found in data")
+
+        return float(df[property_col].mean())
+
+    def forward(self, mol: Chem.Mol | CmxMol) -> Chem.Mol | CmxMol:
+        """Pass through molecule unchanged.
+
+        Args:
+            mol: Input molecule.
+
+        Returns:
+            The same molecule, unchanged.
+        """
+        return mol

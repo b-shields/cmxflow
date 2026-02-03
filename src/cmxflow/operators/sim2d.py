@@ -37,9 +37,10 @@ class MoleculeSimilarityBlock(MoleculeBlock):
             radius, nbits).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, **kwargs) -> None:
         """Initialize the similarity search block."""
         super().__init__(name="Molecule2DSimilarity", input_files=["queries"])
+        self.set_inputs(**kwargs)
 
         # Register mutable parameters
         self.mutable(

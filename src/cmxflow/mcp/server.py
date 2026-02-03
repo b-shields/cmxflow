@@ -448,7 +448,7 @@ def _run_workflow_impl(
         except KeyError as e:
             return {
                 "status": "error",
-                "message": f"Missing required input: {e}",
+                "message": f"Missing required input(s): {e}",
             }
         except Exception as e:
             return {
@@ -531,12 +531,15 @@ def build_workflow(
     optimize_workflow tools. It may include some annotations and added
     context but the text graphic MUST INCLUDE:
     1. A header with a fun name for the workflow (be creative).
-    2. The output of the "show" action should be mostly maintained.
+    2. The output of the "show" action should be maintained but added to.
 
     IMPORTANT: Do not use the "clear" or "create" actions after optimizing a workflow.
 
     If adding a ScoreBlock YOU MUST ask users to confirm which ScoreBlock and if it
     should be minimized or maximized.
+
+    CRITICAL: Workflows can only include steps with available blocks. You may have to
+    run multiple workflows if an intermediate step is not included.
 
     Args:
         action: One of "create", "add_block", "remove_block", "list_blocks",

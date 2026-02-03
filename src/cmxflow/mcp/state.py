@@ -15,6 +15,7 @@ from cmxflow.operators import (
     MoleculeAlignBlock,
     MoleculeDockBlock,
     MoleculeSimilarityBlock,
+    PropertyFilterBlock,
     RDKitBlock,
 )
 from cmxflow.scores import (
@@ -104,6 +105,7 @@ def get_available_blocks() -> dict[str, type]:
         "MoleculeAlignBlock": MoleculeAlignBlock,
         "MoleculeSimilarityBlock": MoleculeSimilarityBlock,
         "RDKitBlock": RDKitBlock,
+        "PropertyFilterblock": PropertyFilterBlock,
         "MoleculeDockBlock": MoleculeDockBlock,
         # Scores
         "AvergeScoreBlock": AverageScoreBlock,
@@ -160,7 +162,13 @@ def get_block_descriptions() -> dict[str, str]:
         ),
         "RDKitBlock": (
             "Apply an arbitrary RDKit method to molecules. Provide the method "
-            "as a string path (e.g., 'rdkit.Chem.Descriptors.MolWt')."
+            "as a string path (e.g., 'rdkit.Chem.Descriptors.MolWt'). IMPORTANT: "
+            "only computes properties (must use other blocks to act on properties)."
+        ),
+        "PropetyFilterBlock": (
+            "Apply any number of numerical property filteres to remove molecules. "
+            "Filters are specified as ',' separated values (e.g., 200<=MolWt<500, "
+            "logP<5, HBD==2, HBA!=0)"
         ),
         "EnumerateStereoBlock": (
             "Enumerate all possible stereoisomers of molecules. IMPORTANT: This step "

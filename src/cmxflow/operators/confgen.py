@@ -98,7 +98,7 @@ class ConformerGenerationBlock(MoleculeBlock):
             useRandomCoords).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, **kwargs) -> None:
         """Initialize the conformer generation block."""
         super().__init__(name="ConformerGeneration")
 

@@ -32,9 +32,10 @@ class Molecule3DSimilarityBlock(MoleculeBlock):
         params: Dictionary of mutable parameters (method, tversky_alpha, tversky_beta).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, **kwargs) -> None:
         """Initialize the 3D similarity block."""
         super().__init__(name="Molecule3DSimilarity", input_files=["query"])
+        self.set_inputs(**kwargs)
 
         # Register mutable parameters
         self.mutable(

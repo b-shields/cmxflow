@@ -95,7 +95,7 @@ class _BlockFactory:
         """
         self._cls = block.__class__
         self._params = {k: v.get() for k, v in block.params.items()}
-        self._input_files: dict[str, Path | str] = dict(block.input_files)
+        self._input_files: dict[str, Path] = dict(block.input_files)
         self._input_text: dict[str, str] = dict(block.input_text)
 
     def __call__(self) -> Block:

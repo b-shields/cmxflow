@@ -42,11 +42,19 @@ class BlockBase(ABC):
             input_files = []
         if input_text is None:
             input_text = []
-        self.input_files: dict[str, Path | str] = {
-            key: Path(".") for key in input_files
-        }
+        self.input_files: dict[str, Path] = {key: Path(".") for key in input_files}
         self.input_text: dict[str, str] = {key: "" for key in input_text}
         self.params: dict[str, Continuous | Categorical | Integer] = {}
+
+    def set_inputs(self, **config) -> None:
+        """Set inputs if matching required files or text."""
+        for key, value in config.items():
+            if key in self.input_files:
+                path = Path(value)
+                if path.is_file():
+                    self.input_files[key] = path
+            if key in self.input_text:
+                self.input_text[key] = value
 
     def get_params(self) -> dict[str, Any]:
         """Get all mutable parameters for this block.
@@ -74,7 +82,7 @@ class BlockBase(ABC):
         block = text.generate_framed_block(self.name, self.params)
         _inputs = {}
         if self.input_files:
-            _input_files = dict(self.input_files)
+            _input_files: dict[str, str | Path] = dict(self.input_files)
             for key, value in _input_files.items():
                 if str(value) == ".":
                     _input_files[key] = "[FILE]"

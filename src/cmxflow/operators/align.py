@@ -29,9 +29,10 @@ class MoleculeAlignBlock(MoleculeBlock):
         params: Dictionary of mutable parameters for alignment configuration.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, **kwargs) -> None:
         """Initialize the molecular alignment block."""
         super().__init__(name="MoleculeAlign", input_files=["query"])
+        self.set_inputs(**kwargs)
 
         # Register mutable parameters
         self.mutable(

@@ -147,22 +147,39 @@ class Workflow:
             KeyError: If a required input is missing.
             FileNotFoundError: If a required input file does not exist.
         """
-        required = self.get_required_input()
-        for key in required:
-            # Check for required input
-            if key not in required_inputs:
-                raise KeyError(f"Required inputs missing {key}")
+        missing_files = []
+        missing_text = []
+        for key in self.get_required_input():
+            # Get workflow to block map
             uid, name = key.split("@")
             bid_str, itype = uid.split(".")
             bid = int(bid_str)
+            # Check files
             if itype == "file":
-                # Make sure file exists
-                path = Path(required_inputs[key])
-                if not path.is_file():
-                    raise FileNotFoundError(f"Required input file {key} does not exist")
-                self.blocks[bid].input_files[name] = path
+                if key in required_inputs:
+                    path = Path(required_inputs[key])
+                    if path.is_file():
+                        self.blocks[bid].input_files[name] = path
+                    elif not self.blocks[bid].input_files[name].is_file():
+                        raise FileNotFoundError(
+                            f"Input file specified for key {key} does not exist."
+                        )
+                if not self.blocks[bid].input_files[name].is_file():
+                    missing_files.append(f"'{key}'")
+            # Check text
             elif itype == "text":
-                self.blocks[bid].input_text[name] = required_inputs[key]
+                if key in required_inputs:
+                    self.blocks[bid].input_text[name] = required_inputs[key]
+                if not self.blocks[bid].input_text[name]:
+                    missing_text.append(f"'{key}'")
+        if missing_files:
+            raise KeyError(
+                f"Required input files are missing: {", ".join(missing_files)}"
+            )
+        if missing_text:
+            raise KeyError(
+                f"Required input text keys are missing: {", ".join(missing_text)}"
+            )
 
     def forward(
         self, input_path: Path | str, output_path: Path | str = ""

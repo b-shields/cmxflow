@@ -72,13 +72,13 @@ class MoleculeDockBlock(MoleculeBlock):
         # Register mutable parameters
         self.mutable(
             # Vinardo score weights
-            Continuous("w_gauss1", -0.045, -0.1, -0.01),
-            Continuous("w_repulsion", 0.800, 0.2, 2.0),
-            Continuous("w_hydrophobic", -0.035, -0.1, -0.01),
-            Continuous("w_hbond", -0.600, -2.0, -0.1),
+            Continuous("w_gauss1", -0.045, -0.065, -0.025),
+            Continuous("w_repulsion", 0.8, 0.8, 1.2),
+            Continuous("w_hydrophobic", -0.035, -0.065, -0.015),
+            Continuous("w_hbond", -0.6, -0.8, -0.4),
             # Pose search
-            Integer("max_iterations", 100, 50, 200),
-            Continuous("box_size", 2.0, 1.0, 20.0),
+            Integer("max_iterations", 200, 10, 300),
+            Continuous("box_size", 1.0, 0.5, 2.0),
             Categorical("rigid", False, [True, False]),
         )
 

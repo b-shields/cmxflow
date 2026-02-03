@@ -22,9 +22,7 @@ class RDKitBlock(MoleculeBlock):
     """
 
     def __init__(
-        self,
-        method: Callable[[Chem.Mol], Any] | str,
-        name: str | None = None,
+        self, method: Callable[[Chem.Mol], Any] | str, name: str | None = None, **kwargs
     ) -> None:
         """Initialize with an RDKit method.
 

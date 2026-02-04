@@ -527,6 +527,9 @@ def build_workflow(
 ) -> dict[str, Any]:
     """Build a cheminformatics workflow step-by-step.
 
+    NOTE: If you forget to add properties when you use 'add_block" they can be set
+    with the 'run_workflow' tool using the 'get_inputs' and 'set_inputs' actions.
+
     YOU MUST "show" the workflow structure before using the run_workflow or
     optimize_workflow tools. It may include some annotations and added
     context but the text graphic MUST INCLUDE:
@@ -573,6 +576,10 @@ def run_workflow(
     output_file: str | None = None,
 ) -> dict[str, Any]:
     """Execute a validated workflow.
+
+    If you forget to add properties when you ran the 'build_workflow' 'add_block"
+    action they can be set with this tool using the 'get_inputs' and 'set_inputs'
+    actions.
 
     Args:
         action: One of "get_inputs", "set_inputs", "execute".

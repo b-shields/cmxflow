@@ -273,8 +273,7 @@ class PropertyFilterBlock(MoleculeBlock):
             Property value as float, or None if not found or not numeric.
         """
         if not mol.HasProp(property_name):
-            logger.debug(f"Molecule missing property: {property_name}")
-            return None
+            raise KeyError(f"Molecule missing property: {property_name}")
 
         try:
             # Try to get as double first (most common for numeric props)

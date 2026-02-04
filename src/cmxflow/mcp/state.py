@@ -16,6 +16,8 @@ from cmxflow.operators import (
     MoleculeDockBlock,
     MoleculeSimilarityBlock,
     PropertyFilterBlock,
+    PropertyHeadBlock,
+    PropertyTailBlock,
     RDKitBlock,
 )
 from cmxflow.scores import (
@@ -105,7 +107,9 @@ def get_available_blocks() -> dict[str, type]:
         "MoleculeAlignBlock": MoleculeAlignBlock,
         "MoleculeSimilarityBlock": MoleculeSimilarityBlock,
         "RDKitBlock": RDKitBlock,
-        "PropertyFilterblock": PropertyFilterBlock,
+        "PropertyFilterBlock": PropertyFilterBlock,
+        "PropertyHeadBlock": PropertyHeadBlock,
+        "PropertyTailBlock": PropertyTailBlock,
         "MoleculeDockBlock": MoleculeDockBlock,
         # Scores
         "AvergeScoreBlock": AverageScoreBlock,
@@ -158,7 +162,8 @@ def get_block_descriptions() -> dict[str, str]:
         ),
         # Operators
         "MoleculeSimilarityBlock": (
-            "Compute 2D fingerprint similarity between molecules and a reference."
+            "Compute 2D fingerprint similarity between molecules and a reference. "
+            "This block adds the 'max_similarity' property to all input molecules."
         ),
         "RDKitBlock": (
             "Apply an arbitrary RDKit method to molecules. Provide the method "
@@ -169,6 +174,16 @@ def get_block_descriptions() -> dict[str, str]:
             "Apply any number of numerical property filteres to remove molecules. "
             "Filters are specified as ',' separated values (e.g., 200<=MolWt<500, "
             "logP<5, HBD==2, HBA!=0)"
+        ),
+        "PropertyHeadBlock": (
+            "Get the top 'count' molecules from the input stream (ranked descending) "
+            "by a specified 'property'. IMPORTANT the property must already be "
+            "computed."
+        ),
+        "PropertyTailBlock": (
+            "Get the bottom 'count' molecules from the input stream (ranked "
+            "descending) by a specified 'property'. IMPORTANT the property must "
+            "already be computed."
         ),
         "EnumerateStereoBlock": (
             "Enumerate all possible stereoisomers of molecules. IMPORTANT: This step "
@@ -181,17 +196,20 @@ def get_block_descriptions() -> dict[str, str]:
         "MoleculeAlignBlock": (
             "Align molecules to a reference structure using 3D coordinates. IMPORTANT: "
             "This step should always come somewhere BEFORE a Molecule3DSimlarityBlock, "
-            "MoleculeDockBlock, or ShapeOverlayScoreBlock."
+            "MoleculeDockBlock, or ShapeOverlayScoreBlock. This block adds the "
+            "'alignment_shape_similarity' property to all input molecules."
         ),
         "Molecule3DSimilarityBlock": (
             "Compute 3D shape similarity between molecules and a reference. IMPORTANT: "
-            "This step should always come somewhere AFTER a MoleculeAlignBlock."
+            "This step should always come somewhere AFTER a MoleculeAlignBlock. This "
+            "block adds the 'similarity_3d' property to all input molecules."
         ),
         "MoleculeDockBlock": (
             "Dock an aligned 3D molecule conformer against a protein receptor from a "
             ".pdb file. IMPORTANT: This step should always come somewhere AFTER a "
             "MoleculeAlignBlock. It is a slow block and you should offer to make it "
-            "parallel."
+            "parallel. This block adds the 'docking_score' property to all input "
+            "molecules."
         ),
         # Scores
         "AverageScoreBlock": (

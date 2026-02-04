@@ -77,9 +77,9 @@ class MoleculeDockBlock(MoleculeBlock):
             Continuous("w_hydrophobic", -0.035, -0.065, -0.015),
             Continuous("w_hbond", -0.6, -0.8, -0.4),
             # Pose search
-            Integer("max_iterations", 200, 10, 300),
+            Integer("max_iterations", 200, 100, 300),
             Continuous("box_size", 1.0, 0.5, 2.0),
-            Categorical("rigid", False, [True, False]),
+            Categorical("rigid", True, [True, False]),
         )
 
         # Lazy-loaded protein scoring components

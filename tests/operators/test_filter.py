@@ -186,16 +186,16 @@ class TestPropertyFilterBlockForward:
         result = block._forward(mol)
         assert result is None
 
-    def test_filters_molecule_missing_property(self) -> None:
-        """Test that molecules with missing properties are filtered."""
+    def test_raises_keyerror_missing_property(self) -> None:
+        """Test that molecules with missing properties raise KeyError."""
         block = PropertyFilterBlock()
         block.input_text["filters"] = "MolWt>40"
 
         mol = Chem.MolFromSmiles("CCO")
         # No MolWt property set
 
-        result = block._forward(mol)
-        assert result is None
+        with pytest.raises(KeyError, match="Molecule missing property: MolWt"):
+            block._forward(mol)
 
     def test_passes_with_empty_filter(self) -> None:
         """Test that empty filter passes all molecules."""

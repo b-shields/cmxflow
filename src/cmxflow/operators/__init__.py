@@ -6,6 +6,7 @@ from cmxflow.operators.confgen import ConformerGenerationBlock, EnumerateStereoB
 from cmxflow.operators.dock import MoleculeDockBlock
 from cmxflow.operators.filter import PropertyFilterBlock
 from cmxflow.operators.method import RDKitBlock
+from cmxflow.operators.select import PropertyHeadBlock, PropertyTailBlock
 from cmxflow.operators.sim2d import MoleculeSimilarityBlock
 from cmxflow.operators.sim3d import Molecule3DSimilarityBlock
 
@@ -18,5 +19,7 @@ __all__ = [
     "MoleculeDockBlock",
     "MoleculeSimilarityBlock",
     "PropertyFilterBlock",
+    "PropertyHeadBlock",
+    "PropertyTailBlock",
     "RDKitBlock",
 ]

@@ -120,7 +120,8 @@ class ConformerGenerationBlock(MoleculeBlock):
             True if the input is valid, False otherwise.
 
         Raises:
-            ValueError: If molecule has unspecified stereocenters.
+            ValueError: If molecule has unspecified chiral centers or
+                unspecified double bond stereochemistry.
         """
         if not super().check_input(arg):
             return False

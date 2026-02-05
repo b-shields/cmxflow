@@ -69,6 +69,7 @@ class MoleculeSimilarityBlock(MoleculeBlock):
         self._query_names: list[str] | None = None
 
     def reset_cache(self) -> None:
+        """Reset cached query fingerprints for a new optimization iteration."""
         self._query_fingerprints = None
         self._query_names = None
 
@@ -104,7 +105,15 @@ class MoleculeSimilarityBlock(MoleculeBlock):
             raise ValueError(f"Unknown fingerprint type: {fp_type}")
 
     def _load_query_fingerprints(self) -> None:
-        """Load and compute fingerprints for query molecules."""
+        """Load and compute fingerprints for query molecules.
+
+        Reads molecules from the query file and computes fingerprints
+        using the current fingerprint parameters. Results are cached
+        in _query_fingerprints and _query_names.
+
+        Raises:
+            ValueError: If no valid molecules are found in the query file.
+        """
         query_path = Path(self.input_files["queries"])
         fp_func = self._get_fingerprint_func()
 

@@ -63,8 +63,12 @@ class MoleculeAlignBlock(MoleculeBlock):
     def _load_reference_molecules(self) -> None:
         """Load and validate reference molecules with 3D conformers.
 
+        Reads molecules from the query file and validates that each has
+        3D conformers. Results are cached in _reference_mols and _reference_names.
+
         Raises:
-            ValueError: If no valid reference molecules with 3D conformers found.
+            ValueError: If a reference molecule lacks 3D conformers or
+                if no valid reference molecules are found in the query file.
         """
         query_path = Path(self.input_files["query"])
 

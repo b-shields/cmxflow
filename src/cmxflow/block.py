@@ -46,8 +46,15 @@ class BlockBase(ABC):
         self.input_text: dict[str, str] = {key: "" for key in input_text}
         self.params: dict[str, Continuous | Categorical | Integer] = {}
 
-    def set_inputs(self, **config) -> None:
-        """Set inputs if matching required files or text."""
+    def set_inputs(self, **config: str) -> None:
+        """Set inputs if matching required files or text.
+
+        Args:
+            **config: Keyword arguments mapping input names to values.
+                For file inputs, values should be file paths.
+                For text inputs, values should be strings.
+                For params, values should match the parameter type.
+        """
         for key, value in config.items():
             if key in self.input_files:
                 path = Path(value)
@@ -67,6 +74,17 @@ class BlockBase(ABC):
         return self.params
 
     def get_param(self, key: str) -> Any:
+        """Get the current value of a mutable parameter.
+
+        Args:
+            key: Name of the parameter to retrieve.
+
+        Returns:
+            The current value of the parameter.
+
+        Raises:
+            KeyError: If the parameter name is not registered.
+        """
         if key not in self.params:
             raise KeyError(f"{key} is not a valid parameter.")
         return self.params[key].get()
@@ -104,7 +122,12 @@ class BlockBase(ABC):
     def __call__(self, *arg: Any) -> Any: ...
 
     def reset_cache(self) -> None:
-        """Method called in each optimization iteration."""
+        """Reset any cached state for a new optimization iteration.
+
+        Called at the start of each optimization trial to ensure blocks
+        don't retain stale cached data. Override in subclasses that
+        maintain internal caches.
+        """
         pass
 
 

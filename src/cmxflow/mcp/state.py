@@ -112,7 +112,7 @@ def get_available_blocks() -> dict[str, type]:
         "PropertyTailBlock": PropertyTailBlock,
         "MoleculeDockBlock": MoleculeDockBlock,
         # Scores
-        "AvergeScoreBlock": AverageScoreBlock,
+        "AverageScoreBlock": AverageScoreBlock,
         "EnrichmentScoreBlock": EnrichmentScoreBlock,
         "ShapeOverlayScoreBlock": ShapeOverlayScoreBlock,
     }
@@ -170,8 +170,8 @@ def get_block_descriptions() -> dict[str, str]:
             "as a string path (e.g., 'rdkit.Chem.Descriptors.MolWt'). IMPORTANT: "
             "only computes properties (must use other blocks to act on properties)."
         ),
-        "PropetyFilterBlock": (
-            "Apply any number of numerical property filteres to remove molecules. "
+        "PropertyFilterBlock": (
+            "Apply any number of numerical property filters to remove molecules. "
             "Filters are specified as ',' separated values (e.g., 200<=MolWt<500, "
             "logP<5, HBD==2, HBA!=0)"
         ),

@@ -32,6 +32,7 @@ class Workflow:
         self.blocks: list[BlockBase] = []
 
     def reset_cache(self) -> None:
+        """Reset cached state in all blocks for a new optimization iteration."""
         for block in self.blocks:
             block.reset_cache()
 

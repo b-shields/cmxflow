@@ -24,28 +24,51 @@ class Mol(Chem.Mol):
 
         Args:
             mol: RDKit Mol object to wrap.
-            cache_props: If True, immediately cache current properties.
         """
         super().__init__(mol)
         self._prop_cache: dict[str, Any] = super().GetPropsAsDict(includePrivate=True)
 
     def SetProp(self, key: str, value: str, **kwargs: bool) -> None:
-        """Set a string property, caching for pickle preservation."""
+        """Set a string property, caching for pickle preservation.
+
+        Args:
+            key: Property name.
+            value: Property value as string.
+            **kwargs: Additional arguments passed to RDKit SetProp.
+        """
         self._prop_cache[key] = value
         super().SetProp(key, value, **kwargs)
 
     def SetDoubleProp(self, key: str, value: float, **kwargs: bool) -> None:
-        """Set a float property, caching for pickle preservation."""
+        """Set a float property, caching for pickle preservation.
+
+        Args:
+            key: Property name.
+            value: Property value as float.
+            **kwargs: Additional arguments passed to RDKit SetDoubleProp.
+        """
         self._prop_cache[key] = value
         super().SetDoubleProp(key, value, **kwargs)
 
     def SetBoolProp(self, key: str, value: bool, **kwargs: bool) -> None:
-        """Set a bool property, caching for pickle preservation."""
+        """Set a bool property, caching for pickle preservation.
+
+        Args:
+            key: Property name.
+            value: Property value as bool.
+            **kwargs: Additional arguments passed to RDKit SetBoolProp.
+        """
         self._prop_cache[key] = value
         super().SetBoolProp(key, value, **kwargs)
 
     def SetIntProp(self, key: str, value: int, **kwargs: bool) -> None:
-        """Set an int property, caching for pickle preservation."""
+        """Set an int property, caching for pickle preservation.
+
+        Args:
+            key: Property name.
+            value: Property value as int.
+            **kwargs: Additional arguments passed to RDKit SetIntProp.
+        """
         self._prop_cache[key] = value
         super().SetIntProp(key, value, **kwargs)
 
@@ -62,7 +85,14 @@ class Mol(Chem.Mol):
                 self.SetProp(key, str(value))
 
     def GetPropsAsDict(self, **kwargs: bool) -> dict[str, Any]:
-        """Get properties as dict, restoring cached properties first."""
+        """Get properties as dict, restoring cached properties first.
+
+        Args:
+            **kwargs: Additional arguments passed to RDKit GetPropsAsDict.
+
+        Returns:
+            Dictionary of all molecule properties.
+        """
         self.restore_properties()
         result: dict[str, Any] = super().GetPropsAsDict(**kwargs)
         return result

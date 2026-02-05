@@ -44,10 +44,20 @@ def split_conformers(mols: Iterator[Chem.Mol | Mol]) -> Iterator[Chem.Mol]:
 
 
 class SDWriter(Chem.SDWriter):
-    """SDWriter that restores cached properties before writing."""
+    """SDWriter that restores cached properties before writing.
+
+    Extends RDKit's SDWriter to handle Mol objects by restoring
+    cached properties before writing to ensure all properties are
+    preserved in the output file.
+    """
 
     def write(self, mol: Chem.Mol | Mol, **kwargs: bool) -> None:
-        """Write molecule to SDF, restoring CmxMol properties first."""
+        """Write molecule to SDF, restoring Mol properties first.
+
+        Args:
+            mol: RDKit Mol or Mol object to write.
+            **kwargs: Additional arguments passed to RDKit SDWriter.write().
+        """
         if isinstance(mol, Mol):
             mol.restore_properties()
         super().write(mol, **kwargs)

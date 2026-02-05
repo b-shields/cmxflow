@@ -165,6 +165,14 @@ class EnrichmentScoreBlock(ScoreBlock):
         return self.metric(scores, labels)
 
     def forward(self, mol: Chem.Mol | CmxMol) -> Chem.Mol | CmxMol:
+        """Add workflow_score property during normal (non-optimization) execution.
+
+        Args:
+            mol: Input molecule.
+
+        Returns:
+            Molecule with workflow_score property added if score column exists.
+        """
         if not self.get_params():
             return mol
 

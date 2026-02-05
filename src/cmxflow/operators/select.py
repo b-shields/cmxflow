@@ -40,7 +40,17 @@ class PropertySelectBlock(MoleculeBlock):
         self.set_inputs(**kwargs)
 
     def _forward(self, mol: Chem.Mol) -> Chem.Mol | None:
-        """Not used - this block overrides __call__ directly."""
+        """Not implemented - this block overrides __call__ directly.
+
+        PropertySelectBlock is an N:M transform that must collect all inputs
+        before producing output. The __call__ method handles the full logic.
+
+        Args:
+            mol: Unused.
+
+        Raises:
+            NotImplementedError: Always raised as this method should not be called.
+        """
         raise NotImplementedError(f"{self.__class__.__name__} uses __call__ directly")
 
     def _get_count(self) -> int:

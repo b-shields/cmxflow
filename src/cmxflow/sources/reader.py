@@ -15,11 +15,13 @@ def _parse_suffix(path: Path) -> tuple[str, bool]:
     """Parse file suffix and detect gzip compression.
 
     Args:
-        path: Path to parse.
+        path: Path object to extract and parse suffixes from.
 
     Returns:
-        Tuple of (base_suffix, is_gzipped).
-        Example: ".sdf.gz" -> (".sdf", True)
+        Tuple of (base_suffix, is_gzipped) where base_suffix is the
+        file extension without .gz, and is_gzipped indicates if the
+        file is gzip compressed.
+        Example: Path("file.sdf.gz") -> (".sdf", True)
     """
     suffixes = [s.lower() for s in path.suffixes]
     if suffixes and suffixes[-1] == ".gz":

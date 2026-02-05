@@ -16,6 +16,7 @@ class Parameter(ABC):
 
         Args:
             name: Name of the parameter.
+            default: Default value for the parameter.
         """
         self.name = name
         self.set(default)
@@ -32,7 +33,10 @@ class Parameter(ABC):
         """Set the parameter value.
 
         Args:
-            value: New value.
+            value: New value to set.
+
+        Raises:
+            ValueError: If the value fails validation via check().
         """
         if not self.check(value):
             raise ValueError(f"Value {value} is not allowed for {self.name}")
@@ -41,7 +45,12 @@ class Parameter(ABC):
     @property
     @abstractmethod
     def options(self) -> Any:
-        """Return the allowed options/range for this parameter."""
+        """Return the allowed options/range for this parameter.
+
+        Returns:
+            For Continuous/Integer: tuple of (low, high) bounds.
+            For Categorical: list of allowed values.
+        """
         ...
 
     @abstractmethod

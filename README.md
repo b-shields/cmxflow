@@ -90,7 +90,7 @@ Contributions are welcome! This is a side project, so reviews may take some time
 
 1. **Open an issue first** for significant changes to discuss the approach
 2. **Fork the repo** and create a feature branch from `main`
-3. **Follow the code style** - run `mypy`, `black`, and `ruff` before committing (or instal provided precommit hooks)
+3. **Follow the code style** - run `mypy`, `black`, and `ruff` before committing (or install provided precommit hooks)
 
 ### PR Requirements
 

@@ -583,6 +583,8 @@ def run_workflow(
     2. A REALLY NICE LOOKING UNICODE BOX around the workflow diagram.
     3. A header with a fun name for the workflow (be creative) and use emojis.
 
+    Note: YOU MUST validate a workflow before using the run_workflow tool.
+
     Args:
         action: One of "get_inputs", "set_inputs", "execute".
         inputs: Input values for "set_inputs" action. Keys should match
@@ -922,13 +924,14 @@ def optimize_workflow(
     Offer to use this tool if a user doesn't like the output of a workflow.
 
     IMPORTANT: The following rules MUST BE FOLLOWED:
-    1. YOU MUST confirm selection of n_trials. Typically 30 is good but users
+    1. YOU MUST validate a workflow before using the run_workflow tool.
+    2. YOU MUST confirm selection of n_trials. Typically 30 is good but users
        may want more or less.
-    2. YOU MUST ask if any steps should be parallel before using "start" action.
-    3. After starting optimization, DO NOT poll status automatically. Only check
+    3. YOU MUST ask if any steps should be parallel before using "start" action.
+    4. After starting optimization, DO NOT poll status automatically. Only check
        status when the user explicitly asks for progress or results.
-    4. NEVER use the any other tool (especailly build_workflow) while
-       optimize workflow is running
+    5. NEVER use the any other tool (especailly build_workflow) while
+       optimize workflow is running.
 
     YOU MUST "show" the workflow structure before using the "optimize_workflow" tool. It
     may include some annotations and added context but the text graphic MUST INCLUDE:

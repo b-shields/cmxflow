@@ -12,7 +12,7 @@ import numpy as np
 from numpy.typing import NDArray
 from rdkit import Chem
 from rdkit.Chem import rdMolTransforms
-from scipy.optimize import minimize
+from scipy.optimize import basinhopping, minimize
 from scipy.spatial.transform import Rotation
 
 from cmxflow.operators.dock.score import (
@@ -46,7 +46,7 @@ class PoseParams:
     """
 
     max_iterations: int = 100
-    tolerance: float = 1e-4
+    tolerance: float = 1e-5
     translation_bounds: tuple[float, float] = (-10.0, 10.0)
     optimize_torsions: bool = True
     max_torsion_change: float = 180.0
@@ -610,6 +610,7 @@ def optimize_pose_cached(
     scoring_fn_params: VinardoParams | None = None,
     params: PoseParams | None = None,
     ligand_conf_id: int = 0,
+    basin_hopping: bool = False,
 ) -> OptimizationResult:
     """Optimize ligand pose with pre-computed protein data.
 
@@ -629,6 +630,7 @@ def optimize_pose_cached(
         scoring_fn_params: Parameters for the scoring function.
         params: Optimization parameters. If None, uses defaults.
         ligand_conf_id: Ligand conformer ID to optimize.
+        basin_hopping: Use basin hopping instead of local minimization.
 
     Returns:
         OptimizationResult with optimized molecule and metadata.
@@ -711,6 +713,20 @@ def optimize_pose_cached(
             "gtol": params.tolerance,
         },
     )
+    if basin_hopping:
+        result = basinhopping(
+            objective,
+            x0,
+            rng=0,
+            minimizer_kwargs={
+                "method": "L-BFGS-B",
+                "bounds": bounds,
+                "options": {
+                    "maxiter": params.max_iterations,
+                    "gtol": params.tolerance,
+                },
+            },
+        )
 
     # Unpack result
     translation, rotation, torsion_deltas = _unpack_pose_vector(result.x, n_torsions)

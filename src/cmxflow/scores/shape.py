@@ -30,9 +30,10 @@ class ShapeOverlayScoreBlock(ScoreBlock):
         input_files: Dictionary containing "query" key for reference ligand file.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, **kwargs) -> None:
         """Initialize the shape overlay score block."""
         super().__init__(input_files=["query"])
+        self.set_inputs(**kwargs)
 
         # Lazy-loaded reference data
         self._reference_mols: list[Chem.Mol] | None = None

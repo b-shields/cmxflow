@@ -53,8 +53,10 @@ class BlockBase(ABC):
                 path = Path(value)
                 if path.is_file():
                     self.input_files[key] = path
-            if key in self.input_text:
+            elif key in self.input_text:
                 self.input_text[key] = value
+            elif key in self.params:
+                self.params[key].set(value)
 
     def get_params(self) -> dict[str, Any]:
         """Get all mutable parameters for this block.

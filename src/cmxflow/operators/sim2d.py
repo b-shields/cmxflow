@@ -40,7 +40,6 @@ class MoleculeSimilarityBlock(MoleculeBlock):
     def __init__(self, **kwargs) -> None:
         """Initialize the similarity search block."""
         super().__init__(name="Molecule2DSimilarity", input_files=["queries"])
-        self.set_inputs(**kwargs)
 
         # Register mutable parameters
         self.mutable(
@@ -63,6 +62,7 @@ class MoleculeSimilarityBlock(MoleculeBlock):
             Integer("radius", default=2, low=1, high=4),
             Integer("nbits", default=2048, low=512, high=4096),
         )
+        self.set_inputs(**kwargs)
 
         # Lazy-loaded query fingerprints
         self._query_fingerprints: list[ExplicitBitVect] | None = None

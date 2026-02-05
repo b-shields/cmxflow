@@ -70,19 +70,25 @@ VINARDO_RADII: dict[int, float] = {
     7: 1.7,  # Nitrogen
     8: 1.6,  # Oxygen
     9: 1.5,  # Fluorine
-    15: 1.8,  # Phosphorus
-    16: 1.8,  # Sulfur
+    15: 2.1,  # Phosphorus
+    16: 2.0,  # Sulfur
     17: 1.8,  # Chlorine
-    35: 1.9,  # Bromine
-    53: 2.0,  # Iodine
+    35: 2.0,  # Bromine
+    53: 2.2,  # Iodine
 }
 AROMATIC_CARBON_RADIUS = 1.9
 DEFAULT_RADIUS = 1.7
 
 # SMARTS patterns for atom classification
-HYDROPHOBIC_SMARTS = "[#6;+0;!$([#6]~[#7,#8,#9,#15,#16,#17,#35,#53])]"
-HBOND_DONOR_SMARTS = "[N,O;!H0]"
-HBOND_ACCEPTOR_SMARTS = "[N,O;H0]"
+HYDROPHOBIC_SMARTS = "[#6,#9,#14,#15,#16,#17,#35,#53]"
+HBOND_DONOR_SMARTS = (
+    "[$([N;!H0;v3]),$([N;!H0;+1;v4]),$([O,S;H1;+0]),$([n;H1;+0])"
+    ",Li+1,Na+1,K+1,Cs+1,Mg+2,Ca+2,Mn+2,Zn+2]"
+)
+HBOND_ACCEPTOR_SMARTS = (
+    "[$([O,S;H1;v2]-[!$(*=[O,N,P,S])]),$([O,S;H0;v2]),$([O,S;-]),"
+    "$([N;v3;!$(N-*=!@[O,N,P,S])]),$([nH0,o,s;+0])]"
+)
 
 
 @dataclass
@@ -375,6 +381,9 @@ def vinardo_score(
     if params is None:
         params = VinardoParams()
 
+    # United atom
+    ligand_mol = Chem.RemoveHs(ligand_mol)
+
     # Validate conformers
     if ligand_mol.GetNumConformers() == 0:
         raise ValueError("Ligand molecule has no conformers")
@@ -472,6 +481,9 @@ def vinardo_score_cached(
     """
     if params is None:
         params = VinardoParams()
+
+    # United atom
+    ligand_mol = Chem.RemoveHs(ligand_mol)
 
     # Validate conformers
     if ligand_mol.GetNumConformers() == 0:

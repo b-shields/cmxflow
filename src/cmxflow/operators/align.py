@@ -32,7 +32,6 @@ class MoleculeAlignBlock(MoleculeBlock):
     def __init__(self, **kwargs) -> None:
         """Initialize the molecular alignment block."""
         super().__init__(name="MoleculeAlign", input_files=["query"])
-        self.set_inputs(**kwargs)
 
         # Register mutable parameters
         self.mutable(
@@ -42,6 +41,7 @@ class MoleculeAlignBlock(MoleculeBlock):
                 choices=["crippen_o3a", "mmff_o3a", "mcs"],
             )
         )
+        self.set_inputs(**kwargs)
 
         # Lazy-loaded reference molecules with conformers
         self._reference_mols: list[Chem.Mol] | None = None

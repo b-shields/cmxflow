@@ -104,10 +104,11 @@ class ConformerGenerationBlock(MoleculeBlock):
 
         # Register mutable parameters
         self.mutable(
-            Integer("numConfs", default=5, low=1, high=100),
-            Continuous("pruneRmsThresh", default=0.5, low=0.0, high=5.0),
+            Integer("numConfs", default=30, low=1, high=100),
+            Continuous("pruneRmsThresh", default=1.5, low=0.0, high=3.0),
             Categorical("useRandomCoords", default=False, choices=[True, False]),
         )
+        self.set_inputs(**kwargs)
 
     def check_input(self, arg: Any) -> bool:
         """Validate that input is an RDKit Mol with specified stereochemistry.

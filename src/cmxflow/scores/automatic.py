@@ -116,6 +116,7 @@ class EnrichmentScoreBlock(ScoreBlock):
         self,
         pooler: Callable[[Iterator[Any]], pd.DataFrame] = mol_to_dataframe,
         metric: Callable[[np.ndarray, np.ndarray], float] = enrichment_auc,
+        **kwargs,
     ) -> None:
         """Initialize with scoring configuration.
 
@@ -128,6 +129,7 @@ class EnrichmentScoreBlock(ScoreBlock):
         super().__init__(input_text=["target"])
         self.pooler = pooler
         self.metric = metric
+        self.set_inputs(**kwargs)
 
     def objective(self, iter: Iterator[Chem.Mol | CmxMol]) -> float:
         """Compute enrichment AUC for the given molecules.
@@ -184,6 +186,7 @@ class AverageScoreBlock(ScoreBlock):
     def __init__(
         self,
         pooler: Callable[[Iterator[Any]], pd.DataFrame] = mol_to_dataframe,
+        **kwargs,
     ) -> None:
         """Initialize with pooler configuration.
 
@@ -192,6 +195,7 @@ class AverageScoreBlock(ScoreBlock):
         """
         super().__init__(input_text=["property"])
         self.pooler = pooler
+        self.set_inputs(**kwargs)
 
     def objective(self, iter: Iterator[Chem.Mol | CmxMol]) -> float:
         """Compute average of the specified property.

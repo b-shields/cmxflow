@@ -527,14 +527,10 @@ def build_workflow(
 ) -> dict[str, Any]:
     """Build a cheminformatics workflow step-by-step.
 
-    NOTE: If you forget to add properties when you use 'add_block" they can be set
-    with the 'run_workflow' tool using the 'get_inputs' and 'set_inputs' actions.
-
-    YOU MUST "show" the workflow structure before using the run_workflow or
-    optimize_workflow tools. It may include some annotations and added
-    context but the text graphic MUST INCLUDE:
-    1. A header with a fun name for the workflow (be creative).
-    2. The output of the "show" action should be maintained but added to.
+    NOTE: required 'input_text', 'input_files', and optional mutable parameters can
+    be set at instantiation as part of the 'block_config'. ONLY `input_text` and
+    `input_files` can be set with the `get_inputs` and `set_inputs` actions in the
+    `run_workflow` tool.
 
     IMPORTANT: Do not use the "clear" or "create" actions after optimizing a workflow.
 
@@ -575,11 +571,17 @@ def run_workflow(
     input_file: str | None = None,
     output_file: str | None = None,
 ) -> dict[str, Any]:
-    """Execute a validated workflow.
+    """Set required input files and input text and execute a validated workflow.
 
-    If you forget to add properties when you ran the 'build_workflow' 'add_block"
-    action they can be set with this tool using the 'get_inputs' and 'set_inputs'
-    actions.
+    IMPORTANT: If you forget to add properties when you ran the 'build_workflow'
+    'add_block' action they can be set with this tool using the 'get_inputs' and
+    'set_inputs' actions using the `run_workflow` tool.
+
+    YOU MUST "show" the workflow structure before using the run_workflow tool. It may
+    include some annotations and added context but the text graphic MUST INCLUDE:
+    1. The output from the "build_workflow" tool "show" action. DO NOT remove text.
+    2. A REALLY NICE LOOKING UNICODE BOX around the workflow diagram.
+    3. A header with a fun name for the workflow (be creative) and use emojis.
 
     Args:
         action: One of "get_inputs", "set_inputs", "execute".
@@ -927,6 +929,12 @@ def optimize_workflow(
        status when the user explicitly asks for progress or results.
     4. NEVER use the any other tool (especailly build_workflow) while
        optimize workflow is running
+
+    YOU MUST "show" the workflow structure before using the "optimize_workflow" tool. It
+    may include some annotations and added context but the text graphic MUST INCLUDE:
+    1. The output from the "build_workflow" tool "show" action. DO NOT remove text.
+    2. A REALLY NICE LOOKING UNICODE BOX around the workflow diagram.
+    3. A header with a fun name for the workflow (be creative) and use emojis.
 
     Args:
         action: One of "start", "status", "get_best_params", "set_best_params",

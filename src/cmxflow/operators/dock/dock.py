@@ -65,7 +65,7 @@ class MoleculeDockBlock(MoleculeBlock):
         >>> print(docked_mol.GetDoubleProp("docking_score"))
     """
 
-    def __init__(self) -> None:
+    def __init__(self, **kwargs) -> None:
         """Initialize the molecular docking block."""
         super().__init__(name="MoleculeDock", input_files=["receptor"])
 
@@ -77,10 +77,11 @@ class MoleculeDockBlock(MoleculeBlock):
             Continuous("w_hydrophobic", -0.035, -0.065, -0.015),
             Continuous("w_hbond", -0.6, -0.8, -0.4),
             # Pose search
-            Integer("max_iterations", 200, 100, 300),
-            Continuous("box_size", 1.0, 0.5, 2.0),
-            Categorical("rigid", True, [True, False]),
+            Integer("max_iterations", 200, 100, 400),
+            Continuous("box_size", 1.5, 0.5, 2.0),
+            Categorical("rigid", False, [True, False]),
         )
+        self.set_inputs(**kwargs)
 
         # Lazy-loaded protein scoring components
         self._protein_coords: np.ndarray | None = None
@@ -111,7 +112,7 @@ class MoleculeDockBlock(MoleculeBlock):
             raise FileNotFoundError(f"Receptor path does not exist: {receptor_path}.")
 
         mol = Chem.MolFromPDBFile(str(receptor_path))
-        mol = Chem.AddHs(mol)
+        mol = Chem.RemoveHs(mol)  # Unitd atom scoring functions
 
         if not self._has_3d_conformer(mol):
             raise ValueError(f"Receptor {receptor_path} does not have a 3D conformer.")

@@ -35,7 +35,6 @@ class Molecule3DSimilarityBlock(MoleculeBlock):
     def __init__(self, **kwargs) -> None:
         """Initialize the 3D similarity block."""
         super().__init__(name="Molecule3DSimilarity", input_files=["query"])
-        self.set_inputs(**kwargs)
 
         # Register mutable parameters
         self.mutable(
@@ -47,6 +46,7 @@ class Molecule3DSimilarityBlock(MoleculeBlock):
             Continuous("tversky_alpha", default=1.0, low=0.0, high=1.0),
             Continuous("tversky_beta", default=1.0, low=0.0, high=1.0),
         )
+        self.set_inputs(**kwargs)
 
         # Lazy-loaded query data
         self._query_mols: list[Chem.Mol] | None = None
@@ -177,7 +177,7 @@ class Molecule3DSimilarityBlock(MoleculeBlock):
                 raise ValueError(f"Unknown USR method: {method}")
 
             # GetUSRScore returns similarity (0-1, higher is more similar)
-            score: float = rdMolDescriptors.GetUSRScore(mol_desc, ref_descriptor)
+            score: float = rdMolDescriptors.GetUSRScore(mol_desc, ref_descriptor)  # type: ignore
             return score
 
         except Exception as e:

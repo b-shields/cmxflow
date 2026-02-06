@@ -403,15 +403,14 @@ class SubstructureFilterBlock(MoleculeBlock):
         Raises:
             SubstructureFilterError: If mode is invalid.
         """
-        if self._mode is None:
-            mode = self.input_text.get("mode", "").strip().lower()
-            if not mode:
-                mode = "remove"
-            if mode not in ("remove", "keep"):
-                raise SubstructureFilterError(
-                    f"Invalid mode: '{mode}'. Must be 'remove' or 'keep'."
-                )
-            self._mode = mode
+        mode = self.input_text.get("mode", "").strip().lower()
+        if not mode:
+            mode = "remove"
+        if mode not in ("remove", "keep"):
+            raise SubstructureFilterError(
+                f"Invalid mode: '{mode}'. Must be 'remove' or 'keep'."
+            )
+        self._mode = mode
         return self._mode
 
     def _parse_query(self) -> None:

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
 from rdkit import Chem
+from rdkit.Chem.FilterCatalog import FilterCatalog, FilterCatalogParams
 
 from cmxflow.operators.base import MoleculeBlock
 
@@ -47,6 +48,12 @@ RANGE_PATTERN = re.compile(
 
 class FilterExpressionError(ValueError):
     """Raised when a filter expression cannot be parsed."""
+
+    pass
+
+
+class SubstructureFilterError(ValueError):
+    """Raised when substructure filter configuration is invalid."""
 
     pass
 
@@ -350,6 +357,148 @@ class PropertyFilterBlock(MoleculeBlock):
         """
         return isinstance(arg, Chem.Mol)
 
-    def reset_cache(self) -> None:
-        """Reset parsed conditions cache."""
-        self._parsed_conditions = None
+
+class SubstructureFilterBlock(MoleculeBlock):
+    """Block that filters molecules based on substructure matches.
+
+    Molecules can be filtered using SMARTS patterns and/or built-in RDKit
+    filter catalogs (e.g., PAINS, BRENK, NIH, ZINC). The filter uses OR logic:
+    a molecule is flagged if it matches any pattern or catalog.
+
+    Inputs:
+        query: Space-separated list of catalog names and/or SMARTS patterns.
+            Catalog names (e.g., PAINS, BRENK, NIH, ZINC) are detected automatically.
+            Everything else is treated as a SMARTS pattern.
+        mode: "remove" (default) filters out matches, "keep" keeps only matches.
+
+    Example:
+        workflow.add(SubstructureFilterBlock())
+        workflow.set_required_input({
+            "1.text@query": "PAINS BRENK [OH]",
+            "1.text@mode": "remove"
+        })
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        """Initialize the SubstructureFilterBlock."""
+        super().__init__(
+            name="SubstructureFilter",
+            input_text=["query", "mode"],
+        )
+        if "mode" not in kwargs:
+            kwargs["mode"] = "remove"
+        self.set_inputs(**kwargs)
+        self._compiled_patterns: list[Chem.Mol] = []
+        self._filter_catalog: FilterCatalog | None = None
+        self._query_parsed: bool = False
+        self._mode: str | None = None
+        self._get_mode()
+
+    def _get_mode(self) -> str:
+        """Get the filter mode, parsing and caching if needed.
+
+        Returns:
+            Filter mode: "remove" or "keep".
+
+        Raises:
+            SubstructureFilterError: If mode is invalid.
+        """
+        if self._mode is None:
+            mode = self.input_text.get("mode", "").strip().lower()
+            if not mode:
+                mode = "remove"
+            if mode not in ("remove", "keep"):
+                raise SubstructureFilterError(
+                    f"Invalid mode: '{mode}'. Must be 'remove' or 'keep'."
+                )
+            self._mode = mode
+        return self._mode
+
+    def _parse_query(self) -> None:
+        """Parse the query string into patterns and catalogs.
+
+        Splits the query on whitespace. Tokens matching catalog names
+        (case-insensitive) are loaded as catalogs; all others are compiled
+        as SMARTS patterns.
+
+        Raises:
+            SubstructureFilterError: If a SMARTS pattern is invalid.
+        """
+        if self._query_parsed:
+            return
+
+        query_str = self.input_text.get("query", "").strip()
+        if query_str:
+            catalog_names: list[str] = []
+            for token in query_str.split():
+                if token.upper() in FilterCatalogParams.FilterCatalogs.names:
+                    catalog_names.append(token.upper())
+                else:
+                    pattern = Chem.MolFromSmarts(token)
+                    if pattern is None:
+                        raise SubstructureFilterError(
+                            f"Invalid SMARTS pattern: '{token}'"
+                        )
+                    self._compiled_patterns.append(pattern)
+
+            if catalog_names:
+                params = FilterCatalogParams()
+                for name in catalog_names:
+                    params.AddCatalog(FilterCatalogParams.FilterCatalogs.names[name])
+                self._filter_catalog = FilterCatalog(params)
+
+        self._query_parsed = True
+
+    def _check_pattern_match(self, mol: Chem.Mol) -> bool:
+        """Check if molecule matches any SMARTS pattern.
+
+        Args:
+            mol: RDKit Mol object.
+
+        Returns:
+            True if molecule matches any pattern, False otherwise.
+        """
+        self._parse_query()
+        return any(mol.HasSubstructMatch(p) for p in self._compiled_patterns)
+
+    def _check_catalog_matches(self, mol: Chem.Mol) -> bool:
+        """Check if molecule matches any catalog filters.
+
+        Args:
+            mol: RDKit Mol object.
+
+        Returns:
+            True if molecule matches any catalog filter, False otherwise.
+        """
+        self._parse_query()
+        if self._filter_catalog is None:
+            return False
+        return bool(self._filter_catalog.HasMatch(mol))
+
+    def _forward(self, mol: Chem.Mol) -> Chem.Mol | None:
+        """Filter a molecule based on substructure matches.
+
+        Args:
+            mol: Input RDKit Mol object.
+
+        Returns:
+            The molecule if it passes the filter, None otherwise.
+        """
+        mode = self._get_mode()
+        has_match = self._check_pattern_match(mol) or self._check_catalog_matches(mol)
+
+        if mode == "remove":
+            return None if has_match else mol
+        else:  # mode == "keep"
+            return mol if has_match else None
+
+    def check_output(self, arg: Any) -> bool:
+        """Validate that output is a valid molecule.
+
+        Args:
+            arg: Output to validate.
+
+        Returns:
+            True if the output is a valid molecule, False otherwise.
+        """
+        return isinstance(arg, Chem.Mol)

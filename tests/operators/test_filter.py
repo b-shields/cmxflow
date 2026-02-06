@@ -1,4 +1,4 @@
-"""Tests for the PropertyFilterBlock operator."""
+"""Tests for the PropertyFilterBlock and SubstructureFilterBlock operators."""
 
 import pytest
 from rdkit import Chem
@@ -6,6 +6,8 @@ from rdkit import Chem
 from cmxflow.operators.filter import (
     FilterExpressionError,
     PropertyFilterBlock,
+    SubstructureFilterBlock,
+    SubstructureFilterError,
     parse_filter_expression,
 )
 
@@ -332,12 +334,6 @@ class TestPropertyFilterBlockForward:
         result2 = block._forward(mol)
         assert result2 is None
 
-        # Reset cache
-        block.reset_cache()
-        # Now uses new filter
-        result3 = block._forward(mol)
-        assert result3 is not None
-
 
 class TestPropertyFilterBlockIntegration:
     """Integration tests for PropertyFilterBlock."""
@@ -388,3 +384,329 @@ class TestPropertyFilterBlockIntegration:
 
         with pytest.raises(FilterExpressionError):
             block._forward(mol)
+
+
+class TestSubstructureFilterBlockSmarts:
+    """Tests for SubstructureFilterBlock with SMARTS patterns."""
+
+    def test_remove_mode_filters_match(self) -> None:
+        """Test that remove mode filters out matching molecules."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "[OH]"  # hydroxyl group
+        block.input_text["mode"] = "remove"
+
+        mol = Chem.MolFromSmiles("CCO")  # ethanol - has OH
+        result = block._forward(mol)
+        assert result is None
+
+    def test_remove_mode_keeps_non_match(self) -> None:
+        """Test that remove mode keeps non-matching molecules."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "[OH]"  # hydroxyl group
+        block.input_text["mode"] = "remove"
+
+        mol = Chem.MolFromSmiles("CC")  # ethane - no OH
+        result = block._forward(mol)
+        assert result is not None
+
+    def test_keep_mode_keeps_match(self) -> None:
+        """Test that keep mode keeps matching molecules."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "[OH]"
+        block.input_text["mode"] = "keep"
+
+        mol = Chem.MolFromSmiles("CCO")
+        result = block._forward(mol)
+        assert result is not None
+
+    def test_keep_mode_filters_non_match(self) -> None:
+        """Test that keep mode filters out non-matching molecules."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "[OH]"
+        block.input_text["mode"] = "keep"
+
+        mol = Chem.MolFromSmiles("CC")
+        result = block._forward(mol)
+        assert result is None
+
+    def test_carboxylic_acid_pattern(self) -> None:
+        """Test matching carboxylic acid SMARTS."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "[CX3](=O)[OX2H1]"
+        block.input_text["mode"] = "keep"
+
+        # Acetic acid has carboxylic acid
+        mol = Chem.MolFromSmiles("CC(=O)O")
+        result = block._forward(mol)
+        assert result is not None
+
+        # Ethanol does not
+        mol2 = Chem.MolFromSmiles("CCO")
+        result2 = block._forward(mol2)
+        assert result2 is None
+
+    def test_invalid_smarts_raises_error(self) -> None:
+        """Test that invalid SMARTS pattern raises error."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "[invalid"
+
+        mol = Chem.MolFromSmiles("CCO")
+        with pytest.raises(SubstructureFilterError, match="Invalid SMARTS pattern"):
+            block._forward(mol)
+
+    def test_default_mode_is_remove(self) -> None:
+        """Test that default mode is 'remove'."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "[OH]"
+
+        mol = Chem.MolFromSmiles("CCO")
+        result = block._forward(mol)
+        assert result is None  # should be filtered out (remove mode)
+
+    def test_fluorine_pattern(self) -> None:
+        """Test matching fluorine atoms."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "[F]"
+        block.input_text["mode"] = "remove"
+
+        # Fluorobenzene has fluorine
+        mol = Chem.MolFromSmiles("Fc1ccccc1")
+        result = block._forward(mol)
+        assert result is None
+
+        # Benzene does not
+        mol2 = Chem.MolFromSmiles("c1ccccc1")
+        result2 = block._forward(mol2)
+        assert result2 is not None
+
+
+class TestSubstructureFilterBlockCatalogs:
+    """Tests for SubstructureFilterBlock with RDKit catalogs."""
+
+    def test_pains_filter(self) -> None:
+        """Test PAINS catalog filtering."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "PAINS"
+        block.input_text["mode"] = "remove"
+
+        # rhodanine is a known PAINS structure
+        mol = Chem.MolFromSmiles("O=C1NC(=S)SC1=Cc1ccccc1")
+        result = block._forward(mol)
+        assert result is None
+
+    def test_multiple_catalogs(self) -> None:
+        """Test multiple catalogs."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "PAINS BRENK"
+        block.input_text["mode"] = "remove"
+
+        # Simple molecule should pass
+        mol = Chem.MolFromSmiles("CCO")
+        result = block._forward(mol)
+        assert result is not None
+
+    def test_catalog_case_insensitive(self) -> None:
+        """Test that catalog names are case-insensitive."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "pains Brenk NIH"
+        block.input_text["mode"] = "remove"
+
+        mol = Chem.MolFromSmiles("CCO")
+        result = block._forward(mol)
+        assert result is not None
+
+    def test_keep_mode_with_catalog(self) -> None:
+        """Test keep mode with catalog matching."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "PAINS"
+        block.input_text["mode"] = "keep"
+
+        # rhodanine matches PAINS - should be kept
+        mol = Chem.MolFromSmiles("O=C1NC(=S)SC1=Cc1ccccc1")
+        result = block._forward(mol)
+        assert result is not None
+
+        # Simple molecule - should be filtered out
+        mol2 = Chem.MolFromSmiles("CCO")
+        result2 = block._forward(mol2)
+        assert result2 is None
+
+    def test_zinc_catalog(self) -> None:
+        """Test ZINC catalog."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "ZINC"
+        block.input_text["mode"] = "remove"
+
+        mol = Chem.MolFromSmiles("CCO")
+        result = block._forward(mol)
+        assert result is not None
+
+
+class TestSubstructureFilterBlockCombined:
+    """Tests for SubstructureFilterBlock with pattern + catalogs (OR logic)."""
+
+    def test_or_logic_pattern_matches(self) -> None:
+        """Test that pattern match alone triggers filter."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "PAINS [OH]"
+        block.input_text["mode"] = "remove"
+
+        # Has OH but no PAINS
+        mol = Chem.MolFromSmiles("CCO")
+        result = block._forward(mol)
+        assert result is None  # filtered due to pattern match
+
+    def test_or_logic_catalog_matches(self) -> None:
+        """Test that catalog match alone triggers filter."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "PAINS [Br]"
+        block.input_text["mode"] = "remove"
+
+        # rhodanine matches PAINS but no Br
+        mol = Chem.MolFromSmiles("O=C1NC(=S)SC1=Cc1ccccc1")
+        result = block._forward(mol)
+        assert result is None  # filtered due to catalog match
+
+    def test_or_logic_neither_matches(self) -> None:
+        """Test that molecule passes when neither matches."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "PAINS [Br]"
+        block.input_text["mode"] = "remove"
+
+        # No Br and no PAINS
+        mol = Chem.MolFromSmiles("CCCC")
+        result = block._forward(mol)
+        assert result is not None
+
+    def test_or_logic_both_match(self) -> None:
+        """Test when both pattern and catalog match."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "PAINS c1ccccc1"
+        block.input_text["mode"] = "remove"
+
+        # rhodanine has benzene and matches PAINS
+        mol = Chem.MolFromSmiles("O=C1NC(=S)SC1=Cc1ccccc1")
+        result = block._forward(mol)
+        assert result is None
+
+
+class TestSubstructureFilterBlockModes:
+    """Tests for SubstructureFilterBlock mode validation."""
+
+    def test_invalid_mode_raises_error(self) -> None:
+        """Test that invalid mode raises error."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "[OH]"
+        block.input_text["mode"] = "invalid"
+
+        mol = Chem.MolFromSmiles("CCO")
+        with pytest.raises(SubstructureFilterError, match="Invalid mode"):
+            block._forward(mol)
+
+    def test_mode_case_insensitive(self) -> None:
+        """Test that mode is case-insensitive."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "[OH]"
+        block.input_text["mode"] = "REMOVE"
+
+        mol = Chem.MolFromSmiles("CCO")
+        result = block._forward(mol)
+        assert result is None
+
+    def test_mode_whitespace_handling(self) -> None:
+        """Test that mode handles whitespace."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "[OH]"
+        block.input_text["mode"] = "  keep  "
+
+        mol = Chem.MolFromSmiles("CCO")
+        result = block._forward(mol)
+        assert result is not None
+
+
+class TestSubstructureFilterBlockEmptyConfig:
+    """Tests for SubstructureFilterBlock with empty configuration."""
+
+    def test_empty_query_passes_all(self) -> None:
+        """Test that empty query passes all molecules."""
+        block = SubstructureFilterBlock()
+
+        mol = Chem.MolFromSmiles("CCO")
+        result = block._forward(mol)
+        assert result is not None
+
+    def test_catalog_only(self) -> None:
+        """Test with only catalog in query."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "PAINS"
+        block.input_text["mode"] = "remove"
+
+        mol = Chem.MolFromSmiles("CCO")
+        result = block._forward(mol)
+        assert result is not None
+
+    def test_pattern_only(self) -> None:
+        """Test with only pattern in query."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "[OH]"
+        block.input_text["mode"] = "remove"
+
+        mol = Chem.MolFromSmiles("CCO")
+        result = block._forward(mol)
+        assert result is None
+
+
+class TestSubstructureFilterBlockIntegration:
+    """Integration tests for SubstructureFilterBlock."""
+
+    def test_call_with_iterator(self) -> None:
+        """Test that the block works with an iterator of molecules."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "[OH]"
+        block.input_text["mode"] = "remove"
+
+        smiles_list = ["CCO", "CC", "C(=O)O", "CCCC"]  # 2 have OH
+        mols = [Chem.MolFromSmiles(s) for s in smiles_list]
+
+        results = list(block(iter(mols)))
+
+        # Only CC and CCCC should pass (no OH)
+        assert len(results) == 2
+
+    def test_block_name(self) -> None:
+        """Test that block has correct name."""
+        block = SubstructureFilterBlock()
+        assert block.name == "SubstructureFilter"
+
+    def test_input_text_registered(self) -> None:
+        """Test that inputs are registered."""
+        block = SubstructureFilterBlock()
+        assert "query" in block.input_text
+        assert "mode" in block.input_text
+        assert "pattern" not in block.input_text
+        assert "catalogs" not in block.input_text
+        assert "annotate" not in block.input_text
+
+    def test_check_output(self) -> None:
+        """Test check_output validation."""
+        block = SubstructureFilterBlock()
+        mol = Chem.MolFromSmiles("CCO")
+
+        assert block.check_output(mol) is True
+        assert block.check_output(None) is False
+        assert block.check_output("not a mol") is False
+
+    def test_metadata_preserved(self) -> None:
+        """Test that molecule properties are preserved."""
+        block = SubstructureFilterBlock()
+        block.input_text["query"] = "[F]"
+        block.input_text["mode"] = "remove"
+
+        mol = Chem.MolFromSmiles("CCO")
+        mol.SetProp("name", "ethanol")
+        mol.SetDoubleProp("MolWt", 46.07)
+
+        result = block._forward(mol)
+        assert result is not None
+        assert result.GetProp("name") == "ethanol"
+        assert result.GetDoubleProp("MolWt") == 46.07

@@ -19,6 +19,7 @@ from cmxflow.operators import (
     PropertyHeadBlock,
     PropertyTailBlock,
     RDKitBlock,
+    SubstructureFilterBlock,
 )
 from cmxflow.scores import (
     AverageScoreBlock,
@@ -107,6 +108,7 @@ def get_available_blocks() -> dict[str, type]:
         "MoleculeAlignBlock": MoleculeAlignBlock,
         "MoleculeSimilarityBlock": MoleculeSimilarityBlock,
         "RDKitBlock": RDKitBlock,
+        "SubstructureFilterBlock": SubstructureFilterBlock,
         "PropertyFilterBlock": PropertyFilterBlock,
         "PropertyHeadBlock": PropertyHeadBlock,
         "PropertyTailBlock": PropertyTailBlock,
@@ -168,7 +170,15 @@ def get_block_descriptions() -> dict[str, str]:
         "RDKitBlock": (
             "Apply an arbitrary RDKit method to molecules. Provide the method "
             "as a string path (e.g., 'rdkit.Chem.Descriptors.MolWt'). IMPORTANT: "
-            "only computes properties (must use other blocks to act on properties)."
+            "only computes properties or modifies molecules (e.g., AddHs). (must "
+            "use other blocks to act on properties)."
+        ),
+        "SubstructureFilterBlock": (
+            "Filter molecules by substructure using SMARTS patterns and/or "
+            "built-in catalogs (PAINS, BRENK, NIH, ZINC). Provide a single "
+            "'query' with space-separated catalog names or SMARTS patterns "
+            "(e.g., 'PAINS BRENK [#8;!$(O=C)]'). Mode is 'remove' by default. Set to "
+            "'keep' to only return matching."
         ),
         "PropertyFilterBlock": (
             "Apply any number of numerical property filters to remove molecules. "

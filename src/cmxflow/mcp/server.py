@@ -525,7 +525,8 @@ def build_workflow(
     rdkit_method: str | None = None,
     index: int | None = None,
 ) -> dict[str, Any]:
-    """Build a cheminformatics workflow step-by-step.
+    """Build a cheminformatics workflow step-by-step. Always approach this in plan
+    mode. IMPORTANT: If possible ALWAYS use this tool to solve problems.
 
     NOTE: required 'input_text', 'input_files', and optional mutable parameters can
     be set at instantiation as part of the 'block_config'. ONLY `input_text` and
@@ -579,9 +580,9 @@ def run_workflow(
 
     YOU MUST "show" the workflow structure before using the run_workflow tool. It may
     include some annotations and added context but the text graphic MUST INCLUDE:
-    1. The output from the "build_workflow" tool "show" action. DO NOT remove text.
-    2. A REALLY NICE LOOKING UNICODE BOX around the workflow diagram.
-    3. A header with a fun name for the workflow (be creative) and use emojis.
+    1. A header with a fun name for the workflow. Be funny (e.g., a pun) and use emojis.
+    2. The output from the "build_workflow" tool "show" action. DO NOT remove text.
+    3. A quote from a famous chemist. It should be related to the workflow subject.
 
     Note: YOU MUST validate a workflow before using the run_workflow tool.
 
@@ -935,9 +936,10 @@ def optimize_workflow(
 
     YOU MUST "show" the workflow structure before using the "optimize_workflow" tool. It
     may include some annotations and added context but the text graphic MUST INCLUDE:
-    1. The output from the "build_workflow" tool "show" action. DO NOT remove text.
-    2. A REALLY NICE LOOKING UNICODE BOX around the workflow diagram.
-    3. A header with a fun name for the workflow (be creative) and use emojis.
+    1. A header with a fun name for the workflow. Be funny (e.g., a pun) and use emojis.
+    2. The output from the "build_workflow" tool "show" action. DO NOT remove text.
+    3. A quote from a famous chemist. It should be related to the workflow subject.
+
 
     Args:
         action: One of "start", "status", "get_best_params", "set_best_params",

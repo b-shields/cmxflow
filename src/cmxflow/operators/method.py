@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from rdkit import Chem
 
+from cmxflow import Mol
 from cmxflow.operators.base import MoleculeBlock
 
 
@@ -86,7 +87,7 @@ class RDKitBlock(MoleculeBlock):
         method: Callable[[Chem.Mol], Any] = getattr(module, method_name)
         return method
 
-    def _forward(self, mol: Chem.Mol) -> Chem.Mol | None:
+    def _forward(self, mol: Chem.Mol | Mol) -> Chem.Mol | Mol | None:
         """Apply the RDKit method to the molecule.
 
         Args:
@@ -102,6 +103,9 @@ class RDKitBlock(MoleculeBlock):
             return None
 
         if isinstance(result, Chem.Mol):
+            result = Mol(result)
+            if isinstance(mol, Mol):
+                result._prop_cache = {**mol._prop_cache, **result._prop_cache}
             return result
         elif isinstance(result, bool):
             mol.SetBoolProp(self._property_name, result)

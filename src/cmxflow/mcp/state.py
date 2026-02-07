@@ -28,6 +28,7 @@ from cmxflow.scores import (
 )
 from cmxflow.sinks import MoleculeSinkBlock
 from cmxflow.sources import MoleculeSourceBlock
+from cmxflow.utils.serial import WorkflowRegistry
 
 
 @dataclass
@@ -42,6 +43,7 @@ class WorkflowState:
         optimization_future: Future for background optimization task.
         optimization_error: Error message if optimization failed.
         last_output_file: Path to the last workflow output file.
+        registry: Workflow registry.
     """
 
     workflow: Workflow | None = None
@@ -51,6 +53,7 @@ class WorkflowState:
     optimization_future: Future | None = field(default=None)
     optimization_error: str | None = field(default=None)
     last_output_file: str | None = field(default=None)
+    registry: WorkflowRegistry = field(default_factory=WorkflowRegistry)
 
 
 # Global state instance for persistence across tool calls

@@ -23,7 +23,7 @@ from cmxflow.sinks import MoleculeSinkBlock
 from cmxflow.sources import MoleculeSourceBlock
 from cmxflow.utils.parallel import ParallelBlock, make_parallel
 from cmxflow.utils.pymol import open_pymol_session
-from cmxflow.workflow import WorkflowValidationError, load_workflow, save_workflow
+from cmxflow.workflow import WorkflowValidationError
 
 _PYMOL_AVAILABLE = shutil.which("pymol") is not None
 
@@ -55,12 +55,11 @@ def _build_workflow_impl(
 
     Args:
         action: One of "create", "add_block", "remove_block", "list_blocks",
-            "validate", "clear", "show", "make_parallel", "save", "load".
+            "validate", "clear", "show", "make_parallel".
         block_type: Block class name (e.g., "ConformerGenerationBlock").
         block_config: Block initialization parameters. For "make_parallel" action,
             this specifies parallel execution options: max_workers, chunk_size,
-            ordered, error_handling. For "save" and "load" actions, this should
-            contain "path" key with the file path.
+            ordered, error_handling.
         rdkit_method: For RDKitBlock, the method path
             (e.g., "rdkit.Chem.Descriptors.MolWt").
         index: Position for insert/remove/make_parallel operations.
@@ -306,52 +305,85 @@ def _build_workflow_impl(
             "workflow": _format_workflow(state.workflow),
         }
 
-    elif action == "save":
+    else:
+        return {
+            "status": "error",
+            "message": f"Unknown action: {action}. "
+            "Valid actions: create, add_block, remove_block, list_blocks, "
+            "validate, clear, show, make_parallel",
+        }
+
+
+def _manage_workflows_impl(
+    action: str,
+    name: str | None = None,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Implementation of manage_workflows logic.
+
+    Args:
+        action: One of "save", "load", "list", "remove".
+        name: Workflow name (required for save, load, remove).
+        overwrite: If True, overwrite an existing workflow on save.
+
+    Returns:
+        Status message and workflow information.
+    """
+    state = get_global_state()
+
+    if action == "save":
         if state.workflow is None:
             return {
                 "status": "error",
-                "message": "No workflow exists. Use action='create' first.",
+                "message": "No workflow exists. Use build_workflow(action='create') "
+                "first.",
             }
 
-        if block_config is None or "path" not in block_config:
+        if name is None:
             return {
                 "status": "error",
-                "message": "Must provide path in block_config for save action",
+                "message": "Must provide 'name' for save action.",
             }
 
         try:
-            save_workflow(state.workflow, block_config["path"])
+            state.registry.register(name, state.workflow, overwrite=overwrite)
             return {
                 "status": "success",
-                "message": f"Workflow saved to {block_config['path']}",
+                "message": (
+                    f"Workflow registered as '{name}'. List registered "
+                    "workflows with the 'list' action."
+                ),
             }
-        except WorkflowValidationError as e:
+        except (ValueError, WorkflowValidationError) as e:
             return {
                 "status": "error",
                 "message": str(e),
             }
 
     elif action == "load":
-        if block_config is None or "path" not in block_config:
+        if name is None:
             return {
                 "status": "error",
-                "message": "Must provide path in block_config for load action",
+                "message": "Must provide 'name' for load action.",
             }
 
         try:
-            workflow = load_workflow(block_config["path"])
+            workflow = state.registry.load(name)
             state.workflow = workflow
-            state.validated = True  # load_workflow validates
-            state.inputs_set = False  # Inputs need to be re-set
+            state.validated = True
+            state.inputs_set = False
             return {
                 "status": "success",
-                "message": f"Workflow loaded from {block_config['path']}",
+                "message": f"Workflow '{name}' loaded.",
                 "workflow": _format_workflow(workflow),
             }
-        except FileNotFoundError:
+        except KeyError:
             return {
                 "status": "error",
-                "message": f"File not found: {block_config['path']}",
+                "message": (
+                    f"Workflow '{name}' not found. List registered workflows "
+                    "with the 'list' action."
+                ),
             }
         except WorkflowValidationError as e:
             return {
@@ -359,12 +391,44 @@ def _build_workflow_impl(
                 "message": str(e),
             }
 
+    elif action == "list":
+        try:
+            workflows = state.registry.list()
+            return {
+                "status": "success",
+                "message": "Registered workflows:",
+                "workflows": workflows.to_string(index=False),
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": str(e),
+            }
+
+    elif action == "remove":
+        if name is None:
+            return {
+                "status": "error",
+                "message": "Must provide 'name' for remove action.",
+            }
+
+        try:
+            state.registry.remove(name)
+            return {
+                "status": "success",
+                "message": f"Workflow '{name}' removed.",
+            }
+        except KeyError:
+            return {
+                "status": "error",
+                "message": f"Workflow '{name}' not found.",
+            }
+
     else:
         return {
             "status": "error",
             "message": f"Unknown action: {action}. "
-            "Valid actions: create, add_block, remove_block, list_blocks, "
-            "validate, clear, show, make_parallel, save, load",
+            "Valid actions: save, load, list, remove",
         }
 
 
@@ -543,12 +607,11 @@ def build_workflow(
 
     Args:
         action: One of "create", "add_block", "remove_block", "list_blocks",
-            "validate", "clear", "show", "make_parallel", "save", "load".
+            "validate", "clear", "show", "make_parallel".
         block_type: Block class name (e.g., "ConformerGenerationBlock").
         block_config: Block initialization parameters. For "make_parallel" action,
             this specifies parallel execution options: max_workers, chunk_size,
-            ordered, error_handling. For "save" and "load" actions, this should
-            contain "path" key with a file path ending in ".pkl".
+            ordered, error_handling.
         rdkit_method: For RDKitBlock, the method path
             (e.g., "rdkit.Chem.Descriptors.MolWt").
         index: Position for insert/remove/make_parallel operations.
@@ -562,6 +625,37 @@ def build_workflow(
         block_config=block_config,
         rdkit_method=rdkit_method,
         index=index,
+    )
+
+
+@mcp.tool
+def manage_workflows(
+    action: str,
+    name: str | None = None,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Manage saved workflows in the registry.
+
+    Use this tool to save, load, list, and remove workflows. Workflows must be
+    built and validated with the build_workflow tool before saving.
+
+    IMPORTANT: The following rules MUST be followed:
+    1. ALWAYS offer to save a workflow after optimizing it.
+    2. Ask what name to give a workflow before saving.
+    3. Confirm with users that it is OK to remove or overwrite.
+
+    Args:
+        action: One of "save", "load", "list", "remove".
+        name: Workflow name (required for save, load, remove).
+        overwrite: If True, overwrite an existing workflow on save.
+
+    Returns:
+        Status message and workflow information.
+    """
+    return _manage_workflows_impl(
+        action=action,
+        name=name,
+        overwrite=overwrite,
     )
 
 

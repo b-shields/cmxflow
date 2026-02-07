@@ -1,8 +1,16 @@
 """Utility functions for cmxflow."""
 
 from cmxflow.utils.parallel import ParallelBlock, make_parallel, parallel
+from cmxflow.utils.serial import WorkflowRegistry, load_workflow, save_workflow
 
-__all__ = ["parallel", "make_parallel", "ParallelBlock"]
+__all__ = [
+    "ParallelBlock",
+    "WorkflowRegistry",
+    "load_workflow",
+    "make_parallel",
+    "parallel",
+    "save_workflow",
+]
 
 try:
     from cmxflow.utils.pymol import open_pymol_session  # noqa: F401

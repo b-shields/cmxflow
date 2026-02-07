@@ -8,6 +8,7 @@ import pytest
 
 from cmxflow.mcp.server import (
     _build_workflow_impl,
+    _manage_workflows_impl,
     _optimize_workflow_impl,
     _run_workflow_impl,
 )
@@ -843,3 +844,146 @@ class TestOptimizeWorkflow:
 
         assert result["status"] == "error"
         assert "already in progress" in result["message"]
+
+
+class TestManageWorkflows:
+    """Tests for the manage_workflows tool."""
+
+    @pytest.fixture(autouse=True)
+    def _use_tmp_registry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Override the default registry path so tests use tmp_path.
+
+        Monkeypatches WorkflowRegistry.__init__ default so any state reset
+        (including inside build_workflow create action) uses the tmp path.
+        """
+        from cmxflow.utils.serial import WorkflowRegistry
+
+        registry_path = tmp_path / "registry"
+        original_init = WorkflowRegistry.__init__
+
+        def patched_init(
+            self_reg: WorkflowRegistry, path: Path | str = registry_path
+        ) -> None:
+            original_init(self_reg, path)
+
+        monkeypatch.setattr(WorkflowRegistry, "__init__", patched_init)
+
+        # Apply to current state
+        state = get_global_state()
+        state.registry = WorkflowRegistry(path=registry_path)
+
+    def _create_and_validate(self) -> None:
+        """Helper to create and validate a minimal workflow."""
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(action="validate")
+
+    def test_save_workflow(self) -> None:
+        """Test saving a validated workflow."""
+        self._create_and_validate()
+        result = _manage_workflows_impl(action="save", name="my_workflow")
+
+        assert result["status"] == "success"
+        assert "registered" in result["message"]
+
+    def test_save_no_workflow(self) -> None:
+        """Test saving with no active workflow returns error."""
+        result = _manage_workflows_impl(action="save", name="my_workflow")
+
+        assert result["status"] == "error"
+        assert "No workflow exists" in result["message"]
+
+    def test_save_no_name(self) -> None:
+        """Test saving without a name returns error."""
+        self._create_and_validate()
+        result = _manage_workflows_impl(action="save")
+
+        assert result["status"] == "error"
+        assert "name" in result["message"]
+
+    def test_save_duplicate_raises(self) -> None:
+        """Test saving same name twice without overwrite returns error."""
+        self._create_and_validate()
+        _manage_workflows_impl(action="save", name="dup")
+        result = _manage_workflows_impl(action="save", name="dup")
+
+        assert result["status"] == "error"
+        assert "already exists" in result["message"]
+
+    def test_save_overwrite(self) -> None:
+        """Test saving same name with overwrite=True succeeds."""
+        self._create_and_validate()
+        _manage_workflows_impl(action="save", name="dup")
+        result = _manage_workflows_impl(action="save", name="dup", overwrite=True)
+
+        assert result["status"] == "success"
+
+    def test_load_workflow(self) -> None:
+        """Test saving then loading a workflow into state."""
+        self._create_and_validate()
+        _manage_workflows_impl(action="save", name="loadme")
+
+        # Load into current state (overwriting current workflow)
+        result = _manage_workflows_impl(action="load", name="loadme")
+
+        assert result["status"] == "success"
+        assert "workflow" in result
+        state = get_global_state()
+        assert state.workflow is not None
+        assert state.validated is True
+        assert state.inputs_set is False
+
+    def test_load_nonexistent(self) -> None:
+        """Test loading a missing workflow returns error."""
+        result = _manage_workflows_impl(action="load", name="nonexistent")
+
+        assert result["status"] == "error"
+        assert "not found" in result["message"]
+
+    def test_list_empty(self) -> None:
+        """Test listing with no registered workflows returns table with headers."""
+        result = _manage_workflows_impl(action="list")
+
+        assert result["status"] == "success"
+        assert "workflows" in result
+        # Empty DataFrame to_string(index=False) still has column headers
+        assert "name" in result["workflows"]
+
+    def test_list_workflows(self) -> None:
+        """Test listing after saving two workflows."""
+        self._create_and_validate()
+        _manage_workflows_impl(action="save", name="wf_one")
+        _manage_workflows_impl(action="save", name="wf_two", overwrite=True)
+
+        result = _manage_workflows_impl(action="list")
+
+        assert result["status"] == "success"
+        assert "wf_one" in result["workflows"]
+        assert "wf_two" in result["workflows"]
+
+    def test_remove_workflow(self) -> None:
+        """Test removing a saved workflow."""
+        self._create_and_validate()
+        _manage_workflows_impl(action="save", name="removeme")
+
+        result = _manage_workflows_impl(action="remove", name="removeme")
+        assert result["status"] == "success"
+
+        # Verify it's gone
+        list_result = _manage_workflows_impl(action="list")
+        assert "removeme" not in list_result["workflows"]
+
+    def test_remove_nonexistent(self) -> None:
+        """Test removing a missing workflow returns error."""
+        result = _manage_workflows_impl(action="remove", name="nope")
+
+        assert result["status"] == "error"
+        assert "not found" in result["message"]
+
+    def test_unknown_action(self) -> None:
+        """Test unknown action returns error."""
+        result = _manage_workflows_impl(action="unknown")
+
+        assert result["status"] == "error"
+        assert "Unknown action" in result["message"]

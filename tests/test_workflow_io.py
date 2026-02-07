@@ -1,5 +1,6 @@
 """Tests for workflow save and load functionality."""
 
+import pickle
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -7,12 +8,8 @@ from typing import Any
 import pytest
 
 from cmxflow.block import Block, SinkBlock, SourceBlock
-from cmxflow.workflow import (
-    Workflow,
-    WorkflowValidationError,
-    load_workflow,
-    save_workflow,
-)
+from cmxflow.utils.serial import load_workflow, save_workflow
+from cmxflow.workflow import Workflow, WorkflowValidationError
 
 
 def simple_reader(path: Path) -> Iterator[int]:
@@ -159,10 +156,41 @@ class TestRoundTrip:
         workflow.add(SquareBlock())
         workflow.add(SinkBlock(simple_writer))
 
-        save_path = tmp_path / "workflow.pkl"
+        save_path = tmp_path / "workflow.pkl.gz"
         save_workflow(workflow, save_path)
         loaded = load_workflow(save_path)
 
         assert isinstance(loaded.blocks[0], SourceBlock)
         assert isinstance(loaded.blocks[1], SquareBlock)
         assert isinstance(loaded.blocks[2], SinkBlock)
+
+    def test_saved_file_is_gzip_compressed(self, tmp_path: Path) -> None:
+        """Test that saved files are actually gzip-compressed."""
+        workflow = Workflow("GzipWorkflow")
+        workflow.add(SourceBlock(simple_reader))
+        workflow.add(SquareBlock())
+        workflow.add(SinkBlock(simple_writer))
+
+        save_path = tmp_path / "workflow.pkl.gz"
+        save_workflow(workflow, save_path)
+
+        # Verify the file starts with gzip magic bytes
+        with open(save_path, "rb") as f:
+            magic = f.read(2)
+        assert magic == b"\x1f\x8b", "File is not gzip-compressed"
+
+    def test_load_legacy_uncompressed_pkl(self, tmp_path: Path) -> None:
+        """Test that load_workflow can read legacy uncompressed pickle files."""
+        workflow = Workflow("LegacyWorkflow")
+        workflow.add(SourceBlock(simple_reader))
+        workflow.add(SquareBlock())
+        workflow.add(SinkBlock(simple_writer))
+
+        # Save as plain pickle (legacy format)
+        save_path = tmp_path / "legacy.pkl"
+        with open(save_path, "wb") as f:
+            pickle.dump(workflow, f)
+
+        loaded = load_workflow(save_path)
+        assert loaded.name == "LegacyWorkflow"
+        assert len(loaded.blocks) == 3

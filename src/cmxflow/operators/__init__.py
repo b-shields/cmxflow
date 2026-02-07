@@ -3,6 +3,7 @@
 from cmxflow.operators.align import MoleculeAlignBlock
 from cmxflow.operators.base import MoleculeBlock
 from cmxflow.operators.confgen import ConformerGenerationBlock, EnumerateStereoBlock
+from cmxflow.operators.dedup import MoleculeDeduplicateBlock
 from cmxflow.operators.dock import MoleculeDockBlock
 from cmxflow.operators.filter import PropertyFilterBlock, SubstructureFilterBlock
 from cmxflow.operators.method import RDKitBlock
@@ -17,6 +18,7 @@ __all__ = [
     "Molecule3DSimilarityBlock",
     "MoleculeAlignBlock",
     "MoleculeBlock",
+    "MoleculeDeduplicateBlock",
     "MoleculeDockBlock",
     "MoleculeSimilarityBlock",
     "MoleculeStandardizeBlock",

@@ -13,6 +13,7 @@ from cmxflow.operators import (
     EnumerateStereoBlock,
     Molecule3DSimilarityBlock,
     MoleculeAlignBlock,
+    MoleculeDeduplicateBlock,
     MoleculeDockBlock,
     MoleculeSimilarityBlock,
     MoleculeStandardizeBlock,
@@ -110,6 +111,7 @@ def get_available_blocks() -> dict[str, type]:
         "EnumerateStereoBlock": EnumerateStereoBlock,
         "Molecule3DSimilarityBlock": Molecule3DSimilarityBlock,
         "MoleculeAlignBlock": MoleculeAlignBlock,
+        "MoleculeDeduplicateBlock": MoleculeDeduplicateBlock,
         "MoleculeSimilarityBlock": MoleculeSimilarityBlock,
         "MoleculeStandardizeBlock": MoleculeStandardizeBlock,
         "RDKitBlock": RDKitBlock,
@@ -168,6 +170,12 @@ def get_block_descriptions() -> dict[str, str]:
             "(SDF, SMILES, CSV, Parquet)."
         ),
         # Operators
+        "MoleculeDeduplicateBlock": (
+            "Remove duplicate molecules from the stream based on canonical SMILES. "
+            "Keeps the first occurrence and discards subsequent duplicates. "
+            "IMPORTANT: This block cannot be parallelized because it requires "
+            "shared state. Place it after MoleculeStandardizeBlock for best results."
+        ),
         "MoleculeSimilarityBlock": (
             "Compute 2D fingerprint similarity between molecules and a reference. "
             "This block adds the 'max_similarity' property to all input molecules."

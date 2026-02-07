@@ -9,6 +9,7 @@ from cmxflow.operators.method import RDKitBlock
 from cmxflow.operators.select import PropertyHeadBlock, PropertyTailBlock
 from cmxflow.operators.sim2d import MoleculeSimilarityBlock
 from cmxflow.operators.sim3d import Molecule3DSimilarityBlock
+from cmxflow.operators.standardize import MoleculeStandardizeBlock
 
 __all__ = [
     "ConformerGenerationBlock",
@@ -18,6 +19,7 @@ __all__ = [
     "MoleculeBlock",
     "MoleculeDockBlock",
     "MoleculeSimilarityBlock",
+    "MoleculeStandardizeBlock",
     "PropertyFilterBlock",
     "PropertyHeadBlock",
     "PropertyTailBlock",

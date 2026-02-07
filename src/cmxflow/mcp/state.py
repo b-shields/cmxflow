@@ -15,6 +15,7 @@ from cmxflow.operators import (
     MoleculeAlignBlock,
     MoleculeDockBlock,
     MoleculeSimilarityBlock,
+    MoleculeStandardizeBlock,
     PropertyFilterBlock,
     PropertyHeadBlock,
     PropertyTailBlock,
@@ -110,6 +111,7 @@ def get_available_blocks() -> dict[str, type]:
         "Molecule3DSimilarityBlock": Molecule3DSimilarityBlock,
         "MoleculeAlignBlock": MoleculeAlignBlock,
         "MoleculeSimilarityBlock": MoleculeSimilarityBlock,
+        "MoleculeStandardizeBlock": MoleculeStandardizeBlock,
         "RDKitBlock": RDKitBlock,
         "SubstructureFilterBlock": SubstructureFilterBlock,
         "PropertyFilterBlock": PropertyFilterBlock,
@@ -169,6 +171,13 @@ def get_block_descriptions() -> dict[str, str]:
         "MoleculeSimilarityBlock": (
             "Compute 2D fingerprint similarity between molecules and a reference. "
             "This block adds the 'max_similarity' property to all input molecules."
+        ),
+        "MoleculeStandardizeBlock": (
+            "Standardize molecules for drug discovery: disconnects metals, "
+            "normalizes valence/aromaticity, strips salts (keeps largest fragment), "
+            "and neutralizes charges. Set `canonicalize_tautomers=True` to also pick "
+            "the heuristically preferred tautomer. IMPORTANT: This should typically "
+            "be the first processing step after the source block."
         ),
         "RDKitBlock": (
             "Apply an arbitrary RDKit method to molecules. Provide the method "

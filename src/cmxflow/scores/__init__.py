@@ -6,9 +6,11 @@ from cmxflow.scores.automatic import (
     enrichment_auc,
     mol_to_dataframe,
 )
+from cmxflow.scores.cluster import ClusterScoreBlock
 from cmxflow.scores.shape import ShapeOverlayScoreBlock
 
 __all__ = [
+    "ClusterScoreBlock",
     "EnrichmentScoreBlock",
     "ShapeOverlayScoreBlock",
     "AverageScoreBlock",

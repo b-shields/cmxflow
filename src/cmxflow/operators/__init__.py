@@ -2,6 +2,7 @@
 
 from cmxflow.operators.align import MoleculeAlignBlock
 from cmxflow.operators.base import MoleculeBlock
+from cmxflow.operators.cluster import RepresentativeClusterBlock
 from cmxflow.operators.confgen import ConformerGenerationBlock, EnumerateStereoBlock
 from cmxflow.operators.dedup import MoleculeDeduplicateBlock
 from cmxflow.operators.dock import MoleculeDockBlock
@@ -26,5 +27,6 @@ __all__ = [
     "PropertyHeadBlock",
     "PropertyTailBlock",
     "RDKitBlock",
+    "RepresentativeClusterBlock",
     "SubstructureFilterBlock",
 ]

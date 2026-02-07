@@ -21,10 +21,12 @@ from cmxflow.operators import (
     PropertyHeadBlock,
     PropertyTailBlock,
     RDKitBlock,
+    RepresentativeClusterBlock,
     SubstructureFilterBlock,
 )
 from cmxflow.scores import (
     AverageScoreBlock,
+    ClusterScoreBlock,
     EnrichmentScoreBlock,
     ShapeOverlayScoreBlock,
 )
@@ -115,6 +117,7 @@ def get_available_blocks() -> dict[str, type]:
         "MoleculeSimilarityBlock": MoleculeSimilarityBlock,
         "MoleculeStandardizeBlock": MoleculeStandardizeBlock,
         "RDKitBlock": RDKitBlock,
+        "RepresentativeClusterBlock": RepresentativeClusterBlock,
         "SubstructureFilterBlock": SubstructureFilterBlock,
         "PropertyFilterBlock": PropertyFilterBlock,
         "PropertyHeadBlock": PropertyHeadBlock,
@@ -122,6 +125,7 @@ def get_available_blocks() -> dict[str, type]:
         "MoleculeDockBlock": MoleculeDockBlock,
         # Scores
         "AverageScoreBlock": AverageScoreBlock,
+        "ClusterScoreBlock": ClusterScoreBlock,
         "EnrichmentScoreBlock": EnrichmentScoreBlock,
         "ShapeOverlayScoreBlock": ShapeOverlayScoreBlock,
     }
@@ -193,6 +197,14 @@ def get_block_descriptions() -> dict[str, str]:
             "only computes properties or modifies molecules (e.g., AddHs). (must "
             "use other blocks to act on properties)."
         ),
+        "RepresentativeClusterBlock": (
+            "Assign molecules to clusters using streaming leader clustering "
+            "with ECFP4 Tanimoto similarity. Annotates each molecule with "
+            "cluster_id, cluster_representative SMILES, and cluster_similarity. "
+            "Set scaffold=True to cluster by Murcko scaffold instead of whole "
+            "molecule. IMPORTANT: This block cannot be parallelized because it "
+            "requires shared state. Results are order-dependent."
+        ),
         "SubstructureFilterBlock": (
             "Filter molecules by substructure using SMARTS patterns and/or "
             "built-in catalogs (PAINS, BRENK, NIH, ZINC). Provide a single "
@@ -256,5 +268,11 @@ def get_block_descriptions() -> dict[str, str]:
             "Score shape similarity with references to optimize for good overlays. "
             "IMPORTANT: This score should be maximized always come somewhere AFTER a "
             "MoleculeAlignBlock."
+        ),
+        "ClusterScoreBlock": (
+            "Score clustering quality from RepresentativeClusterBlock. Computes "
+            "mean intra-cluster similarity (excluding singletons) minus the "
+            "fraction of singleton molecules. Use with RepresentativeClusterBlock "
+            "upstream. IMPORTANT: This score should be maximized."
         ),
     }

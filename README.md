@@ -49,6 +49,7 @@ Workflows are built from four types of blocks:
 | `EnrichmentScoreBlock` | Enrichment AUC for virtual screening |
 | `AverageScoreBlock` | Mean of a molecular property |
 | `ShapeOverlayScoreBlock` | Average 3D shape similarity |
+| `ClusterScoreBlock` | Cluster quality from representative clustering |
 
 ## Features 🚀
 

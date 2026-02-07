@@ -41,6 +41,9 @@ class MoleculeDockBlock(MoleculeBlock):
     The block requires a receptor PDB file specified via input_files["receptor"].
     Input molecules must have pre-generated 3D conformers.
 
+    Note: Since Vinardo score is united atom and does not have electrostatic
+    terms molecule ionization is not required molecule preprocessing.
+
     Attributes:
         input_files: Dictionary containing "receptor" key for protein PDB file.
 
@@ -77,7 +80,7 @@ class MoleculeDockBlock(MoleculeBlock):
             Continuous("w_hydrophobic", -0.035, -0.065, -0.015),
             Continuous("w_hbond", -0.6, -0.8, -0.4),
             # Pose search
-            Integer("max_iterations", 200, 100, 400),
+            Integer("max_iterations", 200, 0, 400),
             Continuous("box_size", 1.5, 0.5, 2.0),
             Categorical("rigid", False, [True, False]),
         )

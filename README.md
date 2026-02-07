@@ -28,11 +28,15 @@ Workflows are built from four types of blocks:
 
 | Block | Purpose |
 |-------|---------|
+| `MoleculeStandardizeBlock` | Standardize molecules (metals, salts, charges, tautomers) |
+| `MoleculeDeduplicateBlock` | Remove duplicate molecules by canonical SMILES |
 | `RDKitBlock` | Apply any RDKit method (descriptors, transformations) |
+| `SubstructureFilterBlock` | Filter by SMARTS patterns or catalogs (PAINS, BRENK, etc.) |
 | `PropertyFilterBlock` | Filter molecules by property conditions |
 | `PropertyHeadBlock` | Select top N molecules by property |
 | `PropertyTailBlock` | Select bottom N molecules by property |
 | `MoleculeSimilarityBlock` | Compute 2D fingerprint similarity |
+| `Molecule3DSimilarityBlock` | Compute 3D shape similarity |
 | `EnumerateStereoBlock` | Enumerate all stereoisomers |
 | `ConformerGenerationBlock` | Generate 3D conformers (ETKDGv3) |
 | `MoleculeAlignBlock` | Align molecules to 3D reference |

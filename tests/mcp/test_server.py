@@ -161,13 +161,17 @@ class TestBuildWorkflow:
         assert "out of range" in result["message"]
 
     def test_validate_workflow(self) -> None:
-        """Test validating a complete workflow."""
+        """Test validating a complete workflow returns enriched response."""
         _build_workflow_impl(action="create")
-        # Just source and sink should be valid
+        # Just source — validate auto-adds sink
         result = _build_workflow_impl(action="validate")
 
         assert result["status"] == "success"
         assert "valid" in result["message"]
+        assert result["validated"] is True
+        assert result["num_blocks"] == 2  # source + auto-added sink
+        assert "required_inputs" in result
+        assert isinstance(result["required_inputs"], dict)
 
     def test_validate_no_workflow(self) -> None:
         """Test validating when no workflow exists."""
@@ -324,6 +328,59 @@ class TestBuildWorkflow:
         show_result = _build_workflow_impl(action="show")
         assert show_result["validated"] is False
 
+    def test_get_params_no_workflow(self) -> None:
+        """Test get_params when no workflow exists."""
+        result = _build_workflow_impl(action="get_params")
+
+        assert result["status"] == "error"
+        assert "No workflow exists" in result["message"]
+
+    def test_get_params_empty(self) -> None:
+        """Test get_params with no optimizable parameters."""
+        _build_workflow_impl(action="create")
+        result = _build_workflow_impl(action="get_params")
+
+        assert result["status"] == "success"
+        assert result["params"] == []
+        assert "No optimizable parameters" in result["message"]
+
+    def test_get_params_success(self) -> None:
+        """Test get_params returns param info for workflow with params."""
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="ConformerGenerationBlock",
+        )
+        result = _build_workflow_impl(action="get_params")
+
+        assert result["status"] == "success"
+        assert len(result["params"]) > 0
+        param = result["params"][0]
+        assert "name" in param
+        assert "type" in param
+        assert "current" in param
+        assert "block" in param
+
+    def test_validate_auto_adds_sink_message(self) -> None:
+        """Test that validate message reports auto-added sink."""
+        _build_workflow_impl(action="create")
+        result = _build_workflow_impl(action="validate")
+
+        assert result["status"] == "success"
+        assert "auto-added MoleculeSinkBlock" in result["message"]
+
+    def test_validate_no_auto_add_message(self) -> None:
+        """Test that validate message omits auto-add when sink present."""
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="MoleculeSinkBlock",
+        )
+        result = _build_workflow_impl(action="validate")
+
+        assert result["status"] == "success"
+        assert "auto-added" not in result["message"]
+
 
 class TestRunWorkflow:
     """Tests for the run_workflow tool."""
@@ -335,13 +392,14 @@ class TestRunWorkflow:
         assert result["status"] == "error"
         assert "No workflow exists" in result["message"]
 
-    def test_get_inputs_not_validated(self) -> None:
-        """Test getting inputs when workflow not validated."""
+    def test_get_inputs_invalid_workflow(self) -> None:
+        """Test getting inputs on invalid workflow returns error from check()."""
         _build_workflow_impl(action="create")
+        # Workflow with only source block is structurally invalid
         result = _run_workflow_impl(action="get_inputs")
 
         assert result["status"] == "error"
-        assert "not validated" in result["message"]
+        assert "invalid" in result["message"].lower()
 
     def test_get_inputs_success(self) -> None:
         """Test getting required inputs after validation."""
@@ -410,6 +468,53 @@ class TestRunWorkflow:
 
         assert result["status"] == "error"
         assert "Unknown action" in result["message"]
+
+    def test_execute_sink_workflow_requires_output_file(self, tmp_path: Path) -> None:
+        """Test that SinkBlock workflow errors without output_file."""
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(action="validate")  # auto-adds sink
+
+        input_file = tmp_path / "test.sdf"
+        input_file.write_text("")
+
+        result = _run_workflow_impl(
+            action="execute",
+            input_file=str(input_file),
+        )
+
+        assert result["status"] == "error"
+        assert "output_file" in result["message"]
+
+    def test_execute_score_workflow_no_output_file(self, tmp_path: Path) -> None:
+        """Test that ScoreBlock workflow doesn't require output_file."""
+        _build_workflow_impl(action="create")
+        _build_workflow_impl(
+            action="add_block",
+            block_type="EnrichmentScoreBlock",
+        )
+        _build_workflow_impl(action="validate")
+
+        # Set required inputs for EnrichmentScoreBlock
+        _run_workflow_impl(
+            action="set_inputs",
+            inputs={"1.text@target": "is_active"},
+        )
+
+        input_file = tmp_path / "test.sdf"
+        input_file.write_text("")
+
+        # Mock workflow forward to return a score
+        state = get_global_state()
+        assert state.workflow is not None
+        with patch.object(state.workflow, "forward", return_value=0.75):
+            result = _run_workflow_impl(
+                action="execute",
+                input_file=str(input_file),
+            )
+
+        assert result["status"] == "success"
+        assert result["score"] == 0.75
+        assert "output_file" not in result
 
 
 class TestIntegration:
@@ -893,6 +998,14 @@ class TestManageWorkflows:
 
         assert result["status"] == "error"
         assert "No workflow exists" in result["message"]
+
+    def test_save_not_validated(self) -> None:
+        """Test saving unvalidated workflow returns error."""
+        _build_workflow_impl(action="create")
+        result = _manage_workflows_impl(action="save", name="unvalidated")
+
+        assert result["status"] == "error"
+        assert "not validated" in result["message"]
 
     def test_save_no_name(self) -> None:
         """Test saving without a name returns error."""

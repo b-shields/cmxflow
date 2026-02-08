@@ -14,6 +14,7 @@ from cmxflow.mcp.state import (
     get_block_descriptions,
     get_executor,
     get_global_state,
+    get_param_info,
     reset_global_state,
     workflow_has_3d_blocks,
 )
@@ -55,7 +56,7 @@ def _build_workflow_impl(
 
     Args:
         action: One of "create", "add_block", "remove_block", "list_blocks",
-            "validate", "clear", "show", "make_parallel".
+            "validate", "clear", "show", "make_parallel", "get_params".
         block_type: Block class name (e.g., "ConformerGenerationBlock").
         block_config: Block initialization parameters. For "make_parallel" action,
             this specifies parallel execution options: max_workers, chunk_size,
@@ -186,19 +187,28 @@ def _build_workflow_impl(
             }
 
         # Ensure workflow ends with a sink or score block
+        sink_added = False
         if not state.workflow.blocks or not isinstance(
             state.workflow.blocks[-1], (SinkBlock, ScoreBlock)
         ):
             # Auto-add sink if needed
             state.workflow.add(MoleculeSinkBlock())
+            sink_added = True
 
         try:
             state.workflow.check()
             state.validated = True
+            required = state.workflow.get_required_input()
+            message = "Workflow is valid"
+            if sink_added:
+                message += " (auto-added MoleculeSinkBlock)"
             return {
                 "status": "success",
-                "message": "Workflow is valid",
+                "message": message,
                 "workflow": _format_workflow(state.workflow),
+                "validated": True,
+                "num_blocks": len(state.workflow.blocks),
+                "required_inputs": {k: str(v) for k, v in required.items()},
             }
         except Exception as e:
             state.validated = False
@@ -305,12 +315,37 @@ def _build_workflow_impl(
             "workflow": _format_workflow(state.workflow),
         }
 
+    elif action == "get_params":
+        if state.workflow is None:
+            return {
+                "status": "error",
+                "message": "No workflow exists. Use action='create' first.",
+            }
+
+        try:
+            params = get_param_info(state.workflow)
+            if not params:
+                return {
+                    "status": "success",
+                    "message": "No optimizable parameters",
+                    "params": [],
+                }
+            return {
+                "status": "success",
+                "params": params,
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Failed to get parameters: {e}",
+            }
+
     else:
         return {
             "status": "error",
             "message": f"Unknown action: {action}. "
             "Valid actions: create, add_block, remove_block, list_blocks, "
-            "validate, clear, show, make_parallel",
+            "validate, clear, show, make_parallel, get_params",
         }
 
 
@@ -339,6 +374,13 @@ def _manage_workflows_impl(
                 "first.",
             }
 
+        if not state.validated:
+            return {
+                "status": "error",
+                "message": "Workflow not validated. "
+                "Use build_workflow(action='validate') first.",
+            }
+
         if name is None:
             return {
                 "status": "error",
@@ -358,6 +400,11 @@ def _manage_workflows_impl(
             return {
                 "status": "error",
                 "message": str(e),
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Unexpected error saving workflow: {e}",
             }
 
     elif action == "load":
@@ -389,6 +436,11 @@ def _manage_workflows_impl(
             return {
                 "status": "error",
                 "message": str(e),
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Unexpected error loading workflow: {e}",
             }
 
     elif action == "list":
@@ -422,6 +474,11 @@ def _manage_workflows_impl(
             return {
                 "status": "error",
                 "message": f"Workflow '{name}' not found.",
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Unexpected error removing workflow: {e}",
             }
 
     else:
@@ -459,13 +516,6 @@ def _run_workflow_impl(
         }
 
     if action == "get_inputs":
-        if not state.validated:
-            return {
-                "status": "error",
-                "message": "Workflow not validated. "
-                "Use build_workflow(action='validate') first.",
-            }
-
         try:
             required = state.workflow.get_required_input()
             return {
@@ -480,7 +530,7 @@ def _run_workflow_impl(
         except Exception as e:
             return {
                 "status": "error",
-                "message": f"Failed to get required inputs: {e}",
+                "message": f"Cannot get inputs (workflow may be invalid): {e}",
             }
 
     elif action == "set_inputs":
@@ -528,19 +578,18 @@ def _run_workflow_impl(
                 "Use build_workflow(action='validate') first.",
             }
 
-        # Make sure the final block is a sink
-        if not isinstance(state.workflow.blocks[-1], MoleculeSinkBlock):
-            state.workflow.add(MoleculeSinkBlock())
-
         # Check if inputs are required but not set
         required = state.workflow.get_required_input()
         if required and not state.inputs_set:
-            return {
-                "status": "error",
-                "message": "Required inputs not set. "
-                "Use run_workflow(action='set_inputs') first.",
-                "required_inputs": {k: str(v) for k, v in required.items()},
-            }
+            try:
+                state.workflow.set_required_input({})
+            except (KeyError, FileNotFoundError) as e:
+                return {
+                    "status": "error",
+                    "message": f"Required inputs not set: {e}"
+                    "Use run_workflow(action='set_inputs') first.",
+                    "required_inputs": {k: str(v) for k, v in required.items()},
+                }
 
         if input_file is None:
             return {
@@ -555,18 +604,30 @@ def _run_workflow_impl(
                 "message": f"Input file not found: {input_file}",
             }
 
+        ends_with_score = isinstance(state.workflow.blocks[-1], ScoreBlock)
+
+        if not ends_with_score and output_file is None:
+            return {
+                "status": "error",
+                "message": "Must provide output_file for workflows "
+                "ending with a SinkBlock",
+            }
+
         output_path = Path(output_file) if output_file else Path("")
 
         try:
             result = state.workflow(input_path, output_path)
             if output_file:
                 state.last_output_file = str(output_path)
-            return {
+            response: dict[str, Any] = {
                 "status": "success",
                 "message": "Workflow executed successfully",
-                "result": result,
-                "output_file": str(output_path) if output_file else None,
             }
+            if ends_with_score:
+                response["score"] = result
+            else:
+                response["output_file"] = str(output_path)
+            return response
         except Exception as e:
             return {
                 "status": "error",
@@ -589,15 +650,17 @@ def build_workflow(
     rdkit_method: str | None = None,
     index: int | None = None,
 ) -> dict[str, Any]:
-    """Build a cheminformatics workflow step-by-step. Always approach this in plan
-    mode. IMPORTANT: If possible ALWAYS use this tool to solve problems and ALWAYS
-    use manage_workflows to list saved workflows and ask if one should be used if
-    appropriate for the problem.
+    """Build a cheminformatics workflow step-by-step. Plan the full workflow
+    structure before building. Consider block ordering constraints and required
+    inputs.
 
-    NOTE: required 'input_text', 'input_files', and optional mutable parameters can
-    be set at instantiation as part of the 'block_config'. ONLY `input_text` and
-    `input_files` can be set with the `get_inputs` and `set_inputs` actions in the
-    `run_workflow` tool.
+    IMPORTANT: Before creating a new workflow, check manage_workflows('list')
+    for existing workflows that could be reused or adapted.
+
+    Block configuration: required 'input_text' and 'input_files' can be set
+    either via 'block_config' at instantiation or later via the 'get_inputs'
+    and 'set_inputs' actions in the `run_workflow` tool. Mutable optimization
+    parameters can only be set via 'block_config'.
 
     IMPORTANT: Do not use the "clear" or "create" actions after optimizing a workflow.
 
@@ -609,7 +672,7 @@ def build_workflow(
 
     Args:
         action: One of "create", "add_block", "remove_block", "list_blocks",
-            "validate", "clear", "show", "make_parallel".
+            "validate", "clear", "show", "make_parallel", "get_params".
         block_type: Block class name (e.g., "ConformerGenerationBlock").
         block_config: Block initialization parameters. For "make_parallel" action,
             this specifies parallel execution options: max_workers, chunk_size,
@@ -674,13 +737,10 @@ def run_workflow(
     'add_block' action they can be set with this tool using the 'get_inputs' and
     'set_inputs' actions using the `run_workflow` tool.
 
-    YOU MUST "show" the workflow structure before using the run_workflow tool. It may
-    include some annotations and added context but the text graphic MUST INCLUDE:
-    1. A header with a fun name for the workflow. Be funny (e.g., a pun) and use emojis.
-    2. The output from the "build_workflow" tool "show" action. DO NOT remove text.
-    3. A quote from a famous chemist. It should be related to the workflow subject.
-
-    Note: YOU MUST validate a workflow before using the run_workflow tool.
+    Before executing or optimizing, display the workflow with:
+    1. A fun header name with emojis
+    2. The workflow structure from validate/show
+    3. A relevant quote from a famous chemist
 
     Args:
         action: One of "get_inputs", "set_inputs", "execute".
@@ -688,6 +748,7 @@ def run_workflow(
             the format returned by get_inputs (e.g., "1.file@reference").
         input_file: Path to input molecule file for "execute" action.
         output_file: Path for output file for "execute" action.
+            Required for SinkBlock workflows, optional for ScoreBlock workflows.
 
     Returns:
         Required inputs dict, execution status, or results.
@@ -947,6 +1008,11 @@ def _optimize_workflow_impl(
                 "status": "error",
                 "message": str(e),
             }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Unexpected error getting best params: {e}",
+            }
 
     elif action == "set_best_params":
         if state.optimizer is None:
@@ -973,6 +1039,11 @@ def _optimize_workflow_impl(
                 "status": "error",
                 "message": str(e),
             }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Unexpected error setting best params: {e}",
+            }
 
     elif action == "cancel":
         if state.optimization_future is None:
@@ -987,16 +1058,23 @@ def _optimize_workflow_impl(
                 "message": "Optimization already completed",
             }
 
-        cancelled = state.optimization_future.cancel()
-        if cancelled:
-            return {
-                "status": "success",
-                "message": "Optimization cancelled",
-            }
-        else:
+        try:
+            cancelled = state.optimization_future.cancel()
+            if cancelled:
+                return {
+                    "status": "success",
+                    "message": "Optimization cancelled",
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": "Could not cancel optimization (already running). "
+                    "Cancellation only works before execution begins.",
+                }
+        except Exception as e:
             return {
                 "status": "error",
-                "message": "Could not cancel optimization (already running)",
+                "message": f"Unexpected error cancelling optimization: {e}",
             }
 
     else:
@@ -1021,21 +1099,19 @@ def optimize_workflow(
     Offer to use this tool if a user doesn't like the output of a workflow.
 
     IMPORTANT: The following rules MUST BE FOLLOWED:
-    1. YOU MUST validate a workflow before using the run_workflow tool.
+    1. YOU MUST validate a workflow before using the optimize_workflow tool.
     2. YOU MUST confirm selection of n_trials. Typically 30 is good but users
        may want more or less.
     3. YOU MUST ask if any steps should be parallel before using "start" action.
     4. After starting optimization, DO NOT poll status automatically. Only check
        status when the user explicitly asks for progress or results.
-    5. NEVER use the any other tool (especailly build_workflow) while
+    5. NEVER use any other tool (especially build_workflow) while
        optimize workflow is running.
 
-    YOU MUST "show" the workflow structure before using the "optimize_workflow" tool. It
-    may include some annotations and added context but the text graphic MUST INCLUDE:
-    1. A header with a fun name for the workflow. Be funny (e.g., a pun) and use emojis.
-    2. The output from the "build_workflow" tool "show" action. DO NOT remove text.
-    3. A quote from a famous chemist. It should be related to the workflow subject.
-
+    Before executing or optimizing, display the workflow with:
+    1. A fun header name with emojis
+    2. The workflow structure from validate/show
+    3. A relevant quote from a famous chemist
 
     Args:
         action: One of "start", "status", "get_best_params", "set_best_params",

@@ -2,7 +2,7 @@
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from cmxflow import Workflow
 
@@ -154,6 +154,30 @@ def workflow_has_3d_blocks() -> bool:
         if isinstance(block, _3d_block_types):
             return True
     return False
+
+
+def get_param_info(workflow: Workflow) -> list[dict[str, Any]]:
+    """Extract parameter info with owning block names.
+
+    Args:
+        workflow: Workflow to extract parameters from.
+
+    Returns:
+        List of dicts with name, type, current value, options, and block name.
+    """
+    info: list[dict[str, Any]] = []
+    for block in workflow.blocks:
+        for param in block.get_params().values():
+            info.append(
+                {
+                    "name": param.name,
+                    "type": type(param).__name__,
+                    "current": str(param),
+                    "options": str(param.options),
+                    "block": block.name,
+                }
+            )
+    return info
 
 
 def get_block_descriptions() -> dict[str, str]:

@@ -41,6 +41,7 @@ Workflows are built from four types of blocks:
 | `ConformerGenerationBlock` | Generate 3D conformers (ETKDGv3) |
 | `MoleculeAlignBlock` | Align molecules to 3D reference |
 | `MoleculeDockBlock` | Dock into protein binding pocket |
+| `RepresentativeClusterBlock` | Cluster molecules by fingerprint similarity (leader algorithm) |
 
 ### Example Score Blocks 📊
 

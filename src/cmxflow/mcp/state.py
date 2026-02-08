@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 from cmxflow.operators import (
     ConformerGenerationBlock,
     EnumerateStereoBlock,
+    IonizeMoleculeBlock,
     Molecule3DSimilarityBlock,
     MoleculeAlignBlock,
     MoleculeDeduplicateBlock,
@@ -111,6 +112,7 @@ def get_available_blocks() -> dict[str, type]:
         # Operators
         "ConformerGenerationBlock": ConformerGenerationBlock,
         "EnumerateStereoBlock": EnumerateStereoBlock,
+        "IonizeMoleculeBlock": IonizeMoleculeBlock,
         "Molecule3DSimilarityBlock": Molecule3DSimilarityBlock,
         "MoleculeAlignBlock": MoleculeAlignBlock,
         "MoleculeDeduplicateBlock": MoleculeDeduplicateBlock,
@@ -231,8 +233,8 @@ def get_block_descriptions() -> dict[str, str]:
         ),
         "SubstructureFilterBlock": (
             "Filter molecules by substructure using SMARTS patterns and/or "
-            "built-in catalogs (PAINS, BRENK, NIH, ZINC). Provide a single "
-            "'query' with space-separated catalog names or SMARTS patterns "
+            "built-in catalogs (e.g., PAINS, BRENK, NIH, ZINC, etc.). Provide a "
+            "single 'query' with space-separated catalog names or SMARTS patterns "
             "(e.g., 'PAINS BRENK [#8;!$(O=C)]'). Mode is 'remove' by default. Set to "
             "'keep' to only return matching."
         ),
@@ -254,6 +256,11 @@ def get_block_descriptions() -> dict[str, str]:
         "EnumerateStereoBlock": (
             "Enumerate all possible stereoisomers of molecules. IMPORTANT: This step "
             "should always come somewhere BEFORE a ConformerGenerationBlock."
+        ),
+        "IonizeMoleculeBlock": (
+            "Generate pH-dependent ionization states. One molecule can produce "
+            "multiple protonation variants. IMPORTANT: Place after "
+            "MoleculeStandardizeBlock and before ConformerGenerationBlock."
         ),
         "ConformerGenerationBlock": (
             "Generate 3D conformers. IMPORTANT: This step should always come somewhere "

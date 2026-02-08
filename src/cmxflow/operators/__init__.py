@@ -7,6 +7,7 @@ from cmxflow.operators.confgen import ConformerGenerationBlock, EnumerateStereoB
 from cmxflow.operators.dedup import MoleculeDeduplicateBlock
 from cmxflow.operators.dock import MoleculeDockBlock
 from cmxflow.operators.filter import PropertyFilterBlock, SubstructureFilterBlock
+from cmxflow.operators.ionize import IonizeMoleculeBlock
 from cmxflow.operators.method import RDKitBlock
 from cmxflow.operators.select import PropertyHeadBlock, PropertyTailBlock
 from cmxflow.operators.sim2d import MoleculeSimilarityBlock
@@ -16,6 +17,7 @@ from cmxflow.operators.standardize import MoleculeStandardizeBlock
 __all__ = [
     "ConformerGenerationBlock",
     "EnumerateStereoBlock",
+    "IonizeMoleculeBlock",
     "Molecule3DSimilarityBlock",
     "MoleculeAlignBlock",
     "MoleculeBlock",

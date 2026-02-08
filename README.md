@@ -37,6 +37,7 @@ Workflows are built from four types of blocks:
 | `PropertyTailBlock` | Select bottom N molecules by property |
 | `MoleculeSimilarityBlock` | Compute 2D fingerprint similarity |
 | `Molecule3DSimilarityBlock` | Compute 3D shape similarity |
+| `IonizeMoleculeBlock` | Generate pH-dependent ionization states |
 | `EnumerateStereoBlock` | Enumerate all stereoisomers |
 | `ConformerGenerationBlock` | Generate 3D conformers (ETKDGv3) |
 | `MoleculeAlignBlock` | Align molecules to 3D reference |

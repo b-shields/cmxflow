@@ -23,7 +23,7 @@ class TestIonizeMoleculeBlockInit:
         assert block.ph_min == 6.4
         assert block.ph_max == 8.4
         assert block.params["precision"].get() == 1.0
-        assert block.params["max_variants"].get() == 128
+        assert block.params["max_variants"].get() == 4
 
     def test_custom_ph_range(self) -> None:
         """Test custom pH range initialization."""

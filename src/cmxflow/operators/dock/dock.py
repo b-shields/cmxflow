@@ -11,8 +11,13 @@ from typing import Any
 
 import numpy as np
 from rdkit import Chem
+from rdkit.Chem import AllChem
 
 from cmxflow.operators.base import MoleculeBlock
+from cmxflow.operators.dock.ec import (
+    compute_gasteiger_charges,
+    electrostatic_complementarity,
+)
 from cmxflow.operators.dock.pose import (
     PoseParams,
     optimize_pose_cached,
@@ -37,12 +42,11 @@ class MoleculeDockBlock(MoleculeBlock):
 
     Performs pose optimization using Vinardo scoring with configurable
     parameters. Supports both rigid-body and flexible (torsional) docking.
+    An optional electrostatic complementarity (EC) term can be enabled
+    via the ``w_ec`` parameter to reward charge complementarity.
 
     The block requires a receptor PDB file specified via input_files["receptor"].
     Input molecules must have pre-generated 3D conformers.
-
-    Note: Since Vinardo score is united atom and does not have electrostatic
-    terms molecule ionization is not required molecule preprocessing.
 
     Attributes:
         input_files: Dictionary containing "receptor" key for protein PDB file.
@@ -52,13 +56,15 @@ class MoleculeDockBlock(MoleculeBlock):
         w_repulsion: Vinardo repulsion term weight.
         w_hydrophobic: Vinardo hydrophobic term weight.
         w_hbond: Vinardo hydrogen bond term weight.
+        w_ec: Weight for electrostatic complementarity term (0 = disabled).
         max_iterations: Maximum optimization iterations.
         box_size: Translation search box size in Angstroms.
         rigid: If True, only rigid-body optimization (no torsions).
 
     Output Properties:
         docking_initial_pose_score: Score before optimization.
-        docking_score: Final optimized score.
+        docking_score: Final optimized score (Vinardo + EC adjustment).
+        docking_ec: Electrostatic complementarity value (0.0 when w_ec=0).
         docking_converged: Whether optimization converged.
 
     Example:
@@ -79,6 +85,8 @@ class MoleculeDockBlock(MoleculeBlock):
             Continuous("w_repulsion", 0.8, 0.8, 1.2),
             Continuous("w_hydrophobic", -0.035, -0.065, -0.015),
             Continuous("w_hbond", -0.6, -0.8, -0.4),
+            # Electrostatic complementarity
+            Continuous("w_ec", 0.0, 0.0, 5.0),
             # Pose search
             Integer("max_iterations", 200, 0, 400),
             Continuous("box_size", 1.5, 0.5, 2.0),
@@ -89,6 +97,8 @@ class MoleculeDockBlock(MoleculeBlock):
         # Lazy-loaded protein scoring components
         self._protein_coords: np.ndarray | None = None
         self._protein_typing: AtomTyping | None = None
+        self._protein_ec_coords: np.ndarray | None = None
+        self._protein_ec_charges: np.ndarray | None = None
 
     def _has_3d_conformer(self, mol: Chem.Mol) -> bool:
         """Check if molecule has at least one 3D conformer.
@@ -115,7 +125,15 @@ class MoleculeDockBlock(MoleculeBlock):
             raise FileNotFoundError(f"Receptor path does not exist: {receptor_path}.")
 
         mol = Chem.MolFromPDBFile(str(receptor_path))
-        mol = Chem.RemoveHs(mol)  # Unitd atom scoring functions
+
+        # Prepare receptor with explicit H for EC scoring
+        mol_with_h = Chem.AddHs(mol, addCoords=True)
+        AllChem.ComputeGasteigerCharges(mol_with_h)
+        self._protein_ec_coords = np.array(mol_with_h.GetConformer().GetPositions())
+        self._protein_ec_charges = compute_gasteiger_charges(mol_with_h)
+
+        # United atom for Vinardo scoring
+        mol = Chem.RemoveHs(mol)
 
         if not self._has_3d_conformer(mol):
             raise ValueError(f"Receptor {receptor_path} does not have a 3D conformer.")
@@ -148,6 +166,21 @@ class MoleculeDockBlock(MoleculeBlock):
             new_mol.RemoveAllConformers()
             new_mol.AddConformer(Chem.Conformer(conf), assignId=True)
             return new_mol
+
+    def _compute_ec(self, mol: Chem.Mol) -> float:
+        """Compute electrostatic complementarity for a docked pose.
+
+        Args:
+            mol: Ligand RDKit Mol with 3D conformer.
+
+        Returns:
+            EC value in [-1, 1], or 0.0 for degenerate cases.
+        """
+        assert isinstance(self._protein_ec_coords, np.ndarray)
+        assert isinstance(self._protein_ec_charges, np.ndarray)
+        return electrostatic_complementarity(
+            mol, self._protein_ec_coords, self._protein_ec_charges
+        )
 
     def _forward(self, mol: Chem.Mol) -> Chem.Mol | None:
         """Dock a ligand molecule into the receptor binding site.
@@ -203,9 +236,18 @@ class MoleculeDockBlock(MoleculeBlock):
             params=pose_params,
         )
 
+        # Electrostatic complementarity adjustment
+        w_ec = self.get_param("w_ec")
+        ec_value = 0.0
+        if w_ec > 0:
+            ec_value = self._compute_ec(result.mol)
+        adjusted_score = result.score - ec_value * w_ec
+
         # Set properties
         result.mol.SetDoubleProp("docking_initial_pose_score", result.initial_score)
-        result.mol.SetDoubleProp("docking_score", result.score)
+        result.mol.SetDoubleProp("docking_score", adjusted_score)
+        result.mol.SetDoubleProp("docking_vinardo", result.score)
+        result.mol.SetDoubleProp("docking_ec", ec_value)
         result.mol.SetBoolProp("docking_converged", result.converged)
 
         return result.mol
@@ -227,7 +269,12 @@ class MoleculeDockBlock(MoleculeBlock):
             logger.info("Docking failed: output molecule has no conformers")
             return False
 
-        required = ("docking_initial_pose_score", "docking_score", "docking_converged")
+        required = (
+            "docking_initial_pose_score",
+            "docking_score",
+            "docking_ec",
+            "docking_converged",
+        )
         for key in required:
             if not arg.HasProp(key):
                 logger.info(f"Docking failed: missing {key} property")

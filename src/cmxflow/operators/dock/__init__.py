@@ -11,6 +11,13 @@ Scoring Functions:
     get_atom_typing: Get atom classification for a molecule
     AtomTyping: Atom classification data
 
+Electrostatic Complementarity:
+    electrostatic_complementarity: EC score for ligand-protein complex
+    compute_esp_at_points: ESP computation at query points
+    compute_gasteiger_charges: Gasteiger partial charges
+    fibonacci_sphere: Uniform sphere point generation
+    generate_sas_points: Solvent-accessible surface points
+
 Pose Optimization:
     optimize_pose: General pose optimization
     optimize_pose_rigid: Rigid-body only optimization
@@ -43,6 +50,13 @@ Example:
 """
 
 from cmxflow.operators.dock.dock import MoleculeDockBlock
+from cmxflow.operators.dock.ec import (
+    compute_esp_at_points,
+    compute_gasteiger_charges,
+    electrostatic_complementarity,
+    fibonacci_sphere,
+    generate_sas_points,
+)
 from cmxflow.operators.dock.pose import (
     OptimizationResult,
     PoseParams,
@@ -70,6 +84,12 @@ __all__ = [
     "get_scoring_function",
     "vinardo_score",
     "vinardo_score_cached",
+    # Electrostatic Complementarity
+    "electrostatic_complementarity",
+    "compute_esp_at_points",
+    "compute_gasteiger_charges",
+    "fibonacci_sphere",
+    "generate_sas_points",
     # Pose
     "OptimizationResult",
     "PoseParams",

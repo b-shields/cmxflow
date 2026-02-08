@@ -54,6 +54,30 @@ class MoleculeStandardizeBlock(MoleculeBlock):
         )
         self.set_inputs(**kwargs)
 
+    def __getstate__(self) -> dict:
+        """Get state for pickling, excluding unpicklable RDKit objects."""
+        state = self.__dict__.copy()
+        for key in (
+            "_metal_disconnector",
+            "_normalizer",
+            "_largest_fragment",
+            "_uncharger",
+            "_tautomer_enumerator",
+        ):
+            state.pop(key, None)
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore state from pickle, recreating RDKit objects."""
+        self.__dict__.update(state)
+        self._metal_disconnector = MetalDisconnector()
+        self._normalizer = Normalizer()
+        self._largest_fragment = LargestFragmentChooser()
+        self._uncharger = Uncharger()
+        self._tautomer_enumerator = (
+            TautomerEnumerator() if self.canonicalize_tautomers else None
+        )
+
     def _forward(self, mol: Chem.Mol) -> Chem.Mol | None:
         """Standardize a molecule through the preprocessing pipeline.
 

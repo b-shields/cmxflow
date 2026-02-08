@@ -61,6 +61,20 @@ class RDKitBlock(MoleculeBlock):
 
         super().__init__(name=f"RDKit:{self._property_name}")
 
+    def __getstate__(self) -> dict:
+        """Get state for pickling, excluding the resolved method callable."""
+        state = self.__dict__.copy()
+        state.pop("_method", None)
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore state from pickle, re-resolving the method callable."""
+        self.__dict__.update(state)
+        if isinstance(self._method_ref, str):
+            self._method = self._import_method(self._method_ref)
+        else:
+            self._method = self._method_ref
+
     def _import_method(self, method_path: str) -> Callable[[Chem.Mol], Any]:
         """Import method from a dot-separated string path.
 

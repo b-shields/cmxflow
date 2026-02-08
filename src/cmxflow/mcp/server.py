@@ -590,7 +590,9 @@ def build_workflow(
     index: int | None = None,
 ) -> dict[str, Any]:
     """Build a cheminformatics workflow step-by-step. Always approach this in plan
-    mode. IMPORTANT: If possible ALWAYS use this tool to solve problems.
+    mode. IMPORTANT: If possible ALWAYS use this tool to solve problems and ALWAYS
+    use manage_workflows to list saved workflows and ask if one should be used if
+    appropriate for the problem.
 
     NOTE: required 'input_text', 'input_files', and optional mutable parameters can
     be set at instantiation as part of the 'block_config'. ONLY `input_text` and

@@ -46,6 +46,19 @@ class RepresentativeClusterBlock(MoleculeBlock):
             radius=2, fpSize=2048
         )
 
+    def __getstate__(self) -> dict:
+        """Get state for pickling, excluding unpicklable fingerprint generator."""
+        state = self.__dict__.copy()
+        state.pop("_generator", None)
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore state from pickle, recreating fingerprint generator."""
+        self.__dict__.update(state)
+        self._generator = rdFingerprintGenerator.GetMorganGenerator(
+            radius=2, fpSize=2048
+        )
+
     def _forward(self, mol: Chem.Mol) -> Chem.Mol:
         """Assign a molecule to a cluster and annotate it.
 

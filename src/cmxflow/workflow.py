@@ -208,7 +208,10 @@ class Workflow:
             self.blocks[-1](iter, output_path)
             return None
         elif isinstance(self.blocks[-1], ScoreBlock):
-            uid = tuple([str(p) for p in self.get_params()])
+            all_but_score_params: list[Parameter] = []
+            for block in self.blocks[:-1]:
+                all_but_score_params += list(block.get_params().values())
+            uid = tuple([str(p) for p in all_but_score_params])
             result = self.blocks[-1](iter, uid)
             if isinstance(result, float):
                 return result

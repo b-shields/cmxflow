@@ -289,7 +289,11 @@ class ScoreBlock(BlockBase):
             input_text: Optional text required at run time.
         """
         super().__init__(name=name, input_files=input_files, input_text=input_text)
-        self._cache: dict[tuple[str, ...], Any] = {}
+        self._cache: dict[Any, Any] = {}
+        self._uid: None | tuple[str, ...] = None
+
+    def _set_score_properties(self, *args: Any) -> None:
+        pass
 
     @abstractmethod
     def objective(self, iter: Iterator[Any]) -> float:
@@ -333,6 +337,7 @@ class ScoreBlock(BlockBase):
             If uid is None (normal mode): Iterator of transformed items.
         """
         if uid is not None:
+            self._uid = uid
             return self.objective(iter)
         else:
             return self._forward_iter(iter)

@@ -10,9 +10,18 @@ from rdkit import Chem
 
 from cmxflow.block import ScoreBlock
 from cmxflow.cmxmol import Mol as CmxMol
-from cmxflow.parameter import Categorical
 
 logger = logging.getLogger(__name__)
+
+# Map blocks to a dict of scores and rank ascending bool
+BLOCK_SCORE_MAP: dict[str, dict[str, bool]] = {
+    "Molecule3DSimilarityBlock": {"similarity_3d": False},
+    "MoleculeAlignBlock": {"alignment_shape_similarity": False},
+    "MoleculeSimilarityBlock": {"max_similarity": False},
+    "MoleculeDockBlock": {
+        "docking_score": True,
+    },
+}
 
 
 def mol_to_dataframe(mols: Iterator[Chem.Mol | CmxMol]) -> pd.DataFrame:
@@ -130,6 +139,15 @@ class EnrichmentScoreBlock(ScoreBlock):
         self.pooler = pooler
         self.metric = metric
         self.set_inputs(**kwargs)
+        self._score_properties: dict[str, bool] = {}
+        self._best_score: float = -2.0
+        self._best_score_name: str | None = None
+        self._best_score_uid: tuple[str, ...] | None = None
+
+    def _set_score_properties(self, *args: Any) -> None:
+        for arg in args:
+            for key, value in BLOCK_SCORE_MAP.get(arg.__class__.__name__, {}).items():
+                self._score_properties[key] = bool(value)
 
     def objective(self, iter: Iterator[Chem.Mol | CmxMol]) -> float:
         """Compute enrichment AUC for the given molecules.
@@ -137,32 +155,47 @@ class EnrichmentScoreBlock(ScoreBlock):
         Args:
             iter: Iterator of molecules with properties.
 
+        Raises:
+            KeyError: Block does not have allowed properties for ranking.
+            ValueError: Score column not found in data.
+
         Returns:
             Enrichment AUC score.
         """
+        if not self._score_properties:
+            raise KeyError("EnrichmentScoreBlock has no allowed properties.")
+
         df = self.pooler(iter)
         target_col = self.input_text["target"]
+        if target_col not in df.coumns:
+            raise KeyError("Target column '{target_col}' not in input data.")
 
         if df.empty:
             logger.warning("Empty DataFrame, returning 0.0")
             return 0.0
 
-        # Dynamically set score parameter from columns
-        if not self.get_params():
-            cols = list(df.drop(target_col, axis=1).columns)
-            self.mutable(Categorical("score", cols[0], cols))
+        best_score: float = -2.0
+        best_score_name: str | None = None
+        for score_col, ascending in self._score_properties.items():
+            if score_col not in df.columns:
+                raise ValueError(f"Score column '{score_col}' not found in data.")
+            scores = df[score_col].to_numpy()
+            if ascending:
+                scores *= -1
+            labels = df[target_col].to_numpy()
+            metric = self.metric(scores, labels)
+            if metric > best_score:
+                best_score = metric
+                best_score_name = score_col
 
-        score_col = self.get_params()["score"].get()
+        if best_score > self._best_score:
+            self._best_score = best_score
+            self._best_score_name = best_score_name
+            self._best_score_uid = self._uid
 
-        if score_col not in df.columns:
-            raise ValueError(f"Score column '{score_col}' not found in data")
-        if target_col not in df.columns:
-            raise ValueError(f"Target column '{target_col}' not found in data")
+        self._cache[self._uid] = df
 
-        scores = df[score_col].to_numpy()
-        labels = df[target_col].to_numpy()
-
-        return self.metric(scores, labels)
+        return best_score
 
     def forward(self, mol: Chem.Mol | CmxMol) -> Chem.Mol | CmxMol:
         """Add workflow_score property during normal (non-optimization) execution.

@@ -208,6 +208,7 @@ class Workflow:
             self.blocks[-1](iter, output_path)
             return None
         elif isinstance(self.blocks[-1], ScoreBlock):
+            self.blocks[-1]._set_score_properties(*self.blocks)
             all_but_score_params: list[Parameter] = []
             for block in self.blocks[:-1]:
                 all_but_score_params += list(block.get_params().values())

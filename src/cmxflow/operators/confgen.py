@@ -104,7 +104,7 @@ class ConformerGenerationBlock(MoleculeBlock):
 
         # Register mutable parameters
         self.mutable(
-            Integer("numConfs", default=10, low=1, high=100),
+            Integer("numConfs", default=30, low=1, high=100),
             Continuous("pruneRmsThresh", default=1.5, low=0.0, high=3.0),
             Categorical("useRandomCoords", default=False, choices=[True, False]),
         )

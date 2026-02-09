@@ -166,13 +166,14 @@ class EnrichmentScoreBlock(ScoreBlock):
             raise KeyError("EnrichmentScoreBlock has no allowed properties.")
 
         df = self.pooler(iter)
-        target_col = self.input_text["target"]
-        if target_col not in df.coumns:
-            raise KeyError("Target column '{target_col}' not in input data.")
 
         if df.empty:
             logger.warning("Empty DataFrame, returning 0.0")
             return 0.0
+
+        target_col = self.input_text["target"]
+        if target_col not in df.columns:
+            raise KeyError(f"Target column '{target_col}' not in input data.")
 
         best_score: float = -2.0
         best_score_name: str | None = None
@@ -206,10 +207,10 @@ class EnrichmentScoreBlock(ScoreBlock):
         Returns:
             Molecule with workflow_score property added if score column exists.
         """
-        if not self.get_params():
+        if self._best_score_name is None:
             return mol
 
-        score = mol.GetPropsAsDict().get(self.get_params()["score"].get())
+        score = mol.GetPropsAsDict().get(self._best_score_name)
         if score is not None:
             mol.SetDoubleProp("workflow_score", float(score))
 

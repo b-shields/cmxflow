@@ -188,6 +188,7 @@ class TestEnrichmentScoreBlockObjective:
 
         block = EnrichmentScoreBlock()
         block.input_text["target"] = "active"
+        block._score_properties = {"score": False}
 
         auc = block.objective(iter([mol1, mol2, mol3]))
 
@@ -198,6 +199,7 @@ class TestEnrichmentScoreBlockObjective:
         """Test that empty input returns 0.0."""
         block = EnrichmentScoreBlock()
         block.input_text["target"] = "active"
+        block._score_properties = {"score": False}
 
         auc = block.objective(iter([]))
 
@@ -214,21 +216,22 @@ class TestEnrichmentScoreBlockObjective:
         with pytest.raises(KeyError):
             block.objective(iter([mol]))
 
-    def test_dynamically_sets_score_parameter(self) -> None:
-        """Test that score parameter is dynamically set from available columns."""
+    def test_dynamically_sets_best_score_name(self) -> None:
+        """Test that best score name is set after objective call."""
         mol1 = _create_mol_with_props("CCO", {"docking": 1.0, "active": 1.0})
         mol2 = _create_mol_with_props("CO", {"docking": 0.5, "active": 0.0})
 
         block = EnrichmentScoreBlock()
         block.input_text["target"] = "active"
+        block._score_properties = {"docking": False}
 
-        # Before objective call, no params
-        assert not block.get_params()
+        # Before objective call, no best score
+        assert block._best_score_name is None
 
         block.objective(iter([mol1, mol2]))
 
-        # After objective call, score param should be set
-        assert "score" in block.get_params()
+        # After objective call, best score name should be set
+        assert block._best_score_name == "docking"
 
 
 class TestEnrichmentScoreBlockForward:
@@ -250,8 +253,9 @@ class TestEnrichmentScoreBlockForward:
 
         block = EnrichmentScoreBlock()
         block.input_text["target"] = "active"
+        block._score_properties = {"docking": False}
 
-        # Trigger param setup
+        # Trigger best score name setup
         block.objective(iter([mol1, mol2]))
 
         # Now test forward

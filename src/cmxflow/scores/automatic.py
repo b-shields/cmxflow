@@ -23,9 +23,13 @@ BLOCK_SCORE_MAP: dict[str, dict[str, bool]] = {
     "ParallelMolecule2DSimilarity": {"max_similarity": False},
     "MoleculeDock": {
         "docking_score": True,
+        "docking_vinardo": True,
+        "docking_ec": False,
     },
     "ParallelMoleculeDock": {
         "docking_score": True,
+        "docking_vinardo": True,
+        "docking_ec": False,
     },
 }
 

@@ -15,7 +15,7 @@ from cmxflow.operators.dock.ec import (
     fibonacci_sphere,
     generate_sas_points,
 )
-from cmxflow.operators.dock.score import AtomTyping
+from cmxflow.operators.dock.score import AtomTyping, ec_score_cached
 
 # =============================================================================
 # fibonacci_sphere
@@ -250,8 +250,8 @@ class TestMoleculeDockBlockEC:
         block = MoleculeDockBlock()
         assert block.get_param("w_ec") == 0.0
 
-    def test_w_ec_zero_skips_compute_ec(self) -> None:
-        """Test that w_ec=0 skips EC computation."""
+    def test_w_ec_zero_passes_zero_to_optimizer(self) -> None:
+        """Test that w_ec=0 passes w_ec=0.0 to optimize_pose_cached."""
         from cmxflow.operators.dock import MoleculeDockBlock
 
         block = MoleculeDockBlock()
@@ -277,22 +277,22 @@ class TestMoleculeDockBlockEC:
         mock_result.score = -5.0
         mock_result.initial_score = -3.0
         mock_result.converged = True
+        mock_result.ec = 0.0
 
-        with (
-            patch(
-                "cmxflow.operators.dock.dock.optimize_pose_cached",
-                return_value=mock_result,
-            ),
-            patch.object(block, "_compute_ec") as mock_ec,
-        ):
+        with patch(
+            "cmxflow.operators.dock.dock.optimize_pose_cached",
+            return_value=mock_result,
+        ) as mock_opt:
             result = block._forward(mol)
             assert result is not None
-            mock_ec.assert_not_called()
+            # Verify w_ec=0.0 was passed to optimizer
+            call_kwargs = mock_opt.call_args[1]
+            assert call_kwargs["w_ec"] == 0.0
             assert result.GetDoubleProp("docking_ec") == 0.0
             assert result.GetDoubleProp("docking_score") == -5.0
 
-    def test_w_ec_positive_adjusts_score(self) -> None:
-        """Test that w_ec > 0 adjusts the docking score."""
+    def test_w_ec_positive_passes_to_optimizer(self) -> None:
+        """Test that w_ec > 0 passes EC params to optimize_pose_cached."""
         from cmxflow.operators.dock import MoleculeDockBlock
 
         block = MoleculeDockBlock()
@@ -314,23 +314,27 @@ class TestMoleculeDockBlockEC:
 
         mock_result = MagicMock()
         mock_result.mol = mol
-        mock_result.score = -5.0
+        mock_result.score = -6.2  # combined: vinardo - w_ec * ec
         mock_result.initial_score = -3.0
         mock_result.converged = True
+        mock_result.ec = 0.6
 
-        with (
-            patch(
-                "cmxflow.operators.dock.dock.optimize_pose_cached",
-                return_value=mock_result,
-            ),
-            patch.object(block, "_compute_ec", return_value=0.6) as mock_ec,
-        ):
+        with patch(
+            "cmxflow.operators.dock.dock.optimize_pose_cached",
+            return_value=mock_result,
+        ) as mock_opt:
             result = block._forward(mol)
             assert result is not None
-            mock_ec.assert_called_once()
-            # adjusted_score = -5.0 - 0.6 * 2.0 = -6.2
+            # Verify w_ec=2.0 was passed to optimizer
+            call_kwargs = mock_opt.call_args[1]
+            assert call_kwargs["w_ec"] == 2.0
+            assert call_kwargs["protein_ec_coords"] is not None
+            assert call_kwargs["protein_ec_charges"] is not None
+            # Score comes directly from result now
             assert result.GetDoubleProp("docking_score") == pytest.approx(-6.2)
             assert result.GetDoubleProp("docking_ec") == 0.6
+            # Vinardo recovered: score + w_ec * ec = -6.2 + 2.0 * 0.6 = -5.0
+            assert result.GetDoubleProp("docking_vinardo") == pytest.approx(-5.0)
 
     def test_docking_ec_always_present(self) -> None:
         """Test that docking_ec property is always set."""
@@ -357,6 +361,7 @@ class TestMoleculeDockBlockEC:
         mock_result.score = -5.0
         mock_result.initial_score = -3.0
         mock_result.converged = True
+        mock_result.ec = 0.0
 
         with patch(
             "cmxflow.operators.dock.dock.optimize_pose_cached",
@@ -410,3 +415,134 @@ class TestMoleculeDockBlockEC:
         # EC data should include H atoms (more atoms than heavy-atom-only)
         assert block._protein_coords is not None
         assert len(block._protein_ec_coords) >= len(block._protein_coords)
+
+
+# =============================================================================
+# ec_score_cached
+# =============================================================================
+
+
+class TestEcScoreCached:
+    """Tests for ec_score_cached."""
+
+    def _make_mol_3d(self, smiles: str) -> Chem.Mol:
+        """Create a molecule with 3D coordinates."""
+        mol = Chem.MolFromSmiles(smiles)
+        mol = Chem.AddHs(mol)
+        AllChem.EmbedMolecule(mol, randomSeed=42)
+        return mol
+
+    def test_returns_float_in_range(self) -> None:
+        """Test that ec_score_cached returns a float in [-1, 1]."""
+        ligand = self._make_mol_3d("CCO")
+        prot_coords = np.array(ligand.GetConformer().GetPositions()) + 3.0
+        prot_charges = -compute_gasteiger_charges(ligand)
+
+        ec = ec_score_cached(ligand, prot_coords, prot_charges)
+        assert isinstance(ec, float)
+        assert -1.0 <= ec <= 1.0
+
+    def test_delegates_to_electrostatic_complementarity(self) -> None:
+        """Test that ec_score_cached delegates to electrostatic_complementarity."""
+        ligand = self._make_mol_3d("CCO")
+        prot_coords = np.array([[5.0, 0.0, 0.0]])
+        prot_charges = np.array([0.5])
+
+        with patch(
+            "cmxflow.operators.dock.ec.electrostatic_complementarity",
+            return_value=0.42,
+        ) as mock_ec:
+            result = ec_score_cached(ligand, prot_coords, prot_charges)
+            mock_ec.assert_called_once_with(ligand, prot_coords, prot_charges)
+            assert result == 0.42
+
+    def test_no_conformer_returns_zero(self) -> None:
+        """Test molecule without conformer returns 0.0."""
+        mol = Chem.MolFromSmiles("CCO")
+        prot_coords = np.array([[0.0, 0.0, 0.0]])
+        prot_charges = np.array([1.0])
+        ec = ec_score_cached(mol, prot_coords, prot_charges)
+        assert ec == 0.0
+
+
+# =============================================================================
+# optimize_pose_cached with EC
+# =============================================================================
+
+
+class TestOptimizePoseCachedWithEC:
+    """Tests for EC integration in optimize_pose_cached."""
+
+    def _make_mol_3d(self, smiles: str) -> Chem.Mol:
+        """Create a molecule with 3D coordinates."""
+        mol = Chem.MolFromSmiles(smiles)
+        mol = Chem.AddHs(mol)
+        AllChem.EmbedMolecule(mol, randomSeed=42)
+        return mol
+
+    def test_ec_included_in_objective(self) -> None:
+        """Test that EC is part of the objective when w_ec > 0."""
+        from cmxflow.operators.dock.pose import optimize_pose_cached
+        from cmxflow.operators.dock.score import get_atom_typing
+
+        ligand = self._make_mol_3d("CCO")
+        ligand = Chem.RemoveHs(ligand)
+
+        protein = self._make_mol_3d("c1ccccc1O")
+        protein_noh = Chem.RemoveHs(protein)
+        protein_coords = np.array(protein_noh.GetConformer().GetPositions())
+        protein_typing = get_atom_typing(protein_noh)
+
+        # EC protein data (with H)
+        protein_h = Chem.AddHs(protein, addCoords=True)
+        ec_coords = np.array(protein_h.GetConformer().GetPositions())
+        ec_charges = compute_gasteiger_charges(protein_h)
+
+        # Mock both scoring fns to control the objective
+        def mock_vinardo(mol, coords, typing, conf_id, params):
+            return -5.0
+
+        def mock_ec(mol, coords, charges, conf_id):
+            return 0.8
+
+        result = optimize_pose_cached(
+            ligand,
+            protein_coords,
+            protein_typing,
+            scoring_fn=mock_vinardo,
+            protein_ec_coords=ec_coords,
+            protein_ec_charges=ec_charges,
+            w_ec=2.0,
+            ec_scoring_fn=mock_ec,
+        )
+
+        # Combined objective: -5.0 - 2.0 * 0.8 = -6.6
+        assert result.score == pytest.approx(-6.6)
+        assert result.ec == pytest.approx(0.8)
+
+    def test_ec_zero_when_w_ec_zero(self) -> None:
+        """Test that EC is 0.0 when w_ec=0."""
+        from cmxflow.operators.dock.pose import optimize_pose_cached
+        from cmxflow.operators.dock.score import get_atom_typing
+
+        ligand = self._make_mol_3d("CCO")
+        ligand = Chem.RemoveHs(ligand)
+
+        protein = self._make_mol_3d("c1ccccc1O")
+        protein_noh = Chem.RemoveHs(protein)
+        protein_coords = np.array(protein_noh.GetConformer().GetPositions())
+        protein_typing = get_atom_typing(protein_noh)
+
+        def mock_vinardo(mol, coords, typing, conf_id, params):
+            return -5.0
+
+        result = optimize_pose_cached(
+            ligand,
+            protein_coords,
+            protein_typing,
+            scoring_fn=mock_vinardo,
+            w_ec=0.0,
+        )
+
+        assert result.score == pytest.approx(-5.0)
+        assert result.ec == 0.0

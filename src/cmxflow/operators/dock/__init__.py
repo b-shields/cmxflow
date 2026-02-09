@@ -70,6 +70,7 @@ from cmxflow.operators.dock.pose import (
 from cmxflow.operators.dock.score import (
     AtomTyping,
     VinardoParams,
+    ec_score_cached,
     get_atom_typing,
     get_scoring_function,
     vinardo_score,
@@ -80,6 +81,7 @@ __all__ = [
     # Score
     "AtomTyping",
     "VinardoParams",
+    "ec_score_cached",
     "get_atom_typing",
     "get_scoring_function",
     "vinardo_score",

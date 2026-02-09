@@ -75,6 +75,7 @@ class OptimizationResult:
     torsion_changes: dict[tuple[int, int], float] = field(default_factory=dict)
     converged: bool = False
     n_iterations: int = 0
+    ec: float = 0.0
 
 
 # =============================================================================
@@ -546,12 +547,22 @@ def _create_objective_cached(
     initial_torsions: NDArray[np.floating],
     ligand_conf_id: int,
     centroid: NDArray[np.floating],
+    protein_ec_coords: np.ndarray | None = None,
+    protein_ec_charges: np.ndarray | None = None,
+    w_ec: float = 0.0,
+    ec_scoring_fn: (
+        Callable[[Chem.Mol, np.ndarray, np.ndarray, int], float] | None
+    ) = None,
 ) -> Callable[[NDArray[np.floating]], float]:
     """Create objective function for optimization with cached protein data.
 
     This is an internal helper that creates a closure for the optimizer.
     The returned function applies transformations to the ligand and scores
     it against the pre-computed protein data.
+
+    When ``w_ec > 0`` and EC data is provided, the objective combines
+    Vinardo and electrostatic complementarity:
+    ``objective = vinardo_score - w_ec * ec_score``.
 
     Args:
         ligand_mol: Initial ligand molecule.
@@ -563,11 +574,21 @@ def _create_objective_cached(
         initial_torsions: Initial torsion angles in degrees.
         ligand_conf_id: Ligand conformer ID to transform.
         centroid: Ligand centroid for rotation center.
+        protein_ec_coords: Pre-computed protein coordinates (with H) for EC.
+        protein_ec_charges: Pre-computed protein Gasteiger charges for EC.
+        w_ec: Weight for EC term. When 0, EC is not computed.
+        ec_scoring_fn: EC scoring function. Required when w_ec > 0.
 
     Returns:
         Objective function that takes a parameter vector and returns a score.
     """
     n_torsions = len(rotatable_dihedrals)
+    use_ec = (
+        w_ec > 0
+        and protein_ec_coords is not None
+        and protein_ec_charges is not None
+        and ec_scoring_fn is not None
+    )
 
     def objective(x: NDArray[np.floating]) -> float:
         translation, rotation, torsion_deltas = _unpack_pose_vector(x, n_torsions)
@@ -588,13 +609,24 @@ def _create_objective_cached(
                 transformed, torsion_dict, ligand_conf_id
             )
 
-        return scoring_fn(
+        vinardo = scoring_fn(
             transformed,
             protein_coords,
             protein_typing,
             ligand_conf_id,
             scoring_fn_params,
         )
+
+        if use_ec:
+            assert ec_scoring_fn is not None
+            assert protein_ec_coords is not None
+            assert protein_ec_charges is not None
+            ec = ec_scoring_fn(
+                transformed, protein_ec_coords, protein_ec_charges, ligand_conf_id
+            )
+            return vinardo - w_ec * ec
+
+        return vinardo
 
     return objective
 
@@ -611,6 +643,12 @@ def optimize_pose_cached(
     params: PoseParams | None = None,
     ligand_conf_id: int = 0,
     basin_hopping: bool = False,
+    protein_ec_coords: np.ndarray | None = None,
+    protein_ec_charges: np.ndarray | None = None,
+    w_ec: float = 0.0,
+    ec_scoring_fn: (
+        Callable[[Chem.Mol, np.ndarray, np.ndarray, int], float] | None
+    ) = None,
 ) -> OptimizationResult:
     """Optimize ligand pose with pre-computed protein data.
 
@@ -620,6 +658,10 @@ def optimize_pose_cached(
 
     Performs rigid-body optimization (translation + rotation) and optionally
     flexible optimization (torsion angles) using L-BFGS-B.
+
+    When ``w_ec > 0`` and EC data is provided, the optimizer jointly
+    minimizes ``vinardo - w_ec * ec``, steering toward poses with better
+    electrostatic complementarity.
 
     Args:
         ligand_mol: Ligand RDKit Mol with 3D coordinates.
@@ -631,9 +673,16 @@ def optimize_pose_cached(
         params: Optimization parameters. If None, uses defaults.
         ligand_conf_id: Ligand conformer ID to optimize.
         basin_hopping: Use basin hopping instead of local minimization.
+        protein_ec_coords: Pre-computed protein coordinates (with H) for EC.
+        protein_ec_charges: Pre-computed protein Gasteiger charges for EC.
+        w_ec: Weight for EC term. When 0, EC is not computed during
+            optimization.
+        ec_scoring_fn: EC scoring function. If None, uses ec_score_cached.
 
     Returns:
-        OptimizationResult with optimized molecule and metadata.
+        OptimizationResult with optimized molecule and metadata. The
+        ``score`` field contains the combined objective (vinardo - w_ec * ec),
+        and the ``ec`` field contains the final EC value.
 
     Example:
         >>> protein_coords = np.array(protein.GetConformer().GetPositions())
@@ -649,6 +698,10 @@ def optimize_pose_cached(
         scoring_fn_params = VinardoParams()
     if params is None:
         params = PoseParams()
+    if ec_scoring_fn is None:
+        from cmxflow.operators.dock.score import ec_score_cached
+
+        ec_scoring_fn = ec_score_cached
 
     # Get rotatable bonds if flexible docking
     rotatable_dihedrals: list[tuple[int, int, int, int]] = []
@@ -673,10 +726,18 @@ def optimize_pose_cached(
         torsions=np.zeros(n_torsions) if n_torsions > 0 else None,
     )
 
-    # Compute initial score
-    initial_score = scoring_fn(
+    # Compute initial Vinardo score
+    initial_vinardo = scoring_fn(
         ligand_mol, protein_coords, protein_typing, ligand_conf_id, scoring_fn_params
     )
+
+    # Compute initial EC and combined score
+    initial_ec = 0.0
+    if w_ec > 0 and protein_ec_coords is not None and protein_ec_charges is not None:
+        initial_ec = ec_scoring_fn(
+            ligand_mol, protein_ec_coords, protein_ec_charges, ligand_conf_id
+        )
+    initial_score = initial_vinardo - w_ec * initial_ec
 
     # Get ligand centroid for rotation
     centroid = get_molecule_centroid(ligand_mol, ligand_conf_id)
@@ -700,6 +761,10 @@ def optimize_pose_cached(
         initial_torsions,
         ligand_conf_id,
         centroid,
+        protein_ec_coords=protein_ec_coords,
+        protein_ec_charges=protein_ec_charges,
+        w_ec=w_ec,
+        ec_scoring_fn=ec_scoring_fn,
     )
 
     # Optimize
@@ -751,6 +816,13 @@ def optimize_pose_cached(
             for dihedral, delta in zip(rotatable_dihedrals, torsion_deltas)
         }
 
+    # Compute final EC on the optimized pose
+    final_ec = 0.0
+    if w_ec > 0 and protein_ec_coords is not None and protein_ec_charges is not None:
+        final_ec = ec_scoring_fn(
+            optimized_mol, protein_ec_coords, protein_ec_charges, ligand_conf_id
+        )
+
     return OptimizationResult(
         mol=optimized_mol,
         score=float(result.fun),
@@ -760,4 +832,5 @@ def optimize_pose_cached(
         torsion_changes=torsion_changes,
         converged=result.success,
         n_iterations=result.nit,
+        ec=final_ec,
     )

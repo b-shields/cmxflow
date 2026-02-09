@@ -575,6 +575,37 @@ class ScoringFunction(Protocol):
         ...
 
 
+def ec_score_cached(
+    ligand_mol: Chem.Mol,
+    protein_ec_coords: np.ndarray,
+    protein_ec_charges: np.ndarray,
+    ligand_conf_id: int = 0,
+) -> float:
+    """Compute electrostatic complementarity with pre-computed protein data.
+
+    This is a cached scoring function for EC that parallels
+    ``vinardo_score_cached()``. It computes the Pearson correlation
+    between ligand and negated protein electrostatic potentials on the
+    ligand solvent-accessible surface.
+
+    Args:
+        ligand_mol: Ligand RDKit Mol with 3D coordinates.
+        protein_ec_coords: Pre-computed protein atom coordinates (with H)
+            as numpy array with shape (n_atoms, 3).
+        protein_ec_charges: Pre-computed protein Gasteiger charges (with H)
+            as numpy array with shape (n_atoms,).
+        ligand_conf_id: Ligand conformer ID to use.
+
+    Returns:
+        EC value in [-1, 1], or 0.0 for degenerate cases.
+    """
+    from cmxflow.operators.dock.ec import electrostatic_complementarity
+
+    return electrostatic_complementarity(
+        ligand_mol, protein_ec_coords, protein_ec_charges
+    )
+
+
 def get_scoring_function(name: str = "vinardo") -> ScoringFunction:
     """Get a scoring function by name.
 

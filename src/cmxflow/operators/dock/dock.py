@@ -14,10 +14,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 
 from cmxflow.operators.base import MoleculeBlock
-from cmxflow.operators.dock.ec import (
-    compute_gasteiger_charges,
-    electrostatic_complementarity,
-)
+from cmxflow.operators.dock.ec import compute_gasteiger_charges
 from cmxflow.operators.dock.pose import (
     PoseParams,
     optimize_pose_cached,
@@ -25,6 +22,7 @@ from cmxflow.operators.dock.pose import (
 from cmxflow.operators.dock.score import (
     AtomTyping,
     VinardoParams,
+    ec_score_cached,
     get_atom_typing,
     vinardo_score_cached,
 )
@@ -167,21 +165,6 @@ class MoleculeDockBlock(MoleculeBlock):
             new_mol.AddConformer(Chem.Conformer(conf), assignId=True)
             return new_mol
 
-    def _compute_ec(self, mol: Chem.Mol) -> float:
-        """Compute electrostatic complementarity for a docked pose.
-
-        Args:
-            mol: Ligand RDKit Mol with 3D conformer.
-
-        Returns:
-            EC value in [-1, 1], or 0.0 for degenerate cases.
-        """
-        assert isinstance(self._protein_ec_coords, np.ndarray)
-        assert isinstance(self._protein_ec_charges, np.ndarray)
-        return electrostatic_complementarity(
-            mol, self._protein_ec_coords, self._protein_ec_charges
-        )
-
     def _forward(self, mol: Chem.Mol) -> Chem.Mol | None:
         """Dock a ligand molecule into the receptor binding site.
 
@@ -226,7 +209,8 @@ class MoleculeDockBlock(MoleculeBlock):
             optimize_torsions=not self.get_param("rigid"),
         )
 
-        # Dock
+        # Dock with EC integrated into the optimizer
+        w_ec = self.get_param("w_ec")
         result = optimize_pose_cached(
             mol,
             protein_coords=self._protein_coords,
@@ -234,20 +218,17 @@ class MoleculeDockBlock(MoleculeBlock):
             scoring_fn=vinardo_score_cached,
             scoring_fn_params=score_params,
             params=pose_params,
+            protein_ec_coords=self._protein_ec_coords,
+            protein_ec_charges=self._protein_ec_charges,
+            w_ec=w_ec,
+            ec_scoring_fn=ec_score_cached,
         )
-
-        # Electrostatic complementarity adjustment
-        w_ec = self.get_param("w_ec")
-        ec_value = 0.0
-        if w_ec > 0:
-            ec_value = self._compute_ec(result.mol)
-        adjusted_score = result.score - ec_value * w_ec
 
         # Set properties
         result.mol.SetDoubleProp("docking_initial_pose_score", result.initial_score)
-        result.mol.SetDoubleProp("docking_score", adjusted_score)
-        result.mol.SetDoubleProp("docking_vinardo", result.score)
-        result.mol.SetDoubleProp("docking_ec", ec_value)
+        result.mol.SetDoubleProp("docking_score", result.score)
+        result.mol.SetDoubleProp("docking_vinardo", result.score + w_ec * result.ec)
+        result.mol.SetDoubleProp("docking_ec", result.ec)
         result.mol.SetBoolProp("docking_converged", result.converged)
 
         return result.mol

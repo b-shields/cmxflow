@@ -15,10 +15,16 @@ logger = logging.getLogger(__name__)
 
 # Map blocks to a dict of scores and rank ascending bool
 BLOCK_SCORE_MAP: dict[str, dict[str, bool]] = {
-    "Molecule3DSimilarityBlock": {"similarity_3d": False},
-    "MoleculeAlignBlock": {"alignment_shape_similarity": False},
-    "MoleculeSimilarityBlock": {"max_similarity": False},
-    "MoleculeDockBlock": {
+    "Molecule3DSimilarity": {"similarity_3d": False},
+    "ParallelMolecule3DSimilarity": {"similarity_3d": False},
+    "MoleculeAlign": {"alignment_shape_similarity": False},
+    "ParallelMoleculeAlign": {"alignment_shape_similarity": False},
+    "Molecule2DSimilarity": {"max_similarity": False},
+    "ParallelMolecule2DSimilarity": {"max_similarity": False},
+    "MoleculeDock": {
+        "docking_score": True,
+    },
+    "ParallelMoleculeDock": {
         "docking_score": True,
     },
 }
@@ -146,7 +152,7 @@ class EnrichmentScoreBlock(ScoreBlock):
 
     def _set_score_properties(self, *args: Any) -> None:
         for arg in args:
-            for key, value in BLOCK_SCORE_MAP.get(arg.__class__.__name__, {}).items():
+            for key, value in BLOCK_SCORE_MAP.get(arg.name, {}).items():
                 self._score_properties[key] = bool(value)
 
     def objective(self, iter: Iterator[Chem.Mol | CmxMol]) -> float:

@@ -88,7 +88,7 @@ class MoleculeDockBlock(MoleculeBlock):
             # Electrostatic complementarity
             Continuous("w_ec", 0.0, 0.0, 5.0),
             # Pose search
-            Integer("max_iterations", 200, 0, 400),
+            Integer("max_iterations", 100, 0, 300),
             Continuous("box_size", 1.5, 0.5, 2.0),
             Categorical("rigid", False, [True, False]),
         )

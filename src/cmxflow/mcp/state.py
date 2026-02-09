@@ -264,7 +264,8 @@ def get_block_descriptions() -> dict[str, str]:
         ),
         "ConformerGenerationBlock": (
             "Generate 3D conformers. IMPORTANT: This step should always come somewhere "
-            "AFTER a EnumerateStereoBlock."
+            "AFTER a EnumerateStereoBlock. It is a slow block and you should offer to "
+            "make it parallel (recommend max_workers=4)."
         ),
         "MoleculeAlignBlock": (
             "Align molecules to a reference structure using 3D coordinates. IMPORTANT: "
@@ -281,8 +282,8 @@ def get_block_descriptions() -> dict[str, str]:
             "Dock an aligned 3D molecule conformer against a protein receptor from a "
             ".pdb file. IMPORTANT: This step should always come somewhere AFTER a "
             "MoleculeAlignBlock. It is a slow block and you should offer to make it "
-            "parallel. This block adds the 'docking_score' property to all input "
-            "molecules."
+            "parallel (recommend max_workers=8). This block adds the 'docking_score' "
+            "property to all input molecules."
         ),
         # Scores
         "AverageScoreBlock": (

@@ -151,10 +151,14 @@ def workflow_has_3d_blocks() -> bool:
         ShapeOverlayScoreBlock,
         MoleculeDockBlock,
     )
+    _3d_block_keywords = ("conf", "dock", "align", "3d", "shape")
 
     for block in state.workflow.blocks:
         if isinstance(block, _3d_block_types):
             return True
+        for keyword in _3d_block_keywords:
+            if keyword in block.name.lower():
+                return True
     return False
 
 

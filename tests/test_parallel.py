@@ -1,5 +1,6 @@
 """Tests for parallel execution utilities."""
 
+import time
 from typing import Any
 
 import pytest
@@ -221,3 +222,141 @@ class TestChunkSize:
         parallel_block = make_parallel(block, max_workers=2, chunk_size=5)
         result = list(parallel_block(iter(range(20))))
         assert sorted(result) == [i * i for i in range(20)]
+
+
+class TestContextManager:
+    """Tests for ParallelBlock context manager."""
+
+    def test_context_manager_basic(self) -> None:
+        """Test correct results using context manager."""
+        block = SquareBlock()
+        parallel_block = make_parallel(block, max_workers=2)
+        with parallel_block:
+            result = list(parallel_block(iter([1, 2, 3, 4, 5])))
+        assert sorted(result) == [1, 4, 9, 16, 25]
+
+    def test_context_manager_multiple_calls(self) -> None:
+        """Test pool reused across calls in one with block."""
+        block = SquareBlock()
+        parallel_block = make_parallel(block, max_workers=2)
+        with parallel_block:
+            executor_id = id(parallel_block._executor)
+            result1 = list(parallel_block(iter([1, 2, 3])))
+            assert id(parallel_block._executor) == executor_id
+            result2 = list(parallel_block(iter([4, 5, 6])))
+            assert id(parallel_block._executor) == executor_id
+        assert sorted(result1) == [1, 4, 9]
+        assert sorted(result2) == [16, 25, 36]
+
+    def test_context_manager_executor_cleanup(self) -> None:
+        """Test _executor is None after exit."""
+        block = SquareBlock()
+        parallel_block = make_parallel(block, max_workers=2)
+        with parallel_block:
+            assert parallel_block._executor is not None
+        assert parallel_block._executor is None
+
+    def test_standalone_no_executor_leak(self) -> None:
+        """Test no _executor after standalone call."""
+        block = SquareBlock()
+        parallel_block = make_parallel(block, max_workers=2)
+        list(parallel_block(iter([1, 2, 3])))
+        assert parallel_block._executor is None
+
+    def test_context_manager_exception_cleanup(self) -> None:
+        """Test cleanup on exception inside context manager."""
+        block = SquareBlock()
+        parallel_block = make_parallel(block, max_workers=2)
+        with pytest.raises(ValueError, match="test error"):
+            with parallel_block:
+                assert parallel_block._executor is not None
+                raise ValueError("test error")
+        assert parallel_block._executor is None
+
+    def test_context_manager_not_reentrant(self) -> None:
+        """Test nested with raises RuntimeError."""
+        block = SquareBlock()
+        parallel_block = make_parallel(block, max_workers=2)
+        with parallel_block:
+            with pytest.raises(RuntimeError, match="not reentrant"):
+                parallel_block.__enter__()
+
+
+class TestUnorderedDrainLoop:
+    """Tests for unordered drain loop processing all items."""
+
+    def test_all_items_processed(self) -> None:
+        """Validates all items processed with enough items to exercise drain."""
+        block = SquareBlock()
+        # Use enough items to exceed batch_size (max_workers * 2 = 4)
+        items = list(range(20))
+        parallel_block = make_parallel(block, max_workers=2, ordered=False)
+        result = list(parallel_block(iter(items)))
+        assert sorted(result) == [i * i for i in items]
+
+
+class SlowBlock(Block):
+    """Block that sleeps for negative inputs to simulate a hang."""
+
+    def forward(self, x: int) -> int:
+        """Sleep if x is negative, otherwise return x squared."""
+        if x < 0:
+            time.sleep(abs(x))
+        return x * x
+
+
+class TestWorkerTimeout:
+    """Tests for worker_timeout behavior."""
+
+    def test_timeout_skips_slow_items_ordered(self) -> None:
+        """Test that slow items are skipped in ordered mode."""
+        block = SlowBlock()
+        pb = make_parallel(block, max_workers=2, ordered=True)
+        # 2s timeout comfortably exceeds pool startup but catches the
+        # -30 item (which would sleep 30s)
+        pb._config = ParallelConfig(max_workers=2, ordered=True, worker_timeout=1.5)
+        result = list(pb(iter([1, -30, 2])))
+        assert result == [1, 4]
+
+    def test_timeout_skips_slow_items_unordered(self) -> None:
+        """Test that slow items are skipped in unordered mode."""
+        block = SlowBlock()
+        pb = make_parallel(block, max_workers=2, ordered=False)
+        pb._config = ParallelConfig(max_workers=2, ordered=False, worker_timeout=1.5)
+        result = list(pb(iter([1, -30, 2])))
+        assert sorted(result) == [1, 4]
+
+    def test_timeout_raises_when_configured(self) -> None:
+        """Test that TimeoutError is raised with error_handling='raise'."""
+        block = SlowBlock()
+        pb = make_parallel(block, max_workers=2, error_handling="raise")
+        pb._config = ParallelConfig(
+            max_workers=2,
+            ordered=True,
+            error_handling="raise",
+            worker_timeout=1.5,
+        )
+        with pytest.raises(TimeoutError):
+            list(pb(iter([1, -30, 2])))
+
+    def test_no_timeout_when_disabled(self) -> None:
+        """Test that worker_timeout=0 disables the timeout."""
+        block = SlowBlock()
+        pb = make_parallel(block, max_workers=2)
+        pb._config = ParallelConfig(max_workers=2, ordered=True, worker_timeout=0)
+        result = list(pb(iter([1, 2])))
+        assert result == [1, 4]
+
+    def test_default_timeout_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test CMXFLOW_WORKER_TIMEOUT env var is respected."""
+        from cmxflow.utils.parallel import _default_worker_timeout
+
+        monkeypatch.setenv("CMXFLOW_WORKER_TIMEOUT", "45.5")
+        assert _default_worker_timeout() == 45.5
+
+    def test_invalid_env_uses_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test invalid env var falls back to default."""
+        from cmxflow.utils.parallel import _default_worker_timeout
+
+        monkeypatch.setenv("CMXFLOW_WORKER_TIMEOUT", "not_a_number")
+        assert _default_worker_timeout() == 30.0

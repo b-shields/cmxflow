@@ -62,6 +62,12 @@ Workflows are built from four types of blocks:
 - **Serialization** - `save_workflow()` and `load_workflow()` for persistence
 - **MCP Server** - Agentic workflow building via `build_workflow`, `run_workflow`, `optimize_workflow`
 
+## Environment Variables 🔧
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CMXFLOW_WORKER_TIMEOUT` | `30` | Seconds to wait for a single parallel worker before treating it as failed. Set to `0` to disable the timeout. Applies to all `make_parallel()` and `@parallel` blocks. |
+
 ## Getting Started 📖
 
 See [`examples/basic_usage.ipynb`](examples/basic_usage.ipynb) for a complete tutorial covering:

@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing
 import os
-from concurrent.futures import Future, ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
+import sys
+from collections import deque
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Future,
+    ProcessPoolExecutor,
+    wait,
+)
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, TypeVar
 
@@ -125,6 +133,60 @@ def _create_block_factory(block: Block) -> _BlockFactory:
     return _BlockFactory(block)
 
 
+def _get_mp_context(
+    start_method: str | None,
+) -> multiprocessing.context.BaseContext | None:
+    """Get a multiprocessing context for the given start method.
+
+    Args:
+        start_method: Start method name (e.g. "forkserver", "spawn", "fork"),
+            or None to use the platform default.
+
+    Returns:
+        Multiprocessing context, or None for platform default.
+    """
+    if start_method is None:
+        return None
+    return multiprocessing.get_context(start_method)
+
+
+def _default_start_method() -> str | None:
+    """Return the default start method for the current platform.
+
+    Returns:
+        "forkserver" on Unix-like systems, None (platform default) on Windows.
+    """
+    if sys.platform == "win32":
+        return None
+    return "forkserver"
+
+
+_DEFAULT_WORKER_TIMEOUT: float = 30.0
+
+
+def _default_worker_timeout() -> float:
+    """Return the default worker timeout from env or built-in default.
+
+    The ``CMXFLOW_WORKER_TIMEOUT`` environment variable overrides the
+    built-in default of 30 seconds. Set to ``0`` to disable the timeout.
+
+    Returns:
+        Timeout in seconds, or 0.0 to disable.
+    """
+    raw = os.environ.get("CMXFLOW_WORKER_TIMEOUT")
+    if raw is None:
+        return _DEFAULT_WORKER_TIMEOUT
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        logger.warning(
+            "Invalid CMXFLOW_WORKER_TIMEOUT=%r, using default %.0fs",
+            raw,
+            _DEFAULT_WORKER_TIMEOUT,
+        )
+        return _DEFAULT_WORKER_TIMEOUT
+
+
 @dataclass(frozen=True)
 class ParallelConfig:
     """Configuration for parallel execution.
@@ -135,12 +197,77 @@ class ParallelConfig:
         chunk_size: Number of items per worker task for ordered mode.
         ordered: Whether to preserve input order in output.
         error_handling: How to handle errors ("raise", "skip", "log").
+        start_method: Multiprocessing start method. Defaults to "forkserver"
+            on Unix, None (platform default) on Windows.
+        worker_timeout: Seconds to wait for a single worker result before
+            treating it as an error. Defaults to 30s (overridable via
+            ``CMXFLOW_WORKER_TIMEOUT`` env var). Set to 0 to disable.
     """
 
     max_workers: int | None = None
     chunk_size: int = 1
     ordered: bool = True
     error_handling: Literal["raise", "skip", "log"] = "skip"
+    start_method: str | None = field(default_factory=_default_start_method)
+    worker_timeout: float = field(default_factory=_default_worker_timeout)
+
+
+def _get_timeout(config: ParallelConfig) -> float | None:
+    """Convert worker_timeout config to a value for future.result().
+
+    Args:
+        config: Parallel configuration.
+
+    Returns:
+        Timeout in seconds, or None to wait indefinitely.
+    """
+    if config.worker_timeout <= 0:
+        return None
+    return config.worker_timeout
+
+
+def _handle_future_result(
+    future: Future[Any],
+    config: ParallelConfig,
+    timeout: float | None,
+) -> Any:
+    """Get a future's result, applying timeout and error handling.
+
+    Args:
+        future: The future to resolve.
+        config: Parallel configuration for error handling.
+        timeout: Seconds to wait, or None for no limit.
+
+    Returns:
+        The future result, or _SKIP if the item timed out and
+        error_handling is "skip" or "log".
+
+    Raises:
+        TimeoutError: If timeout exceeded and error_handling is "raise".
+    """
+    try:
+        return future.result(timeout=timeout)
+    except TimeoutError:
+        future.cancel()
+        if config.error_handling == "raise":
+            raise
+        if config.error_handling == "log":
+            logger.warning("Worker timed out after %.1fs", config.worker_timeout)
+        return _SKIP
+
+
+def _yield_result(result: Any) -> Any:
+    """Restore properties on Mol objects before yielding.
+
+    Args:
+        result: Processed result from a worker.
+
+    Returns:
+        The result, with properties restored if it's a Mol.
+    """
+    if isinstance(result, Mol):
+        result.restore_properties()
+    return result
 
 
 def _parallel_call_ordered(
@@ -148,7 +275,10 @@ def _parallel_call_ordered(
     executor: ProcessPoolExecutor,
     config: ParallelConfig,
 ) -> Iterator[Any]:
-    """Execute block in parallel with ordered output.
+    """Execute block in parallel with ordered output using a bounded window.
+
+    Submits futures lazily, maintaining at most ``max_workers * 2`` in-flight
+    futures to bound memory usage to O(max_workers) instead of O(n_items).
 
     Args:
         items: Input iterator.
@@ -158,13 +288,23 @@ def _parallel_call_ordered(
     Yields:
         Processed items in input order, skipping filtered items.
     """
-    results = executor.map(_worker_forward, items, chunksize=config.chunk_size)
-    for result in results:
-        if isinstance(result, _SkipSentinel):
-            continue
-        if isinstance(result, Mol):
-            result.restore_properties()
-        yield result
+    max_workers = config.max_workers or os.cpu_count() or 4
+    window_size = max_workers * 2
+    window: deque[Future[Any]] = deque()
+    timeout = _get_timeout(config)
+
+    for item in items:
+        if len(window) >= window_size:
+            result = _handle_future_result(window.popleft(), config, timeout)
+            if not isinstance(result, _SkipSentinel):
+                yield _yield_result(result)
+        window.append(executor.submit(_worker_forward, item))
+
+    # Drain remaining futures front-to-back (preserves order)
+    while window:
+        result = _handle_future_result(window.popleft(), config, timeout)
+        if not isinstance(result, _SkipSentinel):
+            yield _yield_result(result)
 
 
 def _parallel_call_unordered(
@@ -183,6 +323,7 @@ def _parallel_call_unordered(
         Processed items as they complete, skipping filtered items.
     """
     max_workers = config.max_workers or os.cpu_count() or 4
+    timeout = _get_timeout(config)
 
     # Submit in batches to avoid buffering entire iterator
     pending: set[Future[Any]] = set()
@@ -190,54 +331,113 @@ def _parallel_call_unordered(
 
     for item in items:
         if len(pending) >= batch_size:
-            # Wait for at least one to complete
-            done, pending = _wait_for_any(pending)
+            done, pending = wait(pending, timeout=timeout, return_when=FIRST_COMPLETED)
+            if not done:
+                # All workers hung — cancel and stop submitting
+                for f in pending:
+                    f.cancel()
+                pending = set()
+                if config.error_handling == "raise":
+                    raise TimeoutError(
+                        f"Workers timed out after {config.worker_timeout}s"
+                    )
+                if config.error_handling == "log":
+                    logger.warning(
+                        "Workers timed out after %.1fs", config.worker_timeout
+                    )
+                break
             for future in done:
                 result = future.result()
                 if isinstance(result, _SkipSentinel):
                     continue
-                if isinstance(result, Mol):
-                    result.restore_properties()
-                yield result
+                yield _yield_result(result)
 
         pending.add(executor.submit(_worker_forward, item))
 
-    # Process remaining futures
-    for future in as_completed(pending):
-        result = future.result()
-        if not isinstance(result, _SkipSentinel):
-            yield result
+    # Drain remaining futures
+    while pending:
+        done, not_done = wait(pending, timeout=timeout, return_when=FIRST_COMPLETED)
+        if not done:
+            for f in not_done:
+                f.cancel()
+            if config.error_handling == "raise":
+                raise TimeoutError(f"Workers timed out after {config.worker_timeout}s")
+            if config.error_handling == "log":
+                logger.warning("Workers timed out after %.1fs", config.worker_timeout)
+            break
+        pending = not_done
+        for future in done:
+            result = future.result()
+            if not isinstance(result, _SkipSentinel):
+                yield _yield_result(result)
 
 
-def _wait_for_any(
-    futures: set[Future[Any]],
-) -> tuple[set[Future[Any]], set[Future[Any]]]:
-    """Wait for at least one future to complete.
+def _run_parallel(
+    block: Block,
+    config: ParallelConfig,
+    items: Iterator[Any],
+    executor: ProcessPoolExecutor | None = None,
+) -> Iterator[Any]:
+    """Execute a block in parallel, optionally using a provided executor.
+
+    When ``executor`` is provided (context manager mode), delegates to the
+    ordered/unordered helper without managing the executor lifecycle.
+
+    When ``executor`` is None, creates a new executor with the configured
+    start method and shuts it down after iteration completes.
 
     Args:
-        futures: Set of pending futures.
+        block: Block whose forward method to parallelize.
+        config: Parallel execution configuration.
+        items: Input iterator of items to process.
+        executor: Optional pre-existing executor to reuse.
 
-    Returns:
-        Tuple of (completed futures, pending futures).
+    Yields:
+        Processed items from the block's forward method.
     """
-    done: set[Future[Any]] = set()
-    for future in as_completed(futures):
-        done.add(future)
-        break
-    pending = futures - done
-    return done, pending
+    factory = _create_block_factory(block)
+
+    if executor is not None:
+        # Reinitialize workers with current block state
+        executor.submit(_init_worker, factory, config.error_handling).result()
+        if config.ordered:
+            yield from _parallel_call_ordered(items, executor, config)
+        else:
+            yield from _parallel_call_unordered(items, executor, config)
+        return
+
+    mp_context = _get_mp_context(config.start_method)
+    owned_executor = ProcessPoolExecutor(
+        max_workers=config.max_workers,
+        initializer=_init_worker,
+        initargs=(factory, config.error_handling),
+        mp_context=mp_context,
+    )
+
+    try:
+        if config.ordered:
+            yield from _parallel_call_ordered(items, owned_executor, config)
+        else:
+            yield from _parallel_call_unordered(items, owned_executor, config)
+    finally:
+        owned_executor.shutdown(wait=False, cancel_futures=True)
 
 
 class ParallelBlock:
     """Wrapper that executes a block's forward method in parallel.
 
-    This wrapper is necessary because Python looks up special methods like
-    __call__ on the class, not the instance. Assigning __call__ to an instance
-    doesn't work for method dispatch.
+    Supports use as a context manager to reuse the process pool across
+    multiple calls::
+
+        pb = make_parallel(block, max_workers=4)
+        with pb:
+            result1 = list(pb(iter1))
+            result2 = list(pb(iter2))
 
     Attributes:
         _block: The wrapped block instance.
         _config: Parallel execution configuration.
+        _executor: Executor when used as a context manager, else None.
     """
 
     def __init__(self, block: Block, config: ParallelConfig) -> None:
@@ -250,6 +450,39 @@ class ParallelBlock:
         self._block = block
         self._block.name = f"Parallel{self._block.name}"
         self._config = config
+        self._executor: ProcessPoolExecutor | None = None
+
+    def __enter__(self) -> ParallelBlock:
+        """Enter the context manager, creating a reusable process pool.
+
+        Returns:
+            Self with an active executor.
+
+        Raises:
+            RuntimeError: If already inside a ``with`` block (non-reentrant).
+        """
+        if self._executor is not None:
+            raise RuntimeError("ParallelBlock context manager is not reentrant")
+        mp_context = _get_mp_context(self._config.start_method)
+        factory = _create_block_factory(self._block)
+        self._executor = ProcessPoolExecutor(
+            max_workers=self._config.max_workers,
+            initializer=_init_worker,
+            initargs=(factory, self._config.error_handling),
+            mp_context=mp_context,
+        )
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
+        """Exit the context manager, shutting down the process pool."""
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
 
     def __call__(self, items: Iterator[Any]) -> Iterator[Any]:
         """Execute the wrapped block in parallel.
@@ -260,20 +493,7 @@ class ParallelBlock:
         Yields:
             Processed items from the block's forward method.
         """
-        factory = _create_block_factory(self._block)
-        executor = ProcessPoolExecutor(
-            max_workers=self._config.max_workers,
-            initializer=_init_worker,
-            initargs=(factory, self._config.error_handling),
-        )
-
-        try:
-            if self._config.ordered:
-                yield from _parallel_call_ordered(items, executor, self._config)
-            else:
-                yield from _parallel_call_unordered(items, executor, self._config)
-        finally:
-            executor.shutdown(wait=True)
+        yield from _run_parallel(self._block, self._config, items, self._executor)
 
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to the wrapped block.
@@ -340,20 +560,7 @@ def parallel(
     def decorator(cls: type[T]) -> type[T]:
         def parallel_call(self: Any, items: Iterator[Any]) -> Iterator[Any]:
             """Execute the block's forward method in parallel."""
-            factory = _create_block_factory(self)
-            executor = ProcessPoolExecutor(
-                max_workers=config.max_workers,
-                initializer=_init_worker,
-                initargs=(factory, config.error_handling),
-            )
-
-            try:
-                if config.ordered:
-                    yield from _parallel_call_ordered(items, executor, config)
-                else:
-                    yield from _parallel_call_unordered(items, executor, config)
-            finally:
-                executor.shutdown(wait=True)
+            yield from _run_parallel(self, config, items)
 
         # Create a new class that inherits from the original
         # This ensures the class is picklable (unlike a wrapper function)

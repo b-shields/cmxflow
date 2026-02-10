@@ -157,6 +157,8 @@ class Optimizer:
             pruner=self._pruner,
             direction=direction,
         )
+        defaults = {param.name: param.get() for param in self._params}
+        self._study.enqueue_trial(defaults)
         self._study.optimize(
             self._objective,
             n_trials=n_trials,

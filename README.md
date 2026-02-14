@@ -1,5 +1,11 @@
 # cmxflow 🧪
 
+[![CI](https://github.com/b-shields/cmxflow/actions/workflows/ci.yml/badge.svg)](https://github.com/b-shields/cmxflow/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/b-shields/cmxflow/branch/main/graph/badge.svg)](https://codecov.io/gh/b-shields/cmxflow)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)]()
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Composable cheminformatics workflows with Bayesian optimization.
 
 ## Overview 🔬
@@ -94,6 +100,24 @@ conda activate cmxflow
 poetry install
 pre-commit install
 ```
+
+### MCP Server
+
+To use cmxflow as an agentic tool with Claude Code:
+
+```bash
+claude mcp add cmxflow -- cmxflow-mcp
+```
+
+### Optional Dependencies
+
+**PyMOL** — Required only for 3D structure visualization (`view_structures` MCP tool). Install via conda:
+
+```bash
+conda install -c conda-forge pymol-open-source
+```
+
+All other functionality works without PyMOL.
 
 ## Contributing 🤝
 

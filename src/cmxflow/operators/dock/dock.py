@@ -84,7 +84,7 @@ class MoleculeDockBlock(MoleculeBlock):
             Continuous("w_hydrophobic", -0.035, -0.065, -0.015),
             Continuous("w_hbond", -0.6, -0.8, -0.4),
             # Electrostatic complementarity
-            Continuous("w_ec", 0.5, 0.0, 5.0),
+            Continuous("w_ec", 0.0, 0.0, 5.0),
             # Pose search
             Integer("max_iterations", 200, 0, 300),
             Continuous("box_size", 1.5, 0.5, 2.0),

@@ -21,6 +21,7 @@ cmxflow-mcp = "cmxflow.mcp:run"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"
+pytest-cov = "^6.0"
 black = "^24.0"
 ruff = "^0.4"
 mypy = "^1.10"

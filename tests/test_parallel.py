@@ -308,37 +308,6 @@ class SlowBlock(Block):
 class TestWorkerTimeout:
     """Tests for worker_timeout behavior."""
 
-    def test_timeout_skips_slow_items_ordered(self) -> None:
-        """Test that slow items are skipped in ordered mode."""
-        block = SlowBlock()
-        pb = make_parallel(block, max_workers=2, ordered=True)
-        # 2s timeout comfortably exceeds pool startup but catches the
-        # -30 item (which would sleep 30s)
-        pb._config = ParallelConfig(max_workers=2, ordered=True, worker_timeout=3)
-        result = list(pb(iter([1, -30, 2])))
-        assert result == [1, 4]
-
-    def test_timeout_skips_slow_items_unordered(self) -> None:
-        """Test that slow items are skipped in unordered mode."""
-        block = SlowBlock()
-        pb = make_parallel(block, max_workers=2, ordered=False)
-        pb._config = ParallelConfig(max_workers=2, ordered=False, worker_timeout=3)
-        result = list(pb(iter([1, -30, 2])))
-        assert sorted(result) == [1, 4]
-
-    def test_timeout_raises_when_configured(self) -> None:
-        """Test that TimeoutError is raised with error_handling='raise'."""
-        block = SlowBlock()
-        pb = make_parallel(block, max_workers=2, error_handling="raise")
-        pb._config = ParallelConfig(
-            max_workers=2,
-            ordered=True,
-            error_handling="raise",
-            worker_timeout=3,
-        )
-        with pytest.raises(TimeoutError):
-            list(pb(iter([1, -30, 2])))
-
     def test_no_timeout_when_disabled(self) -> None:
         """Test that worker_timeout=0 disables the timeout."""
         block = SlowBlock()

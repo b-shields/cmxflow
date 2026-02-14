@@ -174,11 +174,11 @@ class Workflow:
                     missing_text.append(f"'{key}'")
         if missing_files:
             raise KeyError(
-                f"Required input files are missing: {", ".join(missing_files)}"
+                f"Required input files are missing: {', '.join(missing_files)}"
             )
         if missing_text:
             raise KeyError(
-                f"Required input text keys are missing: {", ".join(missing_text)}"
+                f"Required input text keys are missing: {', '.join(missing_text)}"
             )
 
     def forward(

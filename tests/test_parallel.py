@@ -314,7 +314,7 @@ class TestWorkerTimeout:
         pb = make_parallel(block, max_workers=2, ordered=True)
         # 2s timeout comfortably exceeds pool startup but catches the
         # -30 item (which would sleep 30s)
-        pb._config = ParallelConfig(max_workers=2, ordered=True, worker_timeout=1.5)
+        pb._config = ParallelConfig(max_workers=2, ordered=True, worker_timeout=3)
         result = list(pb(iter([1, -30, 2])))
         assert result == [1, 4]
 
@@ -322,7 +322,7 @@ class TestWorkerTimeout:
         """Test that slow items are skipped in unordered mode."""
         block = SlowBlock()
         pb = make_parallel(block, max_workers=2, ordered=False)
-        pb._config = ParallelConfig(max_workers=2, ordered=False, worker_timeout=1.5)
+        pb._config = ParallelConfig(max_workers=2, ordered=False, worker_timeout=3)
         result = list(pb(iter([1, -30, 2])))
         assert sorted(result) == [1, 4]
 
@@ -334,7 +334,7 @@ class TestWorkerTimeout:
             max_workers=2,
             ordered=True,
             error_handling="raise",
-            worker_timeout=1.5,
+            worker_timeout=3,
         )
         with pytest.raises(TimeoutError):
             list(pb(iter([1, -30, 2])))

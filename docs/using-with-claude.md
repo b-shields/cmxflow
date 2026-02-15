@@ -24,23 +24,27 @@ This gives Claude access to five tools:
 
 ### Similarity Search
 
-> Read molecules from screen.sdf, compute 2D similarity to queries.sdf using ECFP4 fingerprints, and write the top 100 to hits.sdf.
+> Read molecules from screen.sdf.gz, compute 2D similarity to queries.sdf using ECFP4 fingerprints, and write the top 100 to similar.csv.
 
 ### Virtual Screening with Optimization
 
-> Build a workflow that reads molecules from library.sdf, computes Tanimoto similarity to reference.sdf, and scores by enrichment against actives.smi. Optimize it with 30 trials.
+> I need build a ligand-based virtual screening workflow. I'm not sure if 2D or 3D is better. Can you optimize two workflows. The benchmark is in benchmark.csv with hits labeled in the active column and the query is in reference.sdf.
 
 ### 3D Conformer Generation
 
-> Generate 3D conformers for molecules in mols.sdf, align them to crystal_pose.sdf, and save the aligned structures.
+> Generate 3D conformers for the molecules in mols.sdf, align them to crystal_pose.sdf, and save the aligned structures.
 
-### Property Filtering
+And if you don't like the alignments...
 
-> Filter molecules.sdf to keep only those with MolWt < 500, LogP between 1 and 5, and no PAINS alerts. Write the passing molecules to filtered.sdf.
+> These alignments are no good. Can you optimize for shape overlay?
+
+### Filtering
+
+> How many of the molecules in library.parquet pass Lipinski's rules?
 
 ### Docking
 
-> Dock the molecules in ligands.sdf into receptor.pdb and save the docked poses.
+> Collect all molecules with a carboxylic acid in actives.csv and dock them against receptor.pdb with crystal_ligand.sdf as a reference.
 
 ## What Claude Can Do
 

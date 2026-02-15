@@ -36,10 +36,10 @@ class Workflow:
             block.reset_cache()
 
     def add(self, *blocks: Any) -> "Workflow":
-        """Add a block to the end of the workflow.
+        """Add one or more blocks to the end of the workflow.
 
         Args:
-            block: The block to add.
+            *blocks: The block(s) to add.
 
         Returns:
             Self for method chaining.

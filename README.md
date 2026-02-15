@@ -1,5 +1,6 @@
 # cmxflow 🧪
 
+[![Docs](https://img.shields.io/badge/docs-b--shields.github.io%2Fcmxflow-teal)](https://b-shields.github.io/cmxflow/)
 [![CI](https://github.com/b-shields/cmxflow/actions/workflows/ci.yml/badge.svg)](https://github.com/b-shields/cmxflow/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/b-shields/cmxflow/branch/main/graph/badge.svg)](https://codecov.io/gh/b-shields/cmxflow)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)]()
@@ -11,6 +12,8 @@ Composable cheminformatics workflows with Bayesian optimization.
 ## Overview 🔬
 
 **cmxflow** is a Python framework for building and optimizing cheminformatics pipelines. Chain together molecular operations as blocks, then let Bayesian optimization find the best parameters for your task.
+
+**[Read the full documentation &rarr;](https://b-shields.github.io/cmxflow/)**
 
 ### Two Usage Modes ⚗️
 

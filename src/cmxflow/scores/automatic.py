@@ -140,10 +140,9 @@ class EnrichmentScoreBlock(ScoreBlock):
         """Initialize with scoring configuration.
 
         Args:
-            score_column: Name of the column to use as the score.
-            target_column: Name of the column containing target labels.
             pooler: Function to convert iterator to DataFrame.
             metric: Function to compute metric from scores and labels.
+            **kwargs (str): Keyword arguments passed to `set_inputs`.
         """
         super().__init__(input_text=["target"])
         self.pooler = pooler

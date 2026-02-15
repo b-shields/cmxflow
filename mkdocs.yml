@@ -1,0 +1,67 @@
+site_name: cmxflow
+site_url: https://b-shields.github.io/cmxflow/
+site_description: Composable cheminformatics workflows with Bayesian optimization
+repo_url: https://github.com/b-shields/cmxflow
+repo_name: b-shields/cmxflow
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+    - toc.follow
+
+nav:
+  - Home: index.md
+  - Block Catalog: blocks.md
+  - Using with Claude: using-with-claude.md
+  - API Reference:
+      - Operators: api/operators.md
+      - Scores: api/scores.md
+      - I/O: api/io.md
+      - Core: api/core.md
+      - Utilities: api/utilities.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: false
+            show_root_heading: true
+            show_symbol_type_heading: true
+            members_order: source
+            docstring_style: google
+            merge_init_into_class: true
+            show_signature_annotations: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - toc:
+      permalink: true
+  - attr_list
+  - tables

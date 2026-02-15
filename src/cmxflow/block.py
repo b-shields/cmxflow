@@ -33,9 +33,9 @@ class BlockBase(ABC):
         Args:
             name: Optional name for the block. Defaults to class name.
             input_files: Optional files that will be surfaced as required
-              input at run time.
+                input at run time.
             input_text: Optional text that will be surfaces as required
-              input at run time.
+                input at run time.
         """
         self.name = name or self.__class__.__name__
         if input_files is None:

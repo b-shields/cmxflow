@@ -21,13 +21,16 @@ jobs:
           python-version: "3.12"
 
       - name: Install linters
-        run: pip install black ruff
+        run: pip install black ruff mypy
 
       - name: Check formatting
         run: black --check src/ tests/
 
       - name: Lint
         run: ruff check src/ tests/
+
+      - name: Type check
+        run: mypy src/
 
   test:
     runs-on: ubuntu-latest

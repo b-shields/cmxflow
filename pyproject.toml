@@ -44,3 +44,15 @@ select = ["E", "F", "I", "W"]
 python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
+ignore_missing_imports = true
+
+# rdkit stubs are incomplete — suppress false positives from stub mismatches
+[[tool.mypy.overrides]]
+module = [
+    "cmxflow.cmxmol",
+    "cmxflow.sinks.molecule",
+    "cmxflow.operators.confgen",
+    "cmxflow.operators.dock.ec",
+    "cmxflow.operators.dock.dock",
+]
+disable_error_code = ["override", "assignment", "no-any-return", "attr-defined"]

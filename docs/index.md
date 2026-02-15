@@ -45,20 +45,25 @@ conda install -c conda-forge pymol-open-source
 ```python
 from cmxflow import Workflow
 from cmxflow.sources import MoleculeSourceBlock
-from cmxflow.operators import MoleculeSimilarityBlock
+from cmxflow.operators import MoleculeSimilarityBlock, RDKitBlock
 from cmxflow.sinks import MoleculeSinkBlock
 
+# Build a workflow (everything is composable, add as many blocks as you want)
 workflow = Workflow()
-workflow.add(MoleculeSourceBlock())
-workflow.add(MoleculeSimilarityBlock())
-workflow.add(MoleculeSinkBlock())
+workflow.add(
+    MoleculeSourceBlock(),                                  # Reader
+    MoleculeSimilarityBlock(queries="crystal_ligand.sdf"),  # 2D Similarity
+    RDKitBlock("rdkit.Chem.Descriptors.MolWt"),             # Arbitrary rdkit method
+    MoleculeSinkBlock()                                     # Writer
+)
 
-workflow("molecules.sdf", output="results.sdf")
+# Run it
+workflow("molecules.sdf", "results.sdf")
 ```
 
-### Agentic (via Claude)
+### Agentic (e.g., via Claude)
 
-> Build a workflow that reads molecules from actives.sdf, computes 2D similarity to queries.sdf, and writes the results to output.sdf.
+> I need build a ligand-based virtual screening workflow. I'm not sure if 2D or 3D is better. Can you optimize two workflows? The benchmark is in benchmark.csv with hits labeled in the active column and the query is in reference.sdf.
 
 See the [Block Catalog](blocks.md) for all available blocks or the
 [`examples/basic_usage.ipynb`](https://github.com/b-shields/cmxflow/blob/main/examples/basic_usage.ipynb)

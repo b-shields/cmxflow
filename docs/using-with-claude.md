@@ -28,7 +28,7 @@ This gives Claude access to five tools:
 
 ### Virtual Screening with Optimization
 
-> I need build a ligand-based virtual screening workflow. I'm not sure if 2D or 3D is better. Can you optimize two workflows. The benchmark is in benchmark.csv with hits labeled in the active column and the query is in reference.sdf.
+> I need build a ligand-based virtual screening workflow. I'm not sure if 2D or 3D is better. Can you optimize two workflows? The benchmark is in benchmark.csv with hits labeled in the active column and the query is in reference.sdf.
 
 ### 3D Conformer Generation
 
@@ -38,9 +38,11 @@ And if you don't like the alignments...
 
 > These alignments are no good. Can you optimize for shape overlay?
 
-### Filtering
+### Filtering / Library Preparation
 
 > How many of the molecules in library.parquet pass Lipinski's rules?
+
+> Filter PAINS and cluster the remainder of the molecules.
 
 ### Docking
 

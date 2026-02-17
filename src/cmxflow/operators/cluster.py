@@ -35,7 +35,7 @@ class RepresentativeClusterBlock(MoleculeBlock):
         workflow.add(RepresentativeClusterBlock())
     """
 
-    def __init__(self, **kwargs: str) -> None:
+    def __init__(self, **kwargs) -> None:
         """Initialize the representative cluster block."""
         super().__init__(name="RepresentativeCluster")
         self.mutable(

@@ -5,6 +5,8 @@ Source and sink blocks handle reading and writing molecules in various file form
 ## Sources
 
 ::: cmxflow.sources.reader.MoleculeSourceBlock
+    options:
+      members: false
 
 ### Supported Formats
 
@@ -25,6 +27,8 @@ Source and sink blocks handle reading and writing molecules in various file form
 ## Sinks
 
 ::: cmxflow.sinks.writer.MoleculeSinkBlock
+    options:
+      members: false
 
 ### Writer Function
 

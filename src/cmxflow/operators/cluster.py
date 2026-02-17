@@ -15,24 +15,28 @@ logger = logging.getLogger(__name__)
 class RepresentativeClusterBlock(MoleculeBlock):
     """Assign molecules to clusters using streaming leader clustering.
 
-    For each molecule, computes an ECFP4 fingerprint and compares it
-    against all existing cluster representatives via Tanimoto similarity.
-    If the best similarity is >= threshold, the molecule joins that cluster.
-    Otherwise, a new cluster is created with this molecule as representative.
+    For each molecule, computes an ECFP4 fingerprint (or Murcko scaffold
+    fingerprint) and compares it against all existing cluster representatives
+    via Tanimoto similarity. If the best similarity meets the threshold,
+    the molecule joins that cluster; otherwise a new cluster is created.
+    All molecules pass through annotated with cluster metadata.
 
-    All molecules pass through (annotator, not filter). Each molecule is
-    annotated with cluster_id, cluster_representative, and cluster_similarity.
-
-    This block cannot be parallelized because it relies on shared mutable
-    state (the representative cache).
-
-    Attributes:
-        _representatives: Fingerprints of cluster representative molecules.
-        _representative_smiles: SMILES strings of cluster representatives.
-        _generator: Morgan fingerprint generator (ECFP4).
+    Output Properties:
+        - cluster_id: Integer index of the assigned cluster.
+        - cluster_representative: SMILES of the cluster's representative molecule.
+        - cluster_similarity: Tanimoto similarity to the cluster representative.
 
     Example:
-        workflow.add(RepresentativeClusterBlock())
+        workflow.add(
+            MoleculeSourceBlock(),
+            RepresentativeClusterBlock(),
+            MoleculeSinkBlock()
+        )
+
+    Mutable Parameters:
+        - threshold: Tanimoto similarity threshold for cluster assignment (0.05–0.95).
+        - scaffold: If True, cluster by Murcko scaffold fingerprint instead of full
+            molecule.
     """
 
     def __init__(self, **kwargs) -> None:

@@ -159,21 +159,23 @@ class PropertySelectBlock(MoleculeBlock):
 
 
 class PropertyHeadBlock(PropertySelectBlock):
-    """Block that returns molecules with the highest property values.
+    """Return molecules with the highest values of a specified property.
 
     Collects all input molecules, sorts by the specified property in
-    descending order, and yields the top N molecules (highest values first).
+    descending order, and yields the top N (highest values first).
 
     Required Inputs:
-        property (text): Name of the molecule property to sort by.
-        count (text): Number of molecules to return. 0 or empty returns all sorted.
+        - property (text): Name of the molecule property to sort by.
+        - count (text): Number of molecules to return. ``0`` or empty returns all,
+            sorted.
 
     Example:
-        workflow.add(PropertyHeadBlock())
-        workflow.set_required_input({
-            "1.text@property": "docking_score",
-            "1.text@count": "10",
-        })
+        workflow.add(
+            MoleculeSourceBlock(),
+            RDKitBlock("rdkit.Chem.Descriptors.MolWt"),
+            PropertyHeadBlock(property="MolWt", count="10"),
+            MoleculeSinkBlock()
+        )
     """
 
     _ascending = False  # Descending: highest values first
@@ -184,21 +186,23 @@ class PropertyHeadBlock(PropertySelectBlock):
 
 
 class PropertyTailBlock(PropertySelectBlock):
-    """Block that returns molecules with the lowest property values.
+    """Return molecules with the lowest values of a specified property.
 
     Collects all input molecules, sorts by the specified property in
-    ascending order, and yields the bottom N molecules (lowest values first).
+    ascending order, and yields the bottom N (lowest values first).
 
     Required Inputs:
-        property (text): Name of the molecule property to sort by.
-        count (text): Number of molecules to return. 0 or empty returns all sorted.
+        - property (text): Name of the molecule property to sort by.
+        - count (text): Number of molecules to return. ``0`` or empty returns all,
+            sorted.
 
     Example:
-        workflow.add(PropertyTailBlock())
-        workflow.set_required_input({
-            "1.text@property": "energy",
-            "1.text@count": "5",
-        })
+        workflow.add(
+            MoleculeSourceBlock(),
+            RDKitBlock("rdkit.Chem.Descriptors.MolWt"),
+            PropertyTailBlock(property="MolWt", count="10"),
+            MoleculeSinkBlock()
+        )
     """
 
     _ascending = True  # Ascending: lowest values first

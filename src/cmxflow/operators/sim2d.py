@@ -25,27 +25,33 @@ SIMILARITY_METRICS: dict[str, Callable] = {
 
 
 class MoleculeSimilarityBlock(MoleculeBlock):
-    """Block for 2D fingerprint similarity searching.
+    """Compute 2D fingerprint similarity against a set of query molecules.
 
-    Computes fingerprint similarity between input molecules and a set of
-    query molecules. Attaches maximum similarity score and most similar
-    query index as molecule properties.
+    For each input molecule, computes the maximum fingerprint similarity
+    across all query molecules and attaches the score and best-matching
+    query name as properties.
 
     Required Inputs:
-        queries (file): Path to query molecule file (SDF, SMILES, etc.).
+        - queries (file): Path to query molecule file (SDF, SMILES, etc.).
 
-    Mutable Parameters:
-        fingerprint_type: Fingerprint algorithm (morgan, rdkit, maccs, atom_pair,
-            topological_torsion).
-        similarity_metric: Similarity function (tanimoto, dice, cosine, sokal, russel).
-        radius: Morgan fingerprint radius (1-4).
-        nbits: Fingerprint bit length (512-4096).
+    Output Properties:
+        - max_similarity: Maximum similarity score to any query molecule.
+        - most_similar_query: Name or index of the most similar query molecule.
 
     Example:
-        workflow.add(MoleculeSimilarityBlock())
-        workflow.set_required_input({
-            "1.file@queries": "reference_ligands.sdf",
-        })
+        workflow.add(
+            MoleculeSourceBlock(),
+            MoleculeSimilarityBlock(queries="reference_ligands.sdf"),
+            MoleculeSinkBlock()
+        )
+
+    Mutable Parameters:
+        - fingerprint_type: Fingerprint algorithm (morgan, rdkit, maccs, atom_pair,
+            topological_torsion).
+        - similarity_metric: Similarity function (tanimoto, dice, cosine, sokal,
+            russel).
+        - radius: Morgan fingerprint radius (1–4).
+        - nbits: Fingerprint bit length (512–4096).
     """
 
     def __init__(self, **kwargs) -> None:

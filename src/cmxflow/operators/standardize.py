@@ -23,13 +23,12 @@ class MoleculeStandardizeBlock(MoleculeBlock):
     salt/fragment removal, and charge neutralization. Optionally
     canonicalizes tautomers.
 
-    Args:
-        canonicalize_tautomers: Whether to canonicalize tautomers.
-            Defaults to False.
-        **kwargs: Additional keyword arguments passed to set_inputs.
-
     Example:
-        workflow.add(MoleculeStandardizeBlock())
+        workflow.add(
+            MoleculeSourceBlock(),
+            MoleculeStandardizeBlock(),
+            MoleculeSinkBlock()
+        )
     """
 
     def __init__(self, canonicalize_tautomers: bool = False, **kwargs: str) -> None:

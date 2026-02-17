@@ -15,26 +15,36 @@ logger = logging.getLogger(__name__)
 
 
 class MoleculeAlignBlock(MoleculeBlock):
-    """Block for 3D molecular alignment.
+    """Align input molecule conformers to a set of 3D reference molecules.
 
-    Aligns input molecule conformers to reference molecules and returns the
-    conformer with highest shape similarity. Reference molecules are lazy-loaded
-    from the input file specified by the "query" key.
-
-    Input molecules (both query references and molecules to align) must already
-    have 3D conformers. Use a conformer generation block upstream if needed.
+    For each input molecule, all conformers are aligned to all reference
+    conformers using the selected method. The single best-scoring conformer
+    (highest shape Tanimoto after alignment) is retained and returned.
+    Input molecules must already have 3D conformers.
 
     Required Inputs:
-        query (file): Path to reference molecule file with 3D conformers.
+        - query (file): Path to reference molecule file with 3D conformers.
 
-    Mutable Parameters:
-        alignment_method: Alignment algorithm (crippen_o3a, mmff_o3a, mcs).
+    Output Properties:
+        - alignment_shape_similarity: Shape Tanimoto similarity of the best-aligned
+            conformer.
+        - alignment_score: RMSD of the best alignment.
+        - alignment_reference: Name of the reference molecule used.
+        - alignment_method: Alignment algorithm used.
+        - alignment_ref_index: Index of the reference molecule used.
+        - alignment_mcs: MCS SMARTS pattern (only present when method is ``mcs``).
 
     Example:
-        workflow.add(MoleculeAlignBlock())
-        workflow.set_required_input({
-            "1.file@query": "reference.sdf",
-        })
+        workflow.add(
+            MoleculeSourceBlock(),
+            EnumerateStereoBlock(),
+            ConformerGenerationBlock(),
+            MoleculeAlignBlock(query="reference.sdf"),
+            MoleculeSinkBlock()
+        )
+
+    Mutable Parameters:
+        - alignment_method: Alignment algorithm (crippen_o3a, mmff_o3a, mcs).
     """
 
     def __init__(self, **kwargs) -> None:

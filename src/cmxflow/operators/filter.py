@@ -228,29 +228,25 @@ def parse_filter_expression(expression: str) -> list[FilterCondition]:
 
 
 class PropertyFilterBlock(MoleculeBlock):
-    """Block that filters molecules based on property conditions.
+    """Filter molecules based on numeric property conditions.
 
-    Molecules are filtered based on conditions specified in the 'filters'
-    input text. Conditions use AND logic - molecules must satisfy all
-    conditions to pass through.
-
-    Supported filter syntax:
-    - Simple comparisons: MW>200, logP<=5
-    - Reverse comparisons: 200<MW (equivalent to MW>200)
-    - Range expressions: 200<MW<500
-    - Multiple conditions: MW>200, logP>0
-
-    Operators: <, >, <=, >=, ==, !=
+    Conditions are specified in the ``filters`` input text using AND logic —
+    a molecule must satisfy every condition to pass. Supported syntax: simple
+    comparisons (``MW>200``), reversed comparisons (``200<MW``), range
+    expressions (``200<MW<500``), and comma-separated multiple conditions.
+    Supported operators: ``<``, ``>``, ``<=``, ``>=``, ``==``, ``!=``.
 
     Required Inputs:
-        filters (text): Comma-separated filter expressions
-            (e.g. "200<MolWt<500, logP>0").
+        - filters (text): Comma-separated filter expressions
+            (e.g. ``"200<MolWt<500, logP>0"``).
 
     Example:
-        workflow.add(PropertyFilterBlock())
-        workflow.set_required_input({
-            "1.text@filters": "200<MolWt<500, logP>0"
-        })
+        workflow.add(
+            MoleculeSourceBlock(),
+            RDKitBlock("rdkit.Chem.Descriptors.MolWt"),
+            PropertyFilterBlock(filters="200<MolWt<500"),
+            MoleculeSinkBlock()
+        )
     """
 
     def __init__(self, **kwargs) -> None:
@@ -363,24 +359,24 @@ class PropertyFilterBlock(MoleculeBlock):
 
 
 class SubstructureFilterBlock(MoleculeBlock):
-    """Block that filters molecules based on substructure matches.
+    """Filter molecules based on substructure matches.
 
-    Molecules can be filtered using SMARTS patterns and/or built-in RDKit
-    filter catalogs (e.g., PAINS, BRENK, NIH, ZINC). The filter uses OR logic:
-    a molecule is flagged if it matches any pattern or catalog.
+    Molecules are flagged using SMARTS patterns and/or built-in RDKit filter
+    catalogs (PAINS, BRENK, NIH, ZINC). Uses OR logic: a molecule is flagged
+    if it matches any pattern or catalog entry. The ``mode`` input controls
+    whether matching molecules are removed or kept.
 
     Required Inputs:
-        query (text): Space-separated list of catalog names and/or SMARTS patterns.
-            Catalog names (e.g., PAINS, BRENK, NIH, ZINC) are detected automatically.
-            Everything else is treated as a SMARTS pattern.
-        mode (text): "remove" (default) filters out matches, "keep" keeps only matches.
+        - query (text): Space-separated catalog names and/or SMARTS patterns.
+        - mode (text): ``"remove"`` (default) drops matches; ``"keep"`` retains only
+            matches.
 
     Example:
-        workflow.add(SubstructureFilterBlock())
-        workflow.set_required_input({
-            "1.text@query": "PAINS BRENK [OH]",
-            "1.text@mode": "remove"
-        })
+        workflow.add(
+            MoleculeSourceBlock(),
+            SubstructureFilterBlock(query="PAINS BRENK", mode="remove"),
+            MoleculeSinkBlock()
+        )
     """
 
     def __init__(self, **kwargs: Any) -> None:

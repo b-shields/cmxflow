@@ -20,6 +20,23 @@ This gives Claude access to five tools:
 | `manage_workflows` | Save, load, list, and remove workflows |
 | `view_structures` | Open 3D output in PyMOL |
 
+## Setting Block Inputs
+
+Blocks that require file paths or text configuration support two ways to set inputs:
+
+**Python API** — pass at instantiation as keyword arguments:
+```python
+MoleculeSimilarityBlock(queries="reference.sdf")
+SubstructureFilterBlock(query="PAINS BRENK", mode="remove")
+```
+
+**Agent / MCP** — Claude uses index-keyed strings via the `run_workflow set_inputs` action, because the workflow is already built and blocks cannot be reinstantiated mid-conversation:
+```
+"1.file@queries": "reference.sdf"
+"2.text@query":   "PAINS BRENK"
+```
+The key format is `"<block_index>.<type>@<name>"` where type is `file` or `text`. Block indices start at 0 (source block) and increment for each block added.
+
 ## Example Prompts
 
 ### Similarity Search

@@ -19,17 +19,20 @@ _TERTIARY_AMIDE_SMARTS = "[NX4+;H1;$(NC=O)]"
 class IonizeMoleculeBlock(MoleculeBlock):
     """Generate pH-dependent ionization states using dimorphite_dl.
 
-    This is a 1:N transform: one input molecule can yield multiple
-    protonation variants. Includes automatic correction for tertiary
-    amide nitrogens that dimorphite_dl incorrectly protonates.
-
-    Args:
-        ph_min: Minimum pH for protonation. Defaults to 6.4.
-        ph_max: Maximum pH for protonation. Defaults to 8.4.
-        **kwargs: Additional keyword arguments passed to set_inputs.
+    This is a 1:N transform: one input molecule can yield multiple protonation
+    variants. Includes automatic correction for tertiary amide nitrogens that
+    dimorphite_dl incorrectly protonates.
 
     Example:
-        workflow.add(IonizeMoleculeBlock())
+        workflow.add(
+            MoleculeSourceBlock(),
+            IonizeMoleculeBlock(),
+            MoleculeSinkBlock()
+        )
+
+    Mutable Parameters:
+        - precision: pH precision window around min/max (0.1–3.0).
+        - max_variants: Maximum number of ionization variants per molecule (1–128).
     """
 
     def __init__(self, ph_min: float = 6.4, ph_max: float = 8.4, **kwargs: str) -> None:

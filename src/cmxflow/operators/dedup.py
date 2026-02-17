@@ -14,16 +14,15 @@ class MoleculeDeduplicateBlock(MoleculeBlock):
     """Remove duplicate molecules from a stream based on canonical SMILES.
 
     Keeps the first occurrence and discards subsequent duplicates.
-    Uses RDKit canonical SMILES as the deduplication key.
-
-    This block cannot be parallelized because it relies on shared
-    mutable state (the set of seen SMILES).
-
-    Attributes:
-        _seen: Set of canonical SMILES strings already encountered.
+    Uses RDKit canonical SMILES as the deduplication key. Cannot be
+    parallelized because it relies on shared mutable state.
 
     Example:
-        workflow.add(MoleculeDeduplicateBlock())
+        workflow.add(
+            MoleculeSourceBlock(),
+            MoleculeDeduplicateBlock(),
+            MoleculeSinkBlock()
+        )
     """
 
     def __init__(self, **kwargs: str) -> None:

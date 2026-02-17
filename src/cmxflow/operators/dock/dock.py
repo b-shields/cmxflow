@@ -46,16 +46,6 @@ class MoleculeDockBlock(MoleculeBlock):
     Required Inputs:
         - receptor (file): Path to receptor PDB file.
 
-    Parameters:
-        w_gauss1: Vinardo Gaussian attractive term weight.
-        w_repulsion: Vinardo repulsion term weight.
-        w_hydrophobic: Vinardo hydrophobic term weight.
-        w_hbond: Vinardo hydrogen bond term weight.
-        w_ec: Weight for electrostatic complementarity term (0 = disabled).
-        max_iterations: Maximum optimization iterations.
-        box_size: Translation search box size in Angstroms.
-        rigid: If True, only rigid-body optimization (no torsions).
-
     Output Properties:
         - docking_initial_pose_score: Score before optimization.
         - docking_score: Final optimized score (Vinardo + EC adjustment).
@@ -68,15 +58,22 @@ class MoleculeDockBlock(MoleculeBlock):
             MoleculeSourceBlock(),
             EnumerateStereoBlock(),
             ConformerGenerationBlock(),
-            MoleculeAlignBlock(),
-            MoleculeDockBlock(),
+            MoleculeAlignBlock(query="reference.sdf"),
+            MoleculeDockBlock(receptor="protein.pdb"),
             MoleculeSinkBlock()
         )
-        workflow.set_required_input({
-            "3.file@query": "reference.sdf",
-            "4.file@receptor": "protein.pdb",
-        })
         ```
+
+    Mutable Parameters:
+        The following parameters are tuned during optimization:
+        - w_gauss1: Vinardo Gaussian attractive term weight.
+        - w_repulsion: Vinardo repulsion term weight.
+        - w_hydrophobic: Vinardo hydrophobic term weight.
+        - w_hbond: Vinardo hydrogen bond term weight.
+        - w_ec: Weight for electrostatic complementarity term (0 = disabled).
+        - max_iterations: Maximum optimization iterations.
+        - box_size: Translation search box size in Angstroms.
+        - rigid: If True, only rigid-body optimization (no torsions).
     """
 
     def __init__(self, **kwargs) -> None:

@@ -10,19 +10,24 @@ from cmxflow.operators.base import MoleculeBlock
 
 
 class RDKitBlock(MoleculeBlock):
-    """Block that applies an RDKit method to molecules.
+    """Apply an arbitrary RDKit method to each molecule in the stream.
 
-    The method can be provided as:
-    - A callable that accepts a Mol object
-    - A string path to an RDKit method (e.g., "rdkit.Chem.Descriptors.MolWt")
+    The method can be a callable or a dot-separated string path (e.g.,
+    ``"rdkit.Chem.Descriptors.MolWt"``). If the method returns a ``Mol``,
+    it replaces the molecule; if it returns a scalar (int, float, str, bool),
+    the value is stored as a molecule property; if it returns ``None``, the
+    molecule is filtered out.
 
-    Return type handling:
-    - If method returns Mol: use as the output molecule
-    - If method returns str/int/float/bool: add as property with method name as key
-    - If method returns None: molecule is filtered out
+    Output Properties:
+        - <method_name>: Scalar result stored as a molecule property.
+            The key is the method name (or the explicit ``name`` argument).
 
     Example:
-        workflow.add(RDKitBlock(method="rdkit.Chem.Descriptors.MolWt"))
+        workflow.add(
+            MoleculeSourceBlock(),
+            RDKitBlock("rdkit.Chem.Descriptors.MolWt"),
+            MoleculeSinkBlock()
+        )
     """
 
     def __init__(

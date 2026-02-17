@@ -15,31 +15,34 @@ logger = logging.getLogger(__name__)
 
 
 class Molecule3DSimilarityBlock(MoleculeBlock):
-    """Block for 3D molecular similarity searching.
+    """Compute 3D molecular similarity against a set of query molecules.
 
-    Computes 3D similarity between input molecules and a set of query molecules.
     Both input and query molecules must have pre-existing 3D conformers.
-    Attaches maximum similarity score and most similar query as molecule properties.
-
-    Supports multiple similarity methods:
-    - shape_tanimoto: Grid-based shape Tanimoto similarity
-    - shape_tversky: Asymmetric shape Tversky index
-    - usr: Ultrafast Shape Recognition (alignment-independent)
-    - usrcat: USR with CREDO Atom Types (alignment-independent)
+    For each input molecule, computes maximum similarity across all conformer
+    pairs and attaches the result as properties.
 
     Required Inputs:
-        query (file): Path to query molecule file with 3D conformers.
+        - query (file): Path to query molecule file with 3D conformers.
 
-    Mutable Parameters:
-        method: Similarity method (shape_tanimoto, shape_tversky, usr, usrcat).
-        tversky_alpha: Tversky alpha parameter (0.0-1.0).
-        tversky_beta: Tversky beta parameter (0.0-1.0).
+    Output Properties:
+        - similarity_3d: Maximum 3D similarity score to any query conformer.
+        - most_similar_query_3d: Name of the most similar query molecule.
+        - similarity_3d_method: Similarity method used.
+        - similarity_3d_conf_id: Conformer ID that gave the best similarity.
 
     Example:
-        workflow.add(Molecule3DSimilarityBlock())
-        workflow.set_required_input({
-            "1.file@query": "reference_3d.sdf",
-        })
+        workflow.add(
+            MoleculeSourceBlock(),
+            EnumerateStereoBlock(),
+            ConformerGenerationBlock(),
+            Molecule3DSimilarityBlock(query="reference_3d.sdf"),
+            MoleculeSinkBlock()
+        )
+
+    Mutable Parameters:
+        - method: Similarity method (shape_tanimoto, shape_tversky, usr, usrcat).
+        - tversky_alpha: Tversky alpha parameter (0.0–1.0).
+        - tversky_beta: Tversky beta parameter (0.0–1.0).
     """
 
     def __init__(self, **kwargs) -> None:

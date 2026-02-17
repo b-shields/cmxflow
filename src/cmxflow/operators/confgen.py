@@ -19,17 +19,18 @@ logger = logging.getLogger(__name__)
 
 
 class EnumerateStereoBlock(MoleculeBlock):
-    """Block for enumerating stereoisomers of molecules.
+    """Enumerate all stereoisomers of each input molecule.
 
     This is a 1:N transform that yields all possible stereoisomers for each
     input molecule. Properties from the input molecule are copied to each
     output stereoisomer.
 
-    Note: This block overrides the standard forward() method since it's a
-    1:N transform (one input yields multiple outputs).
-
     Example:
-        workflow.add(EnumerateStereoBlock())
+        workflow.add(
+            MoleculeSourceBlock(),
+            EnumerateStereoBlock(),
+            MoleculeSinkBlock()
+        )
     """
 
     def __init__(self) -> None:
@@ -91,17 +92,24 @@ class EnumerateStereoBlock(MoleculeBlock):
 
 
 class ConformerGenerationBlock(MoleculeBlock):
-    """Block for generating 3D conformers of molecules.
+    """Generate 3D conformers using RDKit's ETKDGv3 algorithm.
 
-    Uses RDKit's ETKDGv3 algorithm to generate conformers. Molecules must
-    have fully specified stereochemistry before conformer generation.
-
-    Attributes:
-        params: Dictionary of mutable parameters (numConfs, pruneRmsThresh,
-            useRandomCoords).
+    Molecules must have fully specified stereochemistry before conformer
+    generation. Use ``EnumerateStereoBlock`` upstream to resolve any
+    unspecified stereocenters.
 
     Example:
-        workflow.add(ConformerGenerationBlock())
+        workflow.add(
+            MoleculeSourceBlock(),
+            EnumerateStereoBlock(),
+            ConformerGenerationBlock(),
+            MoleculeSinkBlock()
+        )
+
+    Mutable Parameters:
+        - numConfs: Number of conformers to generate (1–100).
+        - pruneRmsThresh: RMS threshold for pruning similar conformers (0.0–3.0).
+        - useRandomCoords: Use random initial coordinates instead of distance geometry.
     """
 
     def __init__(self, **kwargs) -> None:

@@ -21,6 +21,9 @@ class MoleculeDeduplicateBlock(MoleculeBlock):
 
     Attributes:
         _seen: Set of canonical SMILES strings already encountered.
+
+    Example:
+        workflow.add(MoleculeDeduplicateBlock())
     """
 
     def __init__(self, **kwargs: str) -> None:

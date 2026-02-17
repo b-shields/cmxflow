@@ -164,15 +164,15 @@ class PropertyHeadBlock(PropertySelectBlock):
     Collects all input molecules, sorts by the specified property in
     descending order, and yields the top N molecules (highest values first).
 
-    Input text parameters:
-        property: Name of the molecule property to sort by.
-        count: Number of molecules to return. 0 or empty returns all sorted.
+    Required Inputs:
+        property (text): Name of the molecule property to sort by.
+        count (text): Number of molecules to return. 0 or empty returns all sorted.
 
     Example:
         workflow.add(PropertyHeadBlock())
         workflow.set_required_input({
             "1.text@property": "docking_score",
-            "1.text@count": "10"
+            "1.text@count": "10",
         })
     """
 
@@ -189,15 +189,15 @@ class PropertyTailBlock(PropertySelectBlock):
     Collects all input molecules, sorts by the specified property in
     ascending order, and yields the bottom N molecules (lowest values first).
 
-    Input text parameters:
-        property: Name of the molecule property to sort by.
-        count: Number of molecules to return. 0 or empty returns all sorted.
+    Required Inputs:
+        property (text): Name of the molecule property to sort by.
+        count (text): Number of molecules to return. 0 or empty returns all sorted.
 
     Example:
         workflow.add(PropertyTailBlock())
         workflow.set_required_input({
             "1.text@property": "energy",
-            "1.text@count": "5"
+            "1.text@count": "5",
         })
     """
 

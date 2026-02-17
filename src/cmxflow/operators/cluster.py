@@ -30,6 +30,9 @@ class RepresentativeClusterBlock(MoleculeBlock):
         _representatives: Fingerprints of cluster representative molecules.
         _representative_smiles: SMILES strings of cluster representatives.
         _generator: Morgan fingerprint generator (ECFP4).
+
+    Example:
+        workflow.add(RepresentativeClusterBlock())
     """
 
     def __init__(self, **kwargs: str) -> None:

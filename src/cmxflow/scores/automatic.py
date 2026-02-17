@@ -129,6 +129,15 @@ class EnrichmentScoreBlock(ScoreBlock):
 
     Uses molecule properties as features and computes enrichment AUC as the
     optimization metric. Non-numeric properties are automatically filtered.
+
+    Required Inputs:
+        target (text): Name of the binary label column (1 = hit, 0 = non-hit).
+
+    Example:
+        workflow.add(EnrichmentScoreBlock())
+        workflow.set_required_input({
+            "1.text@target": "is_active",
+        })
     """
 
     def __init__(
@@ -232,6 +241,15 @@ class AverageScoreBlock(ScoreBlock):
     Uses the same pooler approach as EnrichmentScoreBlock to convert
     molecules to a DataFrame, then computes the mean of the specified
     property column.
+
+    Required Inputs:
+        property (text): Name of the numeric property column to average.
+
+    Example:
+        workflow.add(AverageScoreBlock())
+        workflow.set_required_input({
+            "1.text@property": "docking_score",
+        })
     """
 
     def __init__(

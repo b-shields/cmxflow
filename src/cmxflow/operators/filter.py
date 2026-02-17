@@ -242,6 +242,10 @@ class PropertyFilterBlock(MoleculeBlock):
 
     Operators: <, >, <=, >=, ==, !=
 
+    Required Inputs:
+        filters (text): Comma-separated filter expressions
+            (e.g. "200<MolWt<500, logP>0").
+
     Example:
         workflow.add(PropertyFilterBlock())
         workflow.set_required_input({
@@ -365,11 +369,11 @@ class SubstructureFilterBlock(MoleculeBlock):
     filter catalogs (e.g., PAINS, BRENK, NIH, ZINC). The filter uses OR logic:
     a molecule is flagged if it matches any pattern or catalog.
 
-    Inputs:
-        query: Space-separated list of catalog names and/or SMARTS patterns.
+    Required Inputs:
+        query (text): Space-separated list of catalog names and/or SMARTS patterns.
             Catalog names (e.g., PAINS, BRENK, NIH, ZINC) are detected automatically.
             Everything else is treated as a SMARTS pattern.
-        mode: "remove" (default) filters out matches, "keep" keeps only matches.
+        mode (text): "remove" (default) filters out matches, "keep" keeps only matches.
 
     Example:
         workflow.add(SubstructureFilterBlock())

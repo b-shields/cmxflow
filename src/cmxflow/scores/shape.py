@@ -26,8 +26,14 @@ class ShapeOverlayScoreBlock(ScoreBlock):
            across all conformer pairs (input conformer x reference conformer).
         2. Return the average of these maximum similarities across all molecules.
 
-    Attributes:
-        input_files: Dictionary containing "query" key for reference ligand file.
+    Required Inputs:
+        query (file): Path to reference ligand file with 3D conformers.
+
+    Example:
+        workflow.add(ShapeOverlayScoreBlock())
+        workflow.set_required_input({
+            "1.file@query": "reference_3d.sdf",
+        })
     """
 
     def __init__(self, **kwargs) -> None:

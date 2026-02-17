@@ -46,8 +46,8 @@ class MoleculeDockBlock(MoleculeBlock):
     The block requires a receptor PDB file specified via input_files["receptor"].
     Input molecules must have pre-generated 3D conformers.
 
-    Attributes:
-        input_files: Dictionary containing "receptor" key for protein PDB file.
+    Required Inputs:
+        receptor (file): Path to receptor PDB file.
 
     Mutable Parameters:
         w_gauss1: Vinardo Gaussian attractive term weight.
@@ -66,10 +66,10 @@ class MoleculeDockBlock(MoleculeBlock):
         docking_converged: Whether optimization converged.
 
     Example:
-        >>> block = MoleculeDockBlock()
-        >>> block.input_files["receptor"] = "protein.pdb"
-        >>> docked_mol = block.forward(ligand_mol)
-        >>> print(docked_mol.GetDoubleProp("docking_score"))
+        workflow.add(MoleculeDockBlock())
+        workflow.set_required_input({
+            "1.file@receptor": "protein.pdb",
+        })
     """
 
     def __init__(self, **kwargs) -> None:

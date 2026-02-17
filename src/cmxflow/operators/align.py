@@ -24,9 +24,17 @@ class MoleculeAlignBlock(MoleculeBlock):
     Input molecules (both query references and molecules to align) must already
     have 3D conformers. Use a conformer generation block upstream if needed.
 
-    Attributes:
-        input_files: Dictionary containing "query" key for reference molecule file.
-        params: Dictionary of mutable parameters for alignment configuration.
+    Required Inputs:
+        query (file): Path to reference molecule file with 3D conformers.
+
+    Mutable Parameters:
+        alignment_method: Alignment algorithm (crippen_o3a, mmff_o3a, mcs).
+
+    Example:
+        workflow.add(MoleculeAlignBlock())
+        workflow.set_required_input({
+            "1.file@query": "reference.sdf",
+        })
     """
 
     def __init__(self, **kwargs) -> None:

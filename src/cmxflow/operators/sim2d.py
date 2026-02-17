@@ -31,10 +31,21 @@ class MoleculeSimilarityBlock(MoleculeBlock):
     query molecules. Attaches maximum similarity score and most similar
     query index as molecule properties.
 
-    Attributes:
-        input_files: Dictionary containing "queries" key for query molecule file.
-        params: Dictionary of mutable parameters (fingerprint_type, similarity_metric,
-            radius, nbits).
+    Required Inputs:
+        queries (file): Path to query molecule file (SDF, SMILES, etc.).
+
+    Mutable Parameters:
+        fingerprint_type: Fingerprint algorithm (morgan, rdkit, maccs, atom_pair,
+            topological_torsion).
+        similarity_metric: Similarity function (tanimoto, dice, cosine, sokal, russel).
+        radius: Morgan fingerprint radius (1-4).
+        nbits: Fingerprint bit length (512-4096).
+
+    Example:
+        workflow.add(MoleculeSimilarityBlock())
+        workflow.set_required_input({
+            "1.file@queries": "reference_ligands.sdf",
+        })
     """
 
     def __init__(self, **kwargs) -> None:

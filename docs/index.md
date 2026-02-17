@@ -63,7 +63,7 @@ workflow("molecules.sdf", "results.sdf")
 
 ### Agentic (e.g., via Claude)
 
-> I need build a ligand-based virtual screening workflow. I'm not sure if 2D or 3D is better. Can you optimize two workflows? The benchmark is in benchmark.csv with hits labeled in the active column and the query is in reference.sdf.
+> I need build build a ligand-based virtual screening workflow. I'm not sure if 2D or 3D is better. Can you optimize two workflows? The benchmark is in benchmark.csv with hits labeled in the active column and the query is in reference.sdf.
 
 See the [Block Catalog](blocks.md) for all available blocks or the
 [`examples/basic_usage.ipynb`](https://github.com/b-shields/cmxflow/blob/main/examples/basic_usage.ipynb)

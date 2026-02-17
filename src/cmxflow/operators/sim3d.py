@@ -27,9 +27,19 @@ class Molecule3DSimilarityBlock(MoleculeBlock):
     - usr: Ultrafast Shape Recognition (alignment-independent)
     - usrcat: USR with CREDO Atom Types (alignment-independent)
 
-    Attributes:
-        input_files: Dictionary containing "queries" key for query molecule file.
-        params: Dictionary of mutable parameters (method, tversky_alpha, tversky_beta).
+    Required Inputs:
+        query (file): Path to query molecule file with 3D conformers.
+
+    Mutable Parameters:
+        method: Similarity method (shape_tanimoto, shape_tversky, usr, usrcat).
+        tversky_alpha: Tversky alpha parameter (0.0-1.0).
+        tversky_beta: Tversky beta parameter (0.0-1.0).
+
+    Example:
+        workflow.add(Molecule3DSimilarityBlock())
+        workflow.set_required_input({
+            "1.file@query": "reference_3d.sdf",
+        })
     """
 
     def __init__(self, **kwargs) -> None:

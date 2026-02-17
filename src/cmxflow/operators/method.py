@@ -20,6 +20,9 @@ class RDKitBlock(MoleculeBlock):
     - If method returns Mol: use as the output molecule
     - If method returns str/int/float/bool: add as property with method name as key
     - If method returns None: molecule is filtered out
+
+    Example:
+        workflow.add(RDKitBlock(method="rdkit.Chem.Descriptors.MolWt"))
     """
 
     def __init__(

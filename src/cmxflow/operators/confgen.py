@@ -27,6 +27,9 @@ class EnumerateStereoBlock(MoleculeBlock):
 
     Note: This block overrides the standard forward() method since it's a
     1:N transform (one input yields multiple outputs).
+
+    Example:
+        workflow.add(EnumerateStereoBlock())
     """
 
     def __init__(self) -> None:
@@ -96,6 +99,9 @@ class ConformerGenerationBlock(MoleculeBlock):
     Attributes:
         params: Dictionary of mutable parameters (numConfs, pruneRmsThresh,
             useRandomCoords).
+
+    Example:
+        workflow.add(ConformerGenerationBlock())
     """
 
     def __init__(self, **kwargs) -> None:

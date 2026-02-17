@@ -28,7 +28,7 @@ This gives Claude access to five tools:
 
 ### Virtual Screening with Optimization
 
-> I need build a ligand-based virtual screening workflow. I'm not sure if 2D or 3D is better. Can you optimize two workflows? The benchmark is in benchmark.csv with hits labeled in the active column and the query is in reference.sdf.
+> I need to build a ligand-based virtual screening workflow. I'm not sure if 2D or 3D is better. Can you optimize two workflows? The benchmark is in benchmark.csv with hits labeled in the active column and the query is in reference.sdf.
 
 ### 3D Conformer Generation
 

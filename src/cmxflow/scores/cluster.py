@@ -17,6 +17,10 @@ class ClusterScoreBlock(ScoreBlock):
         score = mean_similarity - (n_single / n_molecules)
 
     Both terms are in [0, 1], so the score range is [-1, 1].
+
+    Example:
+        workflow.add(RepresentativeClusterBlock())
+        workflow.add(ClusterScoreBlock())
     """
 
     def __init__(self) -> None:

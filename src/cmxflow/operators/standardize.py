@@ -29,11 +29,7 @@ class MoleculeStandardizeBlock(MoleculeBlock):
         **kwargs: Additional keyword arguments passed to set_inputs.
 
     Example:
-        >>> block = MoleculeStandardizeBlock()
-        >>> mol = Chem.MolFromSmiles("CCO.[Na+].[Cl-]")
-        >>> result = block._forward(mol)
-        >>> Chem.MolToSmiles(result)
-        'CCO'
+        workflow.add(MoleculeStandardizeBlock())
     """
 
     def __init__(self, canonicalize_tautomers: bool = False, **kwargs: str) -> None:

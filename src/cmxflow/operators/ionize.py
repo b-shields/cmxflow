@@ -27,6 +27,9 @@ class IonizeMoleculeBlock(MoleculeBlock):
         ph_min: Minimum pH for protonation. Defaults to 6.4.
         ph_max: Maximum pH for protonation. Defaults to 8.4.
         **kwargs: Additional keyword arguments passed to set_inputs.
+
+    Example:
+        workflow.add(IonizeMoleculeBlock())
     """
 
     def __init__(self, ph_min: float = 6.4, ph_max: float = 8.4, **kwargs: str) -> None:

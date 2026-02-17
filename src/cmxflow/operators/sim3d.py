@@ -47,7 +47,7 @@ class Molecule3DSimilarityBlock(MoleculeBlock):
         - tversky_beta: Tversky beta parameter (0.0–1.0).
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         """Initialize the 3D similarity block."""
         super().__init__(name="Molecule3DSimilarity", input_files=["query"])
 

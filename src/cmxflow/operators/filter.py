@@ -251,7 +251,7 @@ class PropertyFilterBlock(MoleculeBlock):
         ```
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         """Initialize the PropertyFilterBlock."""
         super().__init__(name="PropertyFilter", input_text=["filters"])
         self.set_inputs(**kwargs)

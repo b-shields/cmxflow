@@ -75,7 +75,7 @@ class MoleculeDockBlock(MoleculeBlock):
         - rigid: If True, only rigid-body optimization (no torsions).
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         """Initialize the molecular docking block."""
         super().__init__(name="MoleculeDock", input_files=["receptor"])
 

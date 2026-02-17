@@ -1,6 +1,7 @@
 """Block for molecule standardization and preprocessing."""
 
 import logging
+from typing import Any
 
 from rdkit import Chem
 from rdkit.Chem.MolStandardize.rdMolStandardize import (
@@ -33,7 +34,7 @@ class MoleculeStandardizeBlock(MoleculeBlock):
         ```
     """
 
-    def __init__(self, canonicalize_tautomers: bool = False, **kwargs) -> None:
+    def __init__(self, canonicalize_tautomers: bool = False, **kwargs: Any) -> None:
         """Initialize the MoleculeStandardizeBlock.
 
         Args:

@@ -49,7 +49,7 @@ class MoleculeAlignBlock(MoleculeBlock):
         - alignment_method: Alignment algorithm (crippen_o3a, mmff_o3a, mcs).
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         """Initialize the molecular alignment block."""
         super().__init__(name="MoleculeAlign", input_files=["query"])
 

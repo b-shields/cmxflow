@@ -1,6 +1,7 @@
 """Molecule clustering block using streaming leader algorithm."""
 
 import logging
+from typing import Any
 
 from rdkit import Chem, DataStructs
 from rdkit.Chem import rdFingerprintGenerator
@@ -41,7 +42,7 @@ class RepresentativeClusterBlock(MoleculeBlock):
             molecule.
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         """Initialize the representative cluster block."""
         super().__init__(name="RepresentativeCluster")
         self.mutable(

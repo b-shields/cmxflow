@@ -1,7 +1,7 @@
 """2D fingerprint similarity search block."""
 
 from pathlib import Path
-from typing import Callable, cast
+from typing import Any, Callable, cast
 
 from rdkit import Chem, DataStructs
 from rdkit.Chem import rdFingerprintGenerator, rdMolDescriptors
@@ -56,7 +56,7 @@ class MoleculeSimilarityBlock(MoleculeBlock):
         - nbits: Fingerprint bit length (512–4096).
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         """Initialize the similarity search block."""
         super().__init__(name="Molecule2DSimilarity", input_files=["queries"])
 

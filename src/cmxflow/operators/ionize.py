@@ -37,7 +37,7 @@ class IonizeMoleculeBlock(MoleculeBlock):
         - max_variants: Maximum number of ionization variants per molecule (1–128).
     """
 
-    def __init__(self, ph_min: float = 6.4, ph_max: float = 8.4, **kwargs) -> None:
+    def __init__(self, ph_min: float = 6.4, ph_max: float = 8.4, **kwargs: Any) -> None:
         """Initialize the IonizeMoleculeBlock.
 
         Args:

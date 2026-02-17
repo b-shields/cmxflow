@@ -27,7 +27,7 @@ class MoleculeDeduplicateBlock(MoleculeBlock):
         ```
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         """Initialize the de-duplication block."""
         super().__init__(name="MoleculeDeduplicate")
         self._seen: set[str] = set()

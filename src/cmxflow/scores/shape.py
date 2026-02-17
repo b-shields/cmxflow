@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 from rdkit import Chem
 from rdkit.Chem import rdShapeHelpers
@@ -36,7 +37,7 @@ class ShapeOverlayScoreBlock(ScoreBlock):
         })
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         """Initialize the shape overlay score block."""
         super().__init__(input_files=["query"])
         self.set_inputs(**kwargs)

@@ -44,9 +44,9 @@ class MoleculeDockBlock(MoleculeBlock):
     via the ``w_ec`` parameter to reward charge complementarity.
 
     Required Inputs:
-        receptor (file): Path to receptor PDB file.
+        - receptor (file): Path to receptor PDB file.
 
-    Mutable Parameters:
+    Parameters:
         w_gauss1: Vinardo Gaussian attractive term weight.
         w_repulsion: Vinardo repulsion term weight.
         w_hydrophobic: Vinardo hydrophobic term weight.
@@ -57,20 +57,24 @@ class MoleculeDockBlock(MoleculeBlock):
         rigid: If True, only rigid-body optimization (no torsions).
 
     Output Properties:
-        docking_initial_pose_score: Score before optimization.
-        docking_score: Final optimized score (Vinardo + EC adjustment).
-        docking_ec: Electrostatic complementarity value (0.0 when w_ec=0).
-        docking_converged: Whether optimization converged.
+        - docking_initial_pose_score: Score before optimization.
+        - docking_score: Final optimized score (Vinardo + EC adjustment).
+        - docking_ec: Electrostatic complementarity value (0.0 when w_ec=0).
+        - docking_converged: Whether optimization converged.
 
     Example:
         ```python
         workflow.add(
             MoleculeSourceBlock(),
+            EnumerateStereoBlock(),
+            ConformerGenerationBlock(),
+            MoleculeAlignBlock(),
             MoleculeDockBlock(),
             MoleculeSinkBlock()
         )
         workflow.set_required_input({
-            "2.file@receptor": "protein.pdb",
+            "3.file@query": "reference.sdf",
+            "4.file@receptor": "protein.pdb",
         })
         ```
     """

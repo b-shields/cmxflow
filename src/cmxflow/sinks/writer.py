@@ -13,13 +13,6 @@ from cmxflow.sinks.table import write_csv, write_parquet, write_smi
 def write_molecules(mols: Iterator[Chem.Mol], path: Path) -> None:
     """Write molecules to a file, dispatching based on extension.
 
-    Supported formats:
-        - .sdf: SDF files
-        - .sdf.gz: Gzipped SDF files
-        - .smi: SMILES files (space separated)
-        - .csv: CSV files with SMILES column
-        - .parquet: Parquet files with SMILES column
-
     Args:
         mols: Iterator of RDKit Mol objects to write.
         path: Path to the output file.
@@ -46,8 +39,8 @@ def write_molecules(mols: Iterator[Chem.Mol], path: Path) -> None:
 class MoleculeSinkBlock(SinkBlock):
     """Sink block for writing molecules to various file formats.
 
-    Supports SDF, gzipped SDF, SMILES, CSV, and Parquet files.
-    File format is automatically detected based on extension.
+    Supports .sdf, .sdf.gz, .mol2, .smi, .smi.gz, .csv, and .parquet
+    files. File format is automatically detected based on extension.
     """
 
     def __init__(self) -> None:

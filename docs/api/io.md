@@ -2,13 +2,7 @@
 
 Source and sink blocks handle reading and writing molecules in various file formats.
 
-## Sources
-
-::: cmxflow.sources.reader.MoleculeSourceBlock
-    options:
-      members: false
-
-### Supported Formats
+## Supported Formats
 
 | Extension | Format |
 |-----------|--------|
@@ -20,16 +14,14 @@ Source and sink blocks handle reading and writing molecules in various file form
 | `.csv` | CSV with SMILES column |
 | `.parquet` | Parquet with SMILES column |
 
-### Reader Function
+## Sources
 
-::: cmxflow.sources.reader.read_molecules
+::: cmxflow.sources.reader.MoleculeSourceBlock
+    options:
+      members: false
 
 ## Sinks
 
 ::: cmxflow.sinks.writer.MoleculeSinkBlock
     options:
       members: false
-
-### Writer Function
-
-::: cmxflow.sinks.writer.write_molecules

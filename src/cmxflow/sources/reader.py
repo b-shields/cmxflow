@@ -86,12 +86,8 @@ def read_molecules(path: Path, wrap: bool = True) -> Iterator[Chem.Mol | Mol]:
 class MoleculeSourceBlock(SourceBlock):
     """Source block for reading molecules from various file formats.
 
-    Supports SDF, gzipped SDF, Mol2, SMILES, CSV, and Parquet files.
-    File format is automatically detected based on extension.
-
-    Args:
-        wrap: If True (default), wrap molecules in Mol for property
-            preservation through pickling.
+    Supports .sdf, .sdf.gz, .mol2, .smi, .smi.gz, .csv, and .parquet
+    files. File format is automatically detected based on extension.
     """
 
     def __init__(self, wrap: bool = True) -> None:

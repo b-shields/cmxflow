@@ -39,12 +39,9 @@ class MoleculeDockBlock(MoleculeBlock):
     """MoleculeBlock for docking ligands into protein binding sites.
 
     Performs pose optimization using Vinardo scoring with configurable
-    parameters. Supports both rigid-body and flexible (torsional) docking.
+    parameter. Supports both rigid-body and flexible (torsional) docking.
     An optional electrostatic complementarity (EC) term can be enabled
     via the ``w_ec`` parameter to reward charge complementarity.
-
-    The block requires a receptor PDB file specified via input_files["receptor"].
-    Input molecules must have pre-generated 3D conformers.
 
     Required Inputs:
         receptor (file): Path to receptor PDB file.
@@ -66,10 +63,16 @@ class MoleculeDockBlock(MoleculeBlock):
         docking_converged: Whether optimization converged.
 
     Example:
-        workflow.add(MoleculeDockBlock())
+        ```python
+        workflow.add(
+            MoleculeSourceBlock(),
+            MoleculeDockBlock(),
+            MoleculeSinkBlock()
+        )
         workflow.set_required_input({
-            "1.file@receptor": "protein.pdb",
+            "2.file@receptor": "protein.pdb",
         })
+        ```
     """
 
     def __init__(self, **kwargs) -> None:

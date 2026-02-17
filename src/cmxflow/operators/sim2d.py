@@ -39,11 +39,13 @@ class MoleculeSimilarityBlock(MoleculeBlock):
         - most_similar_query: Name or index of the most similar query molecule.
 
     Example:
+        ```python
         workflow.add(
             MoleculeSourceBlock(),
             MoleculeSimilarityBlock(queries="reference_ligands.sdf"),
             MoleculeSinkBlock()
         )
+        ```
 
     Mutable Parameters:
         - fingerprint_type: Fingerprint algorithm (morgan, rdkit, maccs, atom_pair,

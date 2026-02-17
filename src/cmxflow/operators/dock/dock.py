@@ -65,7 +65,6 @@ class MoleculeDockBlock(MoleculeBlock):
         ```
 
     Mutable Parameters:
-        The following parameters are tuned during optimization:
         - w_gauss1: Vinardo Gaussian attractive term weight.
         - w_repulsion: Vinardo repulsion term weight.
         - w_hydrophobic: Vinardo hydrophobic term weight.

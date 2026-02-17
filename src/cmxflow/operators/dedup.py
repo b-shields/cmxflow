@@ -18,14 +18,16 @@ class MoleculeDeduplicateBlock(MoleculeBlock):
     parallelized because it relies on shared mutable state.
 
     Example:
+        ```python
         workflow.add(
             MoleculeSourceBlock(),
             MoleculeDeduplicateBlock(),
             MoleculeSinkBlock()
         )
+        ```
     """
 
-    def __init__(self, **kwargs: str) -> None:
+    def __init__(self, **kwargs) -> None:
         """Initialize the de-duplication block."""
         super().__init__(name="MoleculeDeduplicate")
         self._seen: set[str] = set()

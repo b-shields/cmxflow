@@ -170,12 +170,14 @@ class PropertyHeadBlock(PropertySelectBlock):
             sorted.
 
     Example:
+        ```python
         workflow.add(
             MoleculeSourceBlock(),
             RDKitBlock("rdkit.Chem.Descriptors.MolWt"),
             PropertyHeadBlock(property="MolWt", count="10"),
             MoleculeSinkBlock()
         )
+        ```
     """
 
     _ascending = False  # Descending: highest values first
@@ -197,12 +199,14 @@ class PropertyTailBlock(PropertySelectBlock):
             sorted.
 
     Example:
+        ```python
         workflow.add(
             MoleculeSourceBlock(),
             RDKitBlock("rdkit.Chem.Descriptors.MolWt"),
             PropertyTailBlock(property="MolWt", count="10"),
             MoleculeSinkBlock()
         )
+        ```
     """
 
     _ascending = True  # Ascending: lowest values first

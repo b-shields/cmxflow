@@ -241,12 +241,14 @@ class PropertyFilterBlock(MoleculeBlock):
             (e.g. ``"200<MolWt<500, logP>0"``).
 
     Example:
+        ```python
         workflow.add(
             MoleculeSourceBlock(),
             RDKitBlock("rdkit.Chem.Descriptors.MolWt"),
             PropertyFilterBlock(filters="200<MolWt<500"),
             MoleculeSinkBlock()
         )
+        ```
     """
 
     def __init__(self, **kwargs) -> None:
@@ -372,11 +374,13 @@ class SubstructureFilterBlock(MoleculeBlock):
             matches.
 
     Example:
+        ```python
         workflow.add(
             MoleculeSourceBlock(),
             SubstructureFilterBlock(query="PAINS BRENK", mode="remove"),
             MoleculeSinkBlock()
         )
+        ```
     """
 
     def __init__(self, **kwargs: Any) -> None:

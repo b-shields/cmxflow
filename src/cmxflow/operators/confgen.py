@@ -26,11 +26,13 @@ class EnumerateStereoBlock(MoleculeBlock):
     output stereoisomer.
 
     Example:
+        ```python
         workflow.add(
             MoleculeSourceBlock(),
             EnumerateStereoBlock(),
             MoleculeSinkBlock()
         )
+        ```
     """
 
     def __init__(self) -> None:
@@ -99,12 +101,14 @@ class ConformerGenerationBlock(MoleculeBlock):
     unspecified stereocenters.
 
     Example:
+        ```python
         workflow.add(
             MoleculeSourceBlock(),
             EnumerateStereoBlock(),
             ConformerGenerationBlock(),
             MoleculeSinkBlock()
         )
+        ```
 
     Mutable Parameters:
         - numConfs: Number of conformers to generate (1–100).

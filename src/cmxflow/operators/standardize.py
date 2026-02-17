@@ -24,14 +24,16 @@ class MoleculeStandardizeBlock(MoleculeBlock):
     canonicalizes tautomers.
 
     Example:
+        ```python
         workflow.add(
             MoleculeSourceBlock(),
             MoleculeStandardizeBlock(),
             MoleculeSinkBlock()
         )
+        ```
     """
 
-    def __init__(self, canonicalize_tautomers: bool = False, **kwargs: str) -> None:
+    def __init__(self, canonicalize_tautomers: bool = False, **kwargs) -> None:
         """Initialize the MoleculeStandardizeBlock.
 
         Args:

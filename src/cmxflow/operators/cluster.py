@@ -27,11 +27,13 @@ class RepresentativeClusterBlock(MoleculeBlock):
         - cluster_similarity: Tanimoto similarity to the cluster representative.
 
     Example:
+        ```python
         workflow.add(
             MoleculeSourceBlock(),
             RepresentativeClusterBlock(),
             MoleculeSinkBlock()
         )
+        ```
 
     Mutable Parameters:
         - threshold: Tanimoto similarity threshold for cluster assignment (0.05–0.95).

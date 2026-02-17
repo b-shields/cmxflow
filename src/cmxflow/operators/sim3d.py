@@ -31,6 +31,7 @@ class Molecule3DSimilarityBlock(MoleculeBlock):
         - similarity_3d_conf_id: Conformer ID that gave the best similarity.
 
     Example:
+        ```python
         workflow.add(
             MoleculeSourceBlock(),
             EnumerateStereoBlock(),
@@ -38,6 +39,7 @@ class Molecule3DSimilarityBlock(MoleculeBlock):
             Molecule3DSimilarityBlock(query="reference_3d.sdf"),
             MoleculeSinkBlock()
         )
+        ```
 
     Mutable Parameters:
         - method: Similarity method (shape_tanimoto, shape_tversky, usr, usrcat).

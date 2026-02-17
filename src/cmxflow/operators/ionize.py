@@ -24,18 +24,20 @@ class IonizeMoleculeBlock(MoleculeBlock):
     dimorphite_dl incorrectly protonates.
 
     Example:
+        ```python
         workflow.add(
             MoleculeSourceBlock(),
             IonizeMoleculeBlock(),
             MoleculeSinkBlock()
         )
+        ```
 
     Mutable Parameters:
         - precision: pH precision window around min/max (0.1–3.0).
         - max_variants: Maximum number of ionization variants per molecule (1–128).
     """
 
-    def __init__(self, ph_min: float = 6.4, ph_max: float = 8.4, **kwargs: str) -> None:
+    def __init__(self, ph_min: float = 6.4, ph_max: float = 8.4, **kwargs) -> None:
         """Initialize the IonizeMoleculeBlock.
 
         Args:

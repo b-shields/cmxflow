@@ -23,11 +23,13 @@ class RDKitBlock(MoleculeBlock):
             The key is the method name (or the explicit ``name`` argument).
 
     Example:
+        ```python
         workflow.add(
             MoleculeSourceBlock(),
             RDKitBlock("rdkit.Chem.Descriptors.MolWt"),
             MoleculeSinkBlock()
         )
+        ```
     """
 
     def __init__(

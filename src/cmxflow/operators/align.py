@@ -35,6 +35,7 @@ class MoleculeAlignBlock(MoleculeBlock):
         - alignment_mcs: MCS SMARTS pattern (only present when method is ``mcs``).
 
     Example:
+        ```python
         workflow.add(
             MoleculeSourceBlock(),
             EnumerateStereoBlock(),
@@ -42,6 +43,7 @@ class MoleculeAlignBlock(MoleculeBlock):
             MoleculeAlignBlock(query="reference.sdf"),
             MoleculeSinkBlock()
         )
+        ```
 
     Mutable Parameters:
         - alignment_method: Alignment algorithm (crippen_o3a, mmff_o3a, mcs).

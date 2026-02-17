@@ -624,7 +624,9 @@ def _run_workflow_impl(
                 "message": "Workflow executed successfully",
             }
             if ends_with_score:
+                score_block_name = type(state.workflow.blocks[-1]).__name__
                 response["score"] = result
+                response["message"] = f"Score: {result} ({score_block_name})"
             else:
                 response["output_file"] = str(output_path)
             return response
@@ -752,6 +754,8 @@ def run_workflow(
 
     Returns:
         Required inputs dict, execution status, or results.
+        ScoreBlock workflows include "score" (float) and the score block
+        name in the response message.
     """
     return _run_workflow_impl(
         action=action,

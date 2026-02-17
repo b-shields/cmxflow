@@ -10,23 +10,23 @@ All available blocks at a glance. See the [API Reference](api/operators.md) for 
 
 ## Operator Blocks
 
-| Block | Description | Key Params |
-|-------|-------------|------------|
-| `MoleculeStandardizeBlock` | Standardize molecules (metals, salts, charges, tautomers) | — |
-| `MoleculeDeduplicateBlock` | Remove duplicates by canonical SMILES | — |
-| `RDKitBlock` | Apply any RDKit method to molecules | `method` |
-| `SubstructureFilterBlock` | Filter by SMARTS or catalogs (PAINS, BRENK, NIH, ZINC) | `query`, `mode` |
-| `PropertyFilterBlock` | Filter molecules by property conditions | `filters` |
-| `PropertyHeadBlock` | Select top N molecules by property | `property`, `count` |
-| `PropertyTailBlock` | Select bottom N molecules by property | `property`, `count` |
-| `MoleculeSimilarityBlock` | 2D fingerprint similarity search | `fingerprint_type`, `similarity_metric`, `radius`, `nbits` |
-| `Molecule3DSimilarityBlock` | 3D shape similarity search | `method` |
-| `IonizeMoleculeBlock` | Generate pH-dependent ionization states | `precision`, `max_variants` |
-| `EnumerateStereoBlock` | Enumerate all stereoisomers | — |
-| `ConformerGenerationBlock` | Generate 3D conformers (ETKDGv3) | `numConfs`, `pruneRmsThresh` |
-| `MoleculeAlignBlock` | Align molecules to 3D reference | `alignment_method` |
-| `MoleculeDockBlock` | Dock into protein binding pocket | `w_gauss1`, `w_repulsion`, `box_size` |
-| `RepresentativeClusterBlock` | Leader clustering by fingerprint similarity | `threshold`, `scaffold` |
+| Block | Description | Inputs |
+|-------|-------------|----------------|
+| `MoleculeStandardizeBlock` | Standardize molecules |  |
+| `RDKitBlock` | Apply any RDKit method to molecules | `method` (text) |
+| `SubstructureFilterBlock` | Filter by SMARTS or catalogs (PAINS, BRENK, etc.) | `query` (text), `mode` (text) |
+| `PropertyFilterBlock` | Filter molecules by property | `filters` (text) |
+| `MoleculeDeduplicateBlock` | Remove duplicate molecules |  |
+| `PropertyHeadBlock` | Select top N molecules by property | `property` (text), `count` (text) |
+| `PropertyTailBlock` | Select bottom N molecules by property | `property` (text), `count` (text) |
+| `MoleculeSimilarityBlock` | 2D fingerprint similarity search | `queries` (file) |
+| `Molecule3DSimilarityBlock` | 3D similarity search | `query` (file) |
+| `IonizeMoleculeBlock` | Generate pH-dependent ionization states |  |
+| `EnumerateStereoBlock` | Enumerate all stereoisomers |  |
+| `ConformerGenerationBlock` | Generate 3D conformers |  |
+| `MoleculeAlignBlock` | Align molecules to 3D reference | `query` (file) |
+| `MoleculeDockBlock` | Dock into protein binding pocket | `receptor` (file) |
+| `RepresentativeClusterBlock` | Leader clustering |  |
 
 ## Sink Blocks
 
@@ -41,7 +41,7 @@ All available blocks at a glance. See the [API Reference](api/operators.md) for 
 | `EnrichmentScoreBlock` | Enrichment AUC for virtual screening | `target` (text) |
 | `AverageScoreBlock` | Mean of a molecular property | `property` (text) |
 | `ShapeOverlayScoreBlock` | Average 3D shape similarity | `query` (file) |
-| `ClusterScoreBlock` | Cluster quality from representative clustering | — |
+| `ClusterScoreBlock` | Cluster quality from representative clustering |  |
 
 ## Block Types
 

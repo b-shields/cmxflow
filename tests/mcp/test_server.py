@@ -514,6 +514,8 @@ class TestRunWorkflow:
 
         assert result["status"] == "success"
         assert result["score"] == 0.75
+        assert "EnrichmentScoreBlock" in result["message"]
+        assert "0.75" in result["message"]
         assert "output_file" not in result
 
 

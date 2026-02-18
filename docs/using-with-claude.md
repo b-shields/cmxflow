@@ -98,8 +98,7 @@ This gives Claude access to five tools:
 
   "The more that you read, the more things you will know." — Not a chemist, but relevant to screening libraries.
 
-  (A real one: "No one has yet produced a single example of the conversion of one species into another." — J.B.S. Haldane, though he'd
-  approve of finding similar molecules.)*
+  (A real one: "No one has yet produced a single example of the conversion of one species into another." — J.B.S. Haldane, though he'd approve of finding similar molecules.)*
 
 ⏺ cmxflow - run_workflow (MCP)(action: "set_inputs", inputs: {"1.file@queries":"queries.sdf"})
   ⎿  {
@@ -130,8 +129,7 @@ This gives Claude access to five tools:
 ⏺ Done. The workflow:
 
   1. Read molecules from screen.sdf.gz
-  2. Computed ECFP4 (Morgan, r=2, 2048 bits) Tanimoto similarity against all queries in queries.sdf, annotating each molecule with
-  max_similarity
+  2. Computed ECFP4 (Morgan, r=2, 2048 bits) Tanimoto similarity against all queries in queries.sdf, annotating each molecule with max_similarity
   3. Selected the top 100 by max_similarity
   4. Wrote results to similar.csv
 

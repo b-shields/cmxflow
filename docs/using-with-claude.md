@@ -20,28 +20,123 @@ This gives Claude access to five tools:
 | `manage_workflows` | Save, load, list, and remove workflows |
 | `view_structures` | Open 3D output in PyMOL |
 
-## Setting Block Inputs
-
-Blocks that require file paths or text configuration support two ways to set inputs:
-
-**Python API** — pass at instantiation as keyword arguments:
-```python
-MoleculeSimilarityBlock(queries="reference.sdf")
-SubstructureFilterBlock(query="PAINS BRENK", mode="remove")
-```
-
-**Agent / MCP** — Claude uses index-keyed strings via the `run_workflow set_inputs` action, because the workflow is already built and blocks cannot be reinstantiated mid-conversation:
-```
-"1.file@queries": "reference.sdf"
-"2.text@query":   "PAINS BRENK"
-```
-The key format is `"<block_index>.<type>@<name>"` where type is `file` or `text`. Block indices start at 0 (source block) and increment for each block added.
-
 ## Example Prompts
 
 ### Similarity Search
 
 > Read molecules from screen.sdf.gz, compute 2D similarity to queries.sdf using ECFP4 fingerprints, and write the top 100 to similar.csv.
+
+```
+⏺ Let me check available workflows and blocks first.
+
+⏺ cmxflow - manage_workflows (MCP)(action: "list")
+  ⎿  {
+       "status": "success",
+       "message": "Registered workflows:",
+     … +6 lines (ctrl+o to expand)
+
+⏺ cmxflow - build_workflow (MCP)(action: "list_blocks")
+  ⎿  {
+       "status": "success",
+       "blocks": {
+     … +37 lines (ctrl+o to expand)
+
+⏺ Now let me build the workflow:
+
+⏺ cmxflow - build_workflow (MCP)(action: "create")
+  ⎿  {
+       "status": "success",
+       "message": "Created new workflow with MoleculeSourceBlock",
+     … +3 lines (ctrl+o to expand)
+
+⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "MoleculeSimilarityBlock", block_config: {"fingerprint":"ECFP4"})
+  ⎿  {
+       "status": "success",
+       "message": "Added Molecule2DSimilarity",
+     … +8 lines (ctrl+o to expand)
+
+⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "PropertyHeadBlock", block_config:
+                                {"property":"max_similarity","count":100})
+  ⎿  {
+       "status": "success",
+       "message": "Added PropertyHead",
+     … +11 lines (ctrl+o to expand)
+
+⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "MoleculeSinkBlock")
+  ⎿  {
+       "status": "success",
+       "message": "Added MoleculeSink",
+     … +12 lines (ctrl+o to expand)
+
+⏺ cmxflow - build_workflow (MCP)(action: "validate")
+  ⎿  {
+       "status": "success",
+       "message": "Workflow is valid",
+     … +12 lines (ctrl+o to expand)
+
+⏺ Workflow is valid. Let me set the query file input, then execute.
+
+  ---
+  🔍 Top-100 ECFP4 Similarity Screener 🧪
+
+  ┌────────────────┐
+  │ MoleculeSource │  ← screen.sdf.gz
+  └────────────────┘
+           ↓
+  ┌──────────────────────┐   ┌─────────────────┐
+  │  Molecule2DSimilarity│ ← │ queries: [FILE] │  ← queries.sdf
+  │  ECFP4 / Tanimoto    │   └─────────────────┘
+  └──────────────────────┘
+           ↓
+  ┌──────────────────────┐
+  │  PropertyHead        │  top 100 by max_similarity
+  └──────────────────────┘
+           ↓
+  ┌────────────────┐
+  │  MoleculeSink  │  → similar.csv
+  └────────────────┘
+
+  "The more that you read, the more things you will know." — Not a chemist, but relevant to screening libraries.
+
+  (A real one: "No one has yet produced a single example of the conversion of one species into another." — J.B.S. Haldane, though he'd
+  approve of finding similar molecules.)*
+
+⏺ cmxflow - run_workflow (MCP)(action: "set_inputs", inputs: {"1.file@queries":"queries.sdf"})
+  ⎿  {
+       "status": "success",
+       "message": "Inputs set successfully"
+     }
+
+⏺ cmxflow - run_workflow (MCP)(action: "execute", input_file: "screen.sdf.gz", output_file: "similar.csv")
+  ⎿  {
+       "status": "error",
+       "message": "Execution failed: 'int' object has no attribute 'strip'"
+     }
+
+⏺ The count may need to be set as a text input. Let me fix that.
+
+⏺ cmxflow - run_workflow (MCP)(action: "set_inputs", inputs: {"2.text@property":"max_similarity","2.text@count":"100"})
+  ⎿  {
+       "status": "success",
+       "message": "Inputs set successfully"
+     }
+
+⏺ cmxflow - run_workflow (MCP)(action: "execute", input_file: "screen.sdf.gz", output_file: "similar.csv")
+  ⎿  {
+       "status": "success",
+       "message": "Workflow executed successfully",
+     … +2 lines (ctrl+o to expand)
+
+⏺ Done. The workflow:
+
+  1. Read molecules from screen.sdf.gz
+  2. Computed ECFP4 (Morgan, r=2, 2048 bits) Tanimoto similarity against all queries in queries.sdf, annotating each molecule with
+  max_similarity
+  3. Selected the top 100 by max_similarity
+  4. Wrote results to similar.csv
+
+  Would you like to save this workflow for future use?
+```
 
 ### Virtual Screening with Optimization
 

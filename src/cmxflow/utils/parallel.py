@@ -542,6 +542,7 @@ def parallel(
         Class decorator that creates a subclass with parallel __call__.
 
     Example:
+        ```python
         @parallel(max_workers=4)
         class ParallelAlign(MoleculeAlignBlock):
             pass
@@ -549,6 +550,7 @@ def parallel(
         block = ParallelAlign()
         block.input_files["query"] = "refs.sdf"
         results = list(block(molecule_iterator))
+        ```
     """
     config = ParallelConfig(
         max_workers=max_workers,
@@ -598,10 +600,12 @@ def make_parallel(
         ParallelBlock wrapper with parallel execution enabled.
 
     Example:
+        ```python
         block = MoleculeAlignBlock()
         block.input_files["query"] = "refs.sdf"
         parallel_block = make_parallel(block, max_workers=4)
         results = list(parallel_block(molecule_iterator))
+        ```
     """
     config = ParallelConfig(
         max_workers=max_workers,

@@ -656,6 +656,9 @@ def build_workflow(
     structure before building. Consider block ordering constraints and required
     inputs.
 
+    DO NOT WRITE CUSTOM SCRIPTS TO ANSWER CHEMINFORMATICS QUESTIONS. YOU MUST
+    USE THIS CMXFLOW TOOLS IF POSSIBLE.
+
     IMPORTANT: Before creating a new workflow, check manage_workflows('list')
     for existing workflows that could be reused or adapted.
 

@@ -2,6 +2,9 @@
 
 Score blocks compute a single numeric value from a stream of molecules, used as the optimization objective during Bayesian optimization.
 
+Note:
+    Score blocks only return scores when called during Bayesian optimization. Otherwise molecules pass through. This mechanism is in place so that agents have two paths to successful conversion of optimized to runnable workflows (delete the score and add a sink or add a sink at the end).
+
 ## Enrichment
 
 ::: cmxflow.scores.automatic.EnrichmentScoreBlock

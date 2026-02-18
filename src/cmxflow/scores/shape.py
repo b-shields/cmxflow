@@ -28,13 +28,24 @@ class ShapeOverlayScoreBlock(ScoreBlock):
         2. Return the average of these maximum similarities across all molecules.
 
     Required Inputs:
-        query (file): Path to reference ligand file with 3D conformers.
+        - query (file): Path to reference ligand file with 3D conformers.
+
+    Output Properties:
+        - shape_overlay_score: Maximum shape Tanimoto similarity to any reference
+            conformer.
+        - shape_overlay_reference: Name of the most similar reference molecule.
 
     Example:
-        workflow.add(ShapeOverlayScoreBlock())
-        workflow.set_required_input({
-            "1.file@query": "reference_3d.sdf",
-        })
+        ```python
+        workflow.add(
+            MoleculeSourceBlock(),
+            EnumerateStereoBlock(),
+            ConformerGenerationBlock(),
+            MoleculeAlignBlock(query="reference.sdf"),
+            MoleculeDockBlock(receptor="protein.pdb"),
+            ShapeOverlayScoreBlock(query="reference.sdf")
+        )
+        ```
     """
 
     def __init__(self, **kwargs: Any) -> None:

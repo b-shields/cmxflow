@@ -131,27 +131,33 @@ class EnrichmentScoreBlock(ScoreBlock):
     optimization metric. Non-numeric properties are automatically filtered.
 
     Required Inputs:
-        target (text): Name of the binary label column (1 = hit, 0 = non-hit).
+        - target (text): Name of the binary label column (1 = hit, 0 = non-hit).
+
+    Output Properties:
+        - workflow_score: Best enrichment score assigned during optimization.
 
     Example:
-        workflow.add(EnrichmentScoreBlock())
-        workflow.set_required_input({
-            "1.text@target": "is_active",
-        })
+        ```python
+        workflow.add(
+            MoleculeSourceBlock(),
+            MoleculeSimilarityBlock(queries="reference.csv"),
+            EnrichmentScoreBlock(target="active")
+        )
+        ```
     """
 
     def __init__(
         self,
         pooler: Callable[[Iterator[Any]], pd.DataFrame] = mol_to_dataframe,
         metric: Callable[[np.ndarray, np.ndarray], float] = enrichment_auc,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         """Initialize with scoring configuration.
 
         Args:
             pooler: Function to convert iterator to DataFrame.
             metric: Function to compute metric from scores and labels.
-            **kwargs (str): Keyword arguments passed to `set_inputs`.
+            **kwargs: Keyword arguments passed to `set_inputs`.
         """
         super().__init__(input_text=["target"])
         self.pooler = pooler
@@ -243,19 +249,24 @@ class AverageScoreBlock(ScoreBlock):
     property column.
 
     Required Inputs:
-        property (text): Name of the numeric property column to average.
+        - property (text): Name of the numeric property column to average.
 
     Example:
-        workflow.add(AverageScoreBlock())
-        workflow.set_required_input({
-            "1.text@property": "docking_score",
-        })
+        ```python
+        workflow.add(
+            MoleculeSourceBlock(),
+            EnumerateStereoBlock(),
+            ConformerGenerationBlock(),
+            MoleculeAlignBlock(query="reference.sdf"),
+            AverageScoreBlock(property="alignment_shape_similarity")
+        )
+        ```
     """
 
     def __init__(
         self,
         pooler: Callable[[Iterator[Any]], pd.DataFrame] = mol_to_dataframe,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         """Initialize with pooler configuration.
 

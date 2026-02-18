@@ -2,20 +2,22 @@
 
 Operator blocks transform molecules within a workflow. Most are 1:1 transforms; some (conformer generation, ionization, stereo enumeration) produce multiple outputs per input.
 
-## Reading the Reference
-
-Each block documents the following sections where applicable:
+Block properties to keep in mind when building workflows:
 
 - **Required Inputs** — file paths or text values that must be provided before
   running the workflow. Pass them as constructor keyword arguments in Python
   (`MyBlock(key="value")`), or via the MCP agent using `run_workflow set_inputs`.
-- **Output Properties** — named properties attached to each output molecule.
-  Downstream blocks (filters, selectors, score blocks) can reference these by name.
+- **Output Properties** — named properties attached to each output molecule when
+  the block is included. Downstream blocks (filters, selectors, score blocks)
+  can reference these by name.
 - **Mutable Parameters** — numeric or categorical settings tuned automatically
   by Bayesian optimization. Set defaults at construction; the optimizer adjusts
   them during `optimize_workflow`.
-- **Example** — a minimal end-to-end snippet showing the block in a workflow
-  with a source and sink.
+
+Note:
+    By convention the constructors only explicitely contain extra keyword
+    arguments. However, all ***required inputs*** and ***mutable parameters***
+    can also be passed.
 
 ## Standardization
 

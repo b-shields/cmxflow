@@ -88,6 +88,14 @@ class MoleculeSourceBlock(SourceBlock):
 
     Supports .sdf, .sdf.gz, .mol2, .smi, .smi.gz, .csv, and .parquet
     files. File format is automatically detected based on extension.
+
+    Example:
+        ```python
+        workflow.add(
+            MoleculeSourceBlock(),
+            MoleculeSinkBlock(),
+        )
+        ```
     """
 
     def __init__(self, wrap: bool = True) -> None:

@@ -19,8 +19,13 @@ class ClusterScoreBlock(ScoreBlock):
     Both terms are in [0, 1], so the score range is [-1, 1].
 
     Example:
-        workflow.add(RepresentativeClusterBlock())
-        workflow.add(ClusterScoreBlock())
+        ```python
+        workflow.add(
+            MoleculeSourceBlock(),
+            RepresentativeClusterBlock(),
+            ClusterScoreBlock(),
+        )
+        ```
     """
 
     def __init__(self) -> None:

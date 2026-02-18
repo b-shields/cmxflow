@@ -27,7 +27,3 @@ Base classes, workflow orchestration, and parameter types.
 ::: cmxflow.parameter.Integer
 
 ::: cmxflow.parameter.Categorical
-
-## Molecule Wrapper
-
-::: cmxflow.cmxmol.Mol

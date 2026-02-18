@@ -36,7 +36,8 @@ class Molecule3DSimilarityBlock(MoleculeBlock):
             MoleculeSourceBlock(),
             EnumerateStereoBlock(),
             ConformerGenerationBlock(),
-            Molecule3DSimilarityBlock(query="reference_3d.sdf"),
+            MoleculeAlignBlock(query="reference.sdf"),
+            Molecule3DSimilarityBlock(query="reference.sdf"),
             MoleculeSinkBlock()
         )
         ```

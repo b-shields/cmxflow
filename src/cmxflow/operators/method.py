@@ -19,7 +19,7 @@ class RDKitBlock(MoleculeBlock):
     molecule is filtered out.
 
     Output Properties:
-        - <method_name>: Scalar result stored as a molecule property.
+        - ``<method_name>``: Scalar result stored as a molecule property.
             The key is the method name (or the explicit ``name`` argument).
 
     Example:

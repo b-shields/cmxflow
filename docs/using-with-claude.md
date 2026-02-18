@@ -157,8 +157,7 @@ This gives Claude access to five tools:
 
 ⏺ There's an existing prep workflow but not what we need. Let me build the 2D similarity workflow first, then we'll do 3D after.
 
-  For virtual screening benchmarking, we'll use EnrichmentScoreBlock which should be maximized. Does that sound right to you before I
-  proceed?
+  For virtual screening benchmarking, we'll use EnrichmentScoreBlock which should be maximized. Does that sound right to you before I proceed?
 
   Let me build the 2D workflow now.
 
@@ -238,8 +237,7 @@ This gives Claude access to five tools:
        "message": "Optimization started with 30 trials",
      … +3 lines (ctrl+o to expand)
 
-⏺ The 2D optimization is running (30 trials, maximizing enrichment AUC). I'll check the status when you're ready — just let me know when
-  you'd like to see results, or I can check progress at any point.
+⏺ The 2D optimization is running (30 trials, maximizing enrichment AUC). I'll check the status when you're ready — just let me know when you'd like to see results, or I can check progress at any point.
 
   While we wait, shall I go ahead and build the 3D workflow so it's ready to optimize next?
 
@@ -269,8 +267,7 @@ This gives Claude access to five tools:
   │ nbits             │ 738                 │
   └───────────────────┴─────────────────────┘
 
-  Interesting — topological torsion fingerprints with cosine similarity came out on top over the more common Morgan/Tanimoto combo. A score
-  of 0.65 is decent but leaves room for improvement.
+  Interesting — topological torsion fingerprints with cosine similarity came out on top over the more common Morgan/Tanimoto combo. A score of 0.65 is decent but leaves room for improvement.
 
   Want me to set the best parameters and save this workflow, then build and optimize the 3D workflow to see if we can do better?
 
@@ -357,8 +354,7 @@ This gives Claude access to five tools:
        "message": "Inputs set successfully"
      }
 
-⏺ Workflow is validated and inputs are set. Ready to optimize. The 3D workflow will be slower due to conformer generation, so 30 trials will
-   take longer. Shall I start with 30 trials again?
+⏺ Workflow is validated and inputs are set. Ready to optimize. The 3D workflow will be slower due to conformer generation, so 30 trials will take longer. Shall I start with 30 trials again?
 
   ---
   🧬 3D Shape-Based Virtual Screening Optimization 🧬
@@ -378,8 +374,7 @@ This gives Claude access to five tools:
        "message": "Optimization started with 30 trials",
      … +3 lines (ctrl+o to expand)
 
-⏺ The 3D optimization is running. This one will take longer due to conformer generation and 3D alignment at each trial. I'll check results
-  when you ask — just let me know!
+⏺ The 3D optimization is running. This one will take longer due to conformer generation and 3D alignment at each trial. I'll check results when you ask — just let me know!
 
 ✻ Cooked for 57s
 
@@ -415,8 +410,7 @@ This gives Claude access to five tools:
   │ tversky_beta     │ 0.229         │
   └──────────────────┴───────────────┘
 
-  Interesting that it's gravitating toward Tversky similarity (asymmetric) rather than standard shape Tanimoto. 13 trials left — it may
-  still improve. Let me know when you'd like to check again.
+  Interesting that it's gravitating toward Tversky similarity (asymmetric) rather than standard shape Tanimoto. 13 trials left — it may still improve. Let me know when you'd like to check again.
 
 ❯ check again
   ⎿  ⧉ Selected 1 lines from ../cmxflow/docs/using-with-claude.md in Visual Studio Code
@@ -449,9 +443,7 @@ This gives Claude access to five tools:
   │ tversky_beta     │ 0.229         │
   └──────────────────┴───────────────┘
 
-  Summary: Both 2D and 3D workflows achieved the same enrichment (0.65). The 2D workflow (topological torsion + cosine) is significantly
-  faster since it skips conformer generation and alignment. For this target, the 2D approach gives you the same performance at a fraction of
-   the computational cost.
+  Summary: Both 2D and 3D workflows achieved the same enrichment (0.65). The 2D workflow (topological torsion + cosine) is significantly faster since it skips conformer generation and alignment. For this target, the 2D approach gives you the same performance at a fraction of the computational cost.
 
   Would you like me to:
   1. Save the 3D workflow as well?

@@ -13,13 +13,8 @@ cmxflow is designed to work both as:
 
 ## Installation
 
-### Base environment
-
 ```bash
-conda config --set solver libmamba
-conda env create -f conda.yml
-conda activate cmxflow
-poetry install
+pip install cmxflow
 ```
 
 ### MCP server (for use with Claude)

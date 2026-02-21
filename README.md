@@ -91,17 +91,8 @@ The tutorial uses the ABL1 kinase benchmark from the wonderful [DUD-E](http://du
 
 ## Installation 🛠️
 
-Development install:
-
 ```bash
-# Build base environment
-conda config --set solver libmamba
-conda env create -f conda.yml
-conda activate cmxflow
-
-# Install cmxflow
-poetry install
-pre-commit install
+pip install cmxflow
 ```
 
 ### MCP Server
@@ -143,6 +134,8 @@ Contributions are welcome! This is a side project, so reviews may take some time
 ### Development Setup
 
 ```bash
+conda config --set solver libmamba
+conda env create -f conda.yml
 conda activate cmxflow
 poetry install
 pre-commit install  # Ensures formatting/linting on commit

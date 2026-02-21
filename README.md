@@ -154,6 +154,18 @@ pre-commit install  # Ensures formatting/linting on commit
 pytest tests/
 ```
 
+## Releases
+
+Releases are published to PyPI automatically when a pull request is merged into `main` with a version bump tag in the PR title:
+
+| Tag in PR title | Version bump | Example |
+|---|---|---|
+| `[patch]` | Bug fixes, docs (0.1.0 → 0.1.1) | `Fix conformer bug [patch]` |
+| `[minor]` | New features, backwards-compatible (0.1.0 → 0.2.0) | `Add ProtonationBlock [minor]` |
+| `[major]` | Breaking changes (0.1.0 → 1.0.0) | `Redesign block API [major]` |
+
+PRs without a tag merge normally without triggering a release.
+
 ## License 📄
 
 MIT

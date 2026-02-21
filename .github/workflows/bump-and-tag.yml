@@ -55,7 +55,10 @@ jobs:
           git commit -m "chore: bump version to ${{ steps.version.outputs.value }} [skip ci]"
           git push
 
-      - name: Create and push tag
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.BUMP_TOKEN }}
         run: |
-          git tag "v${{ steps.version.outputs.value }}"
-          git push origin "v${{ steps.version.outputs.value }}"
+          gh release create "v${{ steps.version.outputs.value }}" \
+            --title "v${{ steps.version.outputs.value }}" \
+            --generate-notes

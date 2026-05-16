@@ -3,7 +3,7 @@
   "name": "io.github.b-shields/cmxflow",
   "title": "cmxflow",
   "description": "Composable, tunable cheminformatics workflows: prepare ligands, cluster, virtual screens, and more.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "websiteUrl": "https://b-shields.github.io/cmxflow/",
   "repository": {
     "url": "https://github.com/b-shields/cmxflow",
@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "identifier": "cmxflow",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "transport": { "type": "stdio" },
       "runtimeHint": "uvx",
       "runtimeArguments": [

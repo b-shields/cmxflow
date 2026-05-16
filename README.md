@@ -1,5 +1,7 @@
 # cmxflow 🧪
 
+<!-- mcp-name: io.github.b-shields/cmxflow -->
+
 [![Docs](https://img.shields.io/badge/docs-b--shields.github.io%2Fcmxflow-teal)](https://b-shields.github.io/cmxflow/)
 [![CI](https://github.com/b-shields/cmxflow/actions/workflows/ci.yml/badge.svg)](https://github.com/b-shields/cmxflow/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/b-shields/cmxflow/branch/main/graph/badge.svg)](https://codecov.io/gh/b-shields/cmxflow)
@@ -113,51 +115,9 @@ conda install -c conda-forge pymol-open-source
 
 All other functionality works without PyMOL.
 
-## Contributing 🤝
+## Contributing & Releases 🤝
 
-Contributions are welcome! This is a side project, so reviews may take some time, but PRs are appreciated.
-
-### Before Submitting
-
-1. **Open an issue first** for significant changes to discuss the approach
-2. **Fork the repo** and create a feature branch from `main`
-3. **Follow the code style** - run `mypy`, `black`, and `ruff` before committing (or install provided precommit hooks)
-
-### PR Requirements
-
-- **Clear description** of the bug fixed or feature added
-- **Minimal reproducible example** demonstrating the change
-- **Tests** covering new functionality (`pytest`)
-- **Type hints** for all new code
-- **Docstrings** following Google conventions
-
-### Development Setup
-
-```bash
-conda config --set solver libmamba
-conda env create -f conda.yml
-conda activate cmxflow
-poetry install
-pre-commit install  # Ensures formatting/linting on commit
-```
-
-### Running Tests
-
-```bash
-pytest tests/
-```
-
-## Releases
-
-Releases are published to PyPI automatically when a pull request is merged into `main` with a version bump tag in the PR title:
-
-| Tag in PR title | Version bump | Example |
-|---|---|---|
-| `[patch]` | Bug fixes, docs (0.1.0 → 0.1.1) | `Fix conformer bug [patch]` |
-| `[minor]` | New features, backwards-compatible (0.1.0 → 0.2.0) | `Add ProtonationBlock [minor]` |
-| `[major]` | Breaking changes (0.1.0 → 1.0.0) | `Redesign block API [major]` |
-
-PRs without a tag merge normally without triggering a release.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and PR requirements, and [RELEASING.md](RELEASING.md) for the PyPI and MCP Registry release flow.
 
 ## License 📄
 

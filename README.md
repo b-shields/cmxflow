@@ -9,116 +9,115 @@
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Composable cheminformatics workflows.
+**Build cheminformatics pipelines with composable blocks. Tune end-to-end with Bayesian Optimization. Or ask an LLM agent to do it.**
 
-## Overview 🔬
+## Quick examples
 
-**cmxflow** is a Python framework for building and optimizing cheminformatics pipelines. Chain together molecular operations as blocks, then let Bayesian optimization find the best parameters for your task.
+### Prepare ligands for docking
 
-**[Read the full documentation &rarr;](https://b-shields.github.io/cmxflow/)**
+```python
+from cmxflow import Workflow
+from cmxflow.sources import MoleculeSourceBlock
+from cmxflow.operators import (
+    MoleculeStandardizeBlock,
+    IonizeMoleculeBlock,
+    EnumerateStereoBlock,
+    ConformerGenerationBlock,
+)
+from cmxflow.sinks import MoleculeSinkBlock
 
-### Two Usage Modes ⚗️
-
-cmxflow is designed to work both as:
-
-1. **An Agentic Tool** - via MCP (Model Context Protocol) server, allowing LLM agents to build and optimize workflows conversationally
-2. **A Programmatic API** - for direct Python usage in scripts and notebooks
-
-## Block Types 🧬
-
-Workflows are built from four types of blocks:
-
-| Block Type | Purpose |
-|------------|---------|
-| **SourceBlock** | Read molecules from files (SDF, SMILES, CSV, Parquet) |
-| **Block** | Transform molecules (1:1 or N:M) |
-| **SinkBlock** | Write molecules to files |
-| **ScoreBlock** | Compute optimization objective |
-
-### Example Operators 💊
-
-| Block | Purpose |
-|-------|---------|
-| `MoleculeStandardizeBlock` | Standardize molecules (metals, salts, charges, tautomers) |
-| `MoleculeDeduplicateBlock` | Remove duplicate molecules by canonical SMILES |
-| `RDKitBlock` | Apply any RDKit method (descriptors, transformations) |
-| `SubstructureFilterBlock` | Filter by SMARTS patterns or catalogs (PAINS, BRENK, etc.) |
-| `PropertyFilterBlock` | Filter molecules by property conditions |
-| `PropertyHeadBlock` | Select top N molecules by property |
-| `PropertyTailBlock` | Select bottom N molecules by property |
-| `MoleculeSimilarityBlock` | Compute 2D fingerprint similarity |
-| `Molecule3DSimilarityBlock` | Compute 3D shape similarity |
-| `IonizeMoleculeBlock` | Generate pH-dependent ionization states |
-| `EnumerateStereoBlock` | Enumerate all stereoisomers |
-| `ConformerGenerationBlock` | Generate 3D conformers (ETKDGv3) |
-| `MoleculeAlignBlock` | Align molecules to 3D reference |
-| `MoleculeDockBlock` | Dock into protein binding pocket |
-| `RepresentativeClusterBlock` | Cluster molecules by fingerprint similarity (leader algorithm) |
-
-### Example Score Blocks 📊
-
-| ScoreBlock | Purpose |
-|------------|---------|
-| `EnrichmentScoreBlock` | Enrichment AUC for virtual screening |
-| `AverageScoreBlock` | Mean of a molecular property |
-| `ShapeOverlayScoreBlock` | Average 3D shape similarity |
-| `ClusterScoreBlock` | Cluster quality from representative clustering |
-
-## Features 🚀
-
-- **Composable Pipelines** - Chain blocks with `workflow.add()`
-- **Bayesian Optimization** - Find optimal parameters via Optuna
-- **Parallel Execution** - `make_parallel()` for compute-intensive blocks
-- **Mutable Parameters** - Categorical, Integer, and Continuous types
-- **Serialization** - `save_workflow()` and `load_workflow()` for persistence
-- **MCP Server** - Agentic workflow building via `build_workflow`, `run_workflow`, `optimize_workflow`
-
-## Environment Variables 🔧
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CMXFLOW_WORKER_TIMEOUT` | `30` | Seconds to wait for a single parallel worker before treating it as failed. Set to `0` to disable the timeout. Applies to all `make_parallel()` and `@parallel` blocks. |
-
-## Getting Started 📖
-
-See [`examples/basic_usage.ipynb`](examples/basic_usage.ipynb) for a complete tutorial covering:
-
-- Building your first workflow
-- 2D similarity search
-- Mutable parameters and optimization
-- Parallel execution
-- Analyzing results with Optuna
-
-The tutorial uses the ABL1 kinase benchmark from the wonderful [DUD-E](http://dude.docking.org/) database.
-
-## Installation 🛠️
-
-```bash
-pip install cmxflow
+# Standardize → ionize (pH 6.4–8.4) → enumerate stereo → generate 3D conformers
+workflow = Workflow()
+workflow.add(
+    MoleculeSourceBlock(),
+    MoleculeStandardizeBlock(),
+    IonizeMoleculeBlock(),
+    EnumerateStereoBlock(),
+    ConformerGenerationBlock(),
+    MoleculeSinkBlock(),
+)
+workflow("library.smi", "prepared.sdf")
 ```
 
-### MCP Server
+### Tune a virtual screen
 
-To use cmxflow as an agentic tool with Claude Code:
+```python
+from cmxflow import Workflow
+from cmxflow.sources import MoleculeSourceBlock
+from cmxflow.operators import MoleculeSimilarityBlock
+from cmxflow.scores import EnrichmentScoreBlock
+from cmxflow.opt import Optimizer
+
+# Rank a library by 2D similarity to a known active, then tune the
+# fingerprint end-to-end to maximize enrichment AUC.
+# Data: ABL1 kinase, DUD-E benchmark.
+workflow = Workflow()
+workflow.add(
+    MoleculeSourceBlock(),
+    MoleculeSimilarityBlock(queries="crystal_ligand.sdf"),
+    EnrichmentScoreBlock(target="active"),
+)
+
+opt = Optimizer(workflow, "benchmark.csv")
+opt.optimize(n_trials=30, direction="maximize")
+
+print(f"Best enrichment AUC: {opt.best_score:.3f}")
+print(opt.best_params)
+# Best enrichment AUC: 0.837
+# {'fingerprint_type': 'morgan', 'similarity_metric': 'cosine', 'radius': 2, 'nbits': 1615}
+```
+
+The four fingerprint parameters above are searched automatically — every block exposes its mutable parameters to the optimizer.
+
+### Or build it conversationally via an LLM agent
 
 ```bash
 claude mcp add cmxflow -- cmxflow-mcp
 ```
 
-### Optional Dependencies
+> *"How many of the molecules in library.csv pass Lipinski's rules?"*
 
-**PyMOL** — Required only for 3D structure visualization (`view_structures` MCP tool). Install via conda:
+> *"I need to build a ligand-based virtual screening workflow. I'm not sure if 2D or 3D is better. Can you optimize two workflows?"*
+
+> *"Dock the molecules in hits.csv against receptor.pdb with crystal_ligand.sdf as a reference."*
+
+The agent can build, run, *and* optimize workflows. See [Using with Claude](https://b-shields.github.io/cmxflow/using-with-claude/) for full transcripts.
+
+## What's in the box
+
+- 15+ blocks for sourcing, transforming, filtering, clustering, scoring, and docking molecules
+- Bayesian optimization of pipeline parameters via [Optuna](https://optuna.org/)
+- Parallel execution for compute-heavy blocks (conformer generation, docking)
+- Workflow serialization for save / load / reuse
+- An MCP server with five tools: `build_workflow`, `run_workflow`, `optimize_workflow`, `manage_workflows`, `view_structures`
+
+## Install
+
+```bash
+pip install cmxflow
+```
+
+### MCP server
+
+```bash
+claude mcp add cmxflow -- cmxflow-mcp
+```
+
+### Optional: PyMOL
+
+Required only for the `view_structures` MCP tool (3D visualization):
 
 ```bash
 conda install -c conda-forge pymol-open-source
 ```
 
-All other functionality works without PyMOL.
+## Documentation
 
-## Contributing & Releases 🤝
+- [Docs site](https://b-shields.github.io/cmxflow/)
+- [Block catalog](https://b-shields.github.io/cmxflow/blocks/)
+- [Using with Claude](https://b-shields.github.io/cmxflow/using-with-claude/) — agent transcripts
+- [`examples/basic_usage.ipynb`](examples/basic_usage.ipynb) — full tutorial
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and PR requirements, and [RELEASING.md](RELEASING.md) for the PyPI and MCP Registry release flow.
+## Project
 
-## License 📄
-
-MIT
+MIT licensed. See [CONTRIBUTING.md](CONTRIBUTING.md) and [RELEASING.md](RELEASING.md).

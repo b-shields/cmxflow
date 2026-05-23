@@ -8,17 +8,27 @@ from rdkit import Chem
 
 
 def read_mol2(path: Path) -> Iterator[Chem.Mol]:
-    """Read molecule from a Mol2 file.
+    """Read molecules from a multi-molecule Mol2 file.
 
     Args:
         path: Path to the Mol2 file.
 
     Yields:
-        RDKit Mol object.
+        RDKit Mol objects for each valid molecule in the file.
     """
-
-    mol = Chem.MolFromMol2File(str(path))
-    yield mol
+    block: list[str] = []
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith("@<TRIPOS>MOLECULE") and block:
+                mol = Chem.MolFromMol2Block("".join(block), removeHs=False)
+                if mol is not None:
+                    yield mol
+                block = []
+            block.append(line)
+    if block:
+        mol = Chem.MolFromMol2Block("".join(block), removeHs=False)
+        if mol is not None:
+            yield mol
 
 
 def read_sdf(path: Path) -> Iterator[Chem.Mol]:

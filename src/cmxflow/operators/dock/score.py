@@ -130,7 +130,12 @@ AROMATIC_CARBON_RADIUS = 1.9
 DEFAULT_RADIUS = 1.7
 
 # SMARTS patterns for atom classification
-HYDROPHOBIC_SMARTS = "[#6,#9,#14,#15,#16,#17,#35,#53]"
+# Vinardo hydrophobic atom definition:
+#   - Aromatic C: always hydrophobic (aromatic ring carbons)
+#   - Aliphatic C: hydrophobic only when not adjacent to polar atoms (N, O, S)
+#   - Halogens (F, Cl, Br, I): always hydrophobic
+# This matches smina/AutoDock Vina XS atom typing (C_H = hydrophobic carbon).
+HYDROPHOBIC_SMARTS = "[$([#6;a]),$([#6;A;!$([#6]~[#7,#8,#16])]),$([#9,#17,#35,#53])]"
 HBOND_DONOR_SMARTS = (
     "[$([N;!H0;v3]),$([N;!H0;+1;v4]),$([O,S;H1;+0]),$([n;H1;+0]),$([n;!H0;+1])"
     ",Li+1,Na+1,K+1,Cs+1,Mg+2,Ca+2,Mn+2,Zn+2]"
@@ -200,7 +205,9 @@ def get_smarts_matches(mol: Chem.Mol, smarts: str) -> NDArray[np.bool_]:
         logger.warning(f"Invalid SMARTS pattern: {smarts}")
         return mask
 
-    matches = mol.GetSubstructMatches(pattern)
+    # maxMatches defaults to 1000 in RDKit, which silently truncates results
+    # for large molecules (e.g. a protein with >1000 hydrophobic atoms).
+    matches = mol.GetSubstructMatches(pattern, maxMatches=mol.GetNumAtoms())
     for match in matches:
         for atom_idx in match:
             mask[atom_idx] = True

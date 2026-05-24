@@ -82,7 +82,7 @@ DEFAULT_RADIUS = 1.7
 # SMARTS patterns for atom classification
 HYDROPHOBIC_SMARTS = "[#6,#9,#14,#15,#16,#17,#35,#53]"
 HBOND_DONOR_SMARTS = (
-    "[$([N;!H0;v3]),$([N;!H0;+1;v4]),$([O,S;H1;+0]),$([n;H1;+0])"
+    "[$([N;!H0;v3]),$([N;!H0;+1;v4]),$([O,S;H1;+0]),$([n;H1;+0]),$([n;!H0;+1])"
     ",Li+1,Na+1,K+1,Cs+1,Mg+2,Ca+2,Mn+2,Zn+2]"
 )
 HBOND_ACCEPTOR_SMARTS = (

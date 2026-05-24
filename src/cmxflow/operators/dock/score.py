@@ -11,7 +11,7 @@ Reference:
 
 import logging
 from dataclasses import dataclass
-from typing import Protocol, TypeAlias
+from typing import Literal, Protocol, TypeAlias, overload
 
 import numpy as np
 from numpy.typing import NDArray
@@ -58,6 +58,56 @@ class VinardoParams:
     hydro_good: float = 0.0
     hydro_bad: float = 2.5
     hbond_good: float = -0.6
+
+
+@dataclass
+class ScoreComponents:
+    """Per-term raw sums and weights from a scoring evaluation.
+
+    Raw values are the unweighted sums over all atom pairs; weighted
+    properties multiply each raw sum by its corresponding weight.
+    The ``total`` property equals the weighted sum across all terms,
+    which should match the score returned by the scoring function.
+
+    Attributes:
+        gauss1_raw: Unweighted sum of Gaussian attractive term.
+        repulsion_raw: Unweighted sum of repulsion term.
+        hydrophobic_raw: Unweighted sum of hydrophobic term.
+        hbond_raw: Unweighted sum of H-bond term.
+        w_gauss1: Weight applied to gauss1 (from scoring params).
+        w_repulsion: Weight applied to repulsion.
+        w_hydrophobic: Weight applied to hydrophobic.
+        w_hbond: Weight applied to hbond.
+    """
+
+    gauss1_raw: float
+    repulsion_raw: float
+    hydrophobic_raw: float
+    hbond_raw: float
+    w_gauss1: float
+    w_repulsion: float
+    w_hydrophobic: float
+    w_hbond: float
+
+    @property
+    def gauss1(self) -> float:
+        return self.w_gauss1 * self.gauss1_raw
+
+    @property
+    def repulsion(self) -> float:
+        return self.w_repulsion * self.repulsion_raw
+
+    @property
+    def hydrophobic(self) -> float:
+        return self.w_hydrophobic * self.hydrophobic_raw
+
+    @property
+    def hbond(self) -> float:
+        return self.w_hbond * self.hbond_raw
+
+    @property
+    def total(self) -> float:
+        return self.gauss1 + self.repulsion + self.hydrophobic + self.hbond
 
 
 # =============================================================================
@@ -351,14 +401,37 @@ def hbond_term(
 # =============================================================================
 
 
+@overload
+def vinardo_score(
+    ligand_mol: Chem.Mol,
+    protein_mol: Chem.Mol,
+    ligand_conf_id: int = ...,
+    protein_conf_id: int = ...,
+    params: VinardoParams | None = ...,
+    return_components: Literal[False] = ...,
+) -> float: ...
+
+
+@overload
+def vinardo_score(
+    ligand_mol: Chem.Mol,
+    protein_mol: Chem.Mol,
+    ligand_conf_id: int = ...,
+    protein_conf_id: int = ...,
+    params: VinardoParams | None = ...,
+    return_components: Literal[True] = ...,
+) -> tuple[float, ScoreComponents]: ...
+
+
 def vinardo_score(
     ligand_mol: Chem.Mol,
     protein_mol: Chem.Mol,
     ligand_conf_id: int = 0,
     protein_conf_id: int = 0,
     params: VinardoParams | None = None,
-) -> float:
-    """Compute Vinardo docking score for ligand-protein complex.
+    return_components: bool = False,
+) -> float | tuple[float, ScoreComponents]:
+    """Compute docking score for ligand-protein complex.
 
     Score = w_gauss1 * sum(Gauss1) + w_rep * sum(Repulsion)
           + w_hydro * sum(Hydrophobic) + w_hbond * sum(HBond)
@@ -371,9 +444,12 @@ def vinardo_score(
         ligand_conf_id: Ligand conformer ID to use.
         protein_conf_id: Protein conformer ID to use.
         params: Vinardo parameters. If None, uses defaults.
+        return_components: If True, return (score, ScoreComponents) instead
+            of just the score.
 
     Returns:
-        Vinardo docking score (kcal/mol-like units).
+        Docking score (kcal/mol-like units), or a (score, ScoreComponents)
+        tuple when return_components=True.
 
     Raises:
         ValueError: If molecules lack 3D conformers.
@@ -409,34 +485,76 @@ def vinardo_score(
         protein_typing.radii,
     )
 
-    # Compute interaction terms
-    gauss1 = gauss1_term(distances, params.gauss1_offset, params.gauss1_width)
-    repulsion = repulsion_term(distances)
-    hydrophobic = hydrophobic_term(
-        distances,
-        ligand_typing.is_hydrophobic,
-        protein_typing.is_hydrophobic,
-        params.hydro_good,
-        params.hydro_bad,
+    # Compute interaction terms and capture raw sums
+    g1_raw = float(
+        np.sum(gauss1_term(distances, params.gauss1_offset, params.gauss1_width))
     )
-    hbond = hbond_term(
-        distances,
-        ligand_typing.is_hbond_donor,
-        ligand_typing.is_hbond_acceptor,
-        protein_typing.is_hbond_donor,
-        protein_typing.is_hbond_acceptor,
-        params.hbond_good,
+    rep_raw = float(np.sum(repulsion_term(distances)))
+    hydro_raw = float(
+        np.sum(
+            hydrophobic_term(
+                distances,
+                ligand_typing.is_hydrophobic,
+                protein_typing.is_hydrophobic,
+                params.hydro_good,
+                params.hydro_bad,
+            )
+        )
+    )
+    hb_raw = float(
+        np.sum(
+            hbond_term(
+                distances,
+                ligand_typing.is_hbond_donor,
+                ligand_typing.is_hbond_acceptor,
+                protein_typing.is_hbond_donor,
+                protein_typing.is_hbond_acceptor,
+                params.hbond_good,
+            )
+        )
     )
 
-    # Sum all pair contributions and weight
     score = (
-        params.w_gauss1 * np.sum(gauss1)
-        + params.w_repulsion * np.sum(repulsion)
-        + params.w_hydrophobic * np.sum(hydrophobic)
-        + params.w_hbond * np.sum(hbond)
+        params.w_gauss1 * g1_raw
+        + params.w_repulsion * rep_raw
+        + params.w_hydrophobic * hydro_raw
+        + params.w_hbond * hb_raw
     )
 
+    if return_components:
+        return float(score), ScoreComponents(
+            gauss1_raw=g1_raw,
+            repulsion_raw=rep_raw,
+            hydrophobic_raw=hydro_raw,
+            hbond_raw=hb_raw,
+            w_gauss1=params.w_gauss1,
+            w_repulsion=params.w_repulsion,
+            w_hydrophobic=params.w_hydrophobic,
+            w_hbond=params.w_hbond,
+        )
     return float(score)
+
+
+@overload
+def vinardo_score_cached(
+    ligand_mol: Chem.Mol,
+    protein_coords: np.ndarray,
+    protein_typing: AtomTyping,
+    ligand_conf_id: int = ...,
+    params: VinardoParams | None = ...,
+    return_components: Literal[False] = ...,
+) -> float: ...
+
+
+@overload
+def vinardo_score_cached(
+    ligand_mol: Chem.Mol,
+    protein_coords: np.ndarray,
+    protein_typing: AtomTyping,
+    ligand_conf_id: int = ...,
+    params: VinardoParams | None = ...,
+    return_components: Literal[True] = ...,
+) -> tuple[float, ScoreComponents]: ...
 
 
 def vinardo_score_cached(
@@ -445,10 +563,11 @@ def vinardo_score_cached(
     protein_typing: AtomTyping,
     ligand_conf_id: int = 0,
     params: VinardoParams | None = None,
-) -> float:
-    """Compute Vinardo docking score with pre-computed protein data.
+    return_components: bool = False,
+) -> float | tuple[float, ScoreComponents]:
+    """Compute docking score with pre-computed protein data.
 
-    This is a performance-optimized version of vinardo_score() that accepts
+    Performance-optimized version of vinardo_score() that accepts
     pre-computed protein coordinates and atom typing. Use this when scoring
     multiple ligands against the same protein to avoid redundant computation.
 
@@ -463,10 +582,13 @@ def vinardo_score_cached(
             array with shape (n_atoms, 3).
         protein_typing: Pre-computed protein atom typing from get_atom_typing().
         ligand_conf_id: Ligand conformer ID to use.
-        params: Vinardo parameters. If None, uses defaults.
+        params: Scoring parameters. If None, uses defaults.
+        return_components: If True, return (score, ScoreComponents) instead
+            of just the score.
 
     Returns:
-        Vinardo docking score (kcal/mol-like units).
+        Docking score (kcal/mol-like units), or a (score, ScoreComponents)
+        tuple when return_components=True.
 
     Raises:
         ValueError: If ligand molecule lacks 3D conformers.
@@ -475,9 +597,7 @@ def vinardo_score_cached(
         >>> protein_coords = np.array(protein.GetConformer().GetPositions())
         >>> protein_typing = get_atom_typing(protein)
         >>> for ligand in ligands:
-        ...     score = vinardo_score_cached(
-        ...         ligand, protein_coords, protein_typing
-        ...     )
+        ...     score = vinardo_score_cached(ligand, protein_coords, protein_typing)
     """
     if params is None:
         params = VinardoParams()
@@ -501,33 +621,53 @@ def vinardo_score_cached(
         protein_typing.radii,
     )
 
-    # Compute interaction terms
-    gauss1 = gauss1_term(distances, params.gauss1_offset, params.gauss1_width)
-    repulsion = repulsion_term(distances)
-    hydrophobic = hydrophobic_term(
-        distances,
-        ligand_typing.is_hydrophobic,
-        protein_typing.is_hydrophobic,
-        params.hydro_good,
-        params.hydro_bad,
+    # Compute interaction terms and capture raw sums
+    g1_raw = float(
+        np.sum(gauss1_term(distances, params.gauss1_offset, params.gauss1_width))
     )
-    hbond = hbond_term(
-        distances,
-        ligand_typing.is_hbond_donor,
-        ligand_typing.is_hbond_acceptor,
-        protein_typing.is_hbond_donor,
-        protein_typing.is_hbond_acceptor,
-        params.hbond_good,
+    rep_raw = float(np.sum(repulsion_term(distances)))
+    hydro_raw = float(
+        np.sum(
+            hydrophobic_term(
+                distances,
+                ligand_typing.is_hydrophobic,
+                protein_typing.is_hydrophobic,
+                params.hydro_good,
+                params.hydro_bad,
+            )
+        )
+    )
+    hb_raw = float(
+        np.sum(
+            hbond_term(
+                distances,
+                ligand_typing.is_hbond_donor,
+                ligand_typing.is_hbond_acceptor,
+                protein_typing.is_hbond_donor,
+                protein_typing.is_hbond_acceptor,
+                params.hbond_good,
+            )
+        )
     )
 
-    # Sum all pair contributions and weight
     score = (
-        params.w_gauss1 * np.sum(gauss1)
-        + params.w_repulsion * np.sum(repulsion)
-        + params.w_hydrophobic * np.sum(hydrophobic)
-        + params.w_hbond * np.sum(hbond)
+        params.w_gauss1 * g1_raw
+        + params.w_repulsion * rep_raw
+        + params.w_hydrophobic * hydro_raw
+        + params.w_hbond * hb_raw
     )
 
+    if return_components:
+        return float(score), ScoreComponents(
+            gauss1_raw=g1_raw,
+            repulsion_raw=rep_raw,
+            hydrophobic_raw=hydro_raw,
+            hbond_raw=hb_raw,
+            w_gauss1=params.w_gauss1,
+            w_repulsion=params.w_repulsion,
+            w_hydrophobic=params.w_hydrophobic,
+            w_hbond=params.w_hbond,
+        )
     return float(score)
 
 

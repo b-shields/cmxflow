@@ -51,6 +51,15 @@ class MoleculeDockBlock(MoleculeBlock):
         - docking_score: Final optimized score (Vinardo + EC adjustment).
         - docking_ec: Electrostatic complementarity value (0.0 when w_ec=0).
         - docking_converged: Whether optimization converged.
+        When ``score_components=True`` (default), also writes:
+        - docking_gauss1_raw: Unweighted Gaussian term sum.
+        - docking_repulsion_raw: Unweighted repulsion term sum.
+        - docking_hydrophobic_raw: Unweighted hydrophobic term sum.
+        - docking_hbond_raw: Unweighted H-bond term sum.
+        - docking_gauss1: Weighted Gaussian contribution.
+        - docking_repulsion: Weighted repulsion contribution.
+        - docking_hydrophobic: Weighted hydrophobic contribution.
+        - docking_hbond: Weighted H-bond contribution.
 
     Example:
         ```python
@@ -75,9 +84,16 @@ class MoleculeDockBlock(MoleculeBlock):
         - rigid: If True, only rigid-body optimization (no torsions).
     """
 
-    def __init__(self, **kwargs: Any) -> None:
-        """Initialize the molecular docking block."""
+    def __init__(self, score_components: bool = True, **kwargs: Any) -> None:
+        """Initialize the molecular docking block.
+
+        Args:
+            score_components: If True (default), write per-term raw and weighted
+                score components as SDF properties on each docked molecule.
+            **kwargs: Receptor path and mutable parameter overrides.
+        """
         super().__init__(name="MoleculeDock", input_files=["receptor"])
+        self._score_components = score_components
 
         # Register mutable parameters
         self.mutable(
@@ -233,6 +249,26 @@ class MoleculeDockBlock(MoleculeBlock):
         result.mol.SetDoubleProp("docking_vinardo", result.score + w_ec * result.ec)
         result.mol.SetDoubleProp("docking_ec", result.ec)
         result.mol.SetBoolProp("docking_converged", result.converged)
+
+        # Per-term score components
+        if self._score_components:
+            assert isinstance(self._protein_coords, np.ndarray)
+            assert isinstance(self._protein_typing, AtomTyping)
+            _, comps = vinardo_score_cached(
+                result.mol,
+                self._protein_coords,
+                self._protein_typing,
+                params=score_params,
+                return_components=True,
+            )
+            result.mol.SetDoubleProp("docking_gauss1_raw", comps.gauss1_raw)
+            result.mol.SetDoubleProp("docking_repulsion_raw", comps.repulsion_raw)
+            result.mol.SetDoubleProp("docking_hydrophobic_raw", comps.hydrophobic_raw)
+            result.mol.SetDoubleProp("docking_hbond_raw", comps.hbond_raw)
+            result.mol.SetDoubleProp("docking_gauss1", comps.gauss1)
+            result.mol.SetDoubleProp("docking_repulsion", comps.repulsion)
+            result.mol.SetDoubleProp("docking_hydrophobic", comps.hydrophobic)
+            result.mol.SetDoubleProp("docking_hbond", comps.hbond)
 
         return result.mol
 

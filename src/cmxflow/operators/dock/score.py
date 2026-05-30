@@ -16,6 +16,7 @@ from typing import Literal, Protocol, TypeAlias, overload
 import numpy as np
 from numpy.typing import NDArray
 from rdkit import Chem
+from rdkit.Chem import rdMolDescriptors
 from scipy.spatial.distance import cdist
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ class VinardoParams:
     hydro_good: float = 0.0
     hydro_bad: float = 2.5
     hbond_good: float = -0.6
+    w_rot: float = 0.02
 
 
 @dataclass
@@ -137,12 +139,12 @@ DEFAULT_RADIUS = 1.7
 # This matches smina/AutoDock Vina XS atom typing (C_H = hydrophobic carbon).
 HYDROPHOBIC_SMARTS = "[$([#6;a]),$([#6;A;!$([#6]~[#7,#8,#16])]),$([#9,#17,#35,#53])]"
 HBOND_DONOR_SMARTS = (
-    "[$([N;!H0;v3]),$([N;!H0;+1;v4]),$([O,S;H1;+0]),$([n;H1;+0]),$([n;!H0;+1])"
+    "[$([N;!H0;v3]),$([N;!H0;+1;v4]),$([O;H1;+0]),$([n;H1;+0]),$([n;!H0;+1])"
     ",Li+1,Na+1,K+1,Cs+1,Mg+2,Ca+2,Mn+2,Zn+2]"
 )
 HBOND_ACCEPTOR_SMARTS = (
-    "[$([O,S;H1;v2]-[!$(*=[O,N,P,S])]),$([O,S;H0;v2]),$([O,S;-]),"
-    "$([N;v3;!$(N-*=!@[O,N,P,S]);!$(N-c)]),$([nH0,o,s;+0])]"
+    "[$([O;H1;v2]-[!$(*=[O,N,P,S])]),$([O;H0;v2]),$([O;-]),"
+    "$([N;v3;!$(N-*=!@[O,N,P,S]);!$(N-c)]),$([nH0,o;+0])]"
 )
 
 
@@ -528,6 +530,9 @@ def vinardo_score(
         + params.w_hbond * hb_raw
     )
 
+    n_rot = rdMolDescriptors.CalcNumRotatableBonds(ligand_mol, strict=False)
+    score /= 1.0 + params.w_rot * n_rot
+
     if return_components:
         return float(score), ScoreComponents(
             gauss1_raw=g1_raw,
@@ -663,6 +668,9 @@ def vinardo_score_cached(
         + params.w_hydrophobic * hydro_raw
         + params.w_hbond * hb_raw
     )
+
+    n_rot = rdMolDescriptors.CalcNumRotatableBonds(ligand_mol, strict=False)
+    score /= 1.0 + params.w_rot * n_rot
 
     if return_components:
         return float(score), ScoreComponents(

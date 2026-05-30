@@ -78,6 +78,7 @@ class MoleculeDockBlock(MoleculeBlock):
         - w_repulsion: Vinardo repulsion term weight.
         - w_hydrophobic: Vinardo hydrophobic term weight.
         - w_hbond: Vinardo hydrogen bond term weight.
+        - w_rot: Torsional entropy divisor weight (0=pure Vinardo, 0.02=smina default).
         - w_ec: Weight for electrostatic complementarity term (0 = disabled).
         - max_iterations: Maximum optimization iterations.
         - box_size: Translation search box size in Angstroms.
@@ -102,6 +103,7 @@ class MoleculeDockBlock(MoleculeBlock):
             Continuous("w_repulsion", 0.8, 0.8, 1.2),
             Continuous("w_hydrophobic", -0.035, -0.065, -0.015),
             Continuous("w_hbond", -0.6, -0.8, -0.4),
+            Continuous("w_rot", 0.02, 0.0, 0.04),
             # Electrostatic complementarity
             Continuous("w_ec", 0.0, 0.0, 5.0),
             # Pose search
@@ -220,6 +222,7 @@ class MoleculeDockBlock(MoleculeBlock):
             w_repulsion=self.get_param("w_repulsion"),
             w_hydrophobic=self.get_param("w_hydrophobic"),
             w_hbond=self.get_param("w_hbond"),
+            w_rot=self.get_param("w_rot"),
         )
         box_size = self.get_param("box_size")
         pose_params = PoseParams(
@@ -261,14 +264,20 @@ class MoleculeDockBlock(MoleculeBlock):
                 params=score_params,
                 return_components=True,
             )
-            result.mol.SetDoubleProp("docking_gauss1_raw", comps.gauss1_raw)
-            result.mol.SetDoubleProp("docking_repulsion_raw", comps.repulsion_raw)
-            result.mol.SetDoubleProp("docking_hydrophobic_raw", comps.hydrophobic_raw)
-            result.mol.SetDoubleProp("docking_hbond_raw", comps.hbond_raw)
             result.mol.SetDoubleProp("docking_gauss1", comps.gauss1)
             result.mol.SetDoubleProp("docking_repulsion", comps.repulsion)
             result.mol.SetDoubleProp("docking_hydrophobic", comps.hydrophobic)
             result.mol.SetDoubleProp("docking_hbond", comps.hbond)
+            result.mol.SetDoubleProp("docking_n_rot", comps.n_rot * comps.w_rot)
+            result.mol.SetProp(
+                "docking_scoring_function",
+                f"(gauss1) {score_params.w_gauss1:.3f} "
+                f"(repulsion) {score_params.w_repulsion:.3f} "
+                f"(hydrophobic) {score_params.w_hydrophobic:.3f} "
+                f"(hbond) {score_params.w_hbond:.3f} "
+                f"(w_rot) {score_params.w_rot:.3f} "
+                f"(w_ec) {w_ec:.3f}",
+            )
 
         return result.mol
 

@@ -43,6 +43,7 @@ class VinardoParams:
         w_repulsion: Weight for repulsion term.
         w_hydrophobic: Weight for hydrophobic interactions.
         w_hbond: Weight for hydrogen bonding.
+        w_rot: Weight of the rotational bond correction.
         gauss1_offset: Gaussian center offset (o1 in paper).
         gauss1_width: Gaussian width (s1 in paper).
         hydro_good: Inner cutoff for hydrophobic (p1 in paper).
@@ -66,10 +67,9 @@ class VinardoParams:
 class ScoreComponents:
     """Per-term raw sums and weights from a scoring evaluation.
 
-    Raw values are the unweighted sums over all atom pairs; weighted
-    properties multiply each raw sum by its corresponding weight.
-    The ``total`` property equals the weighted sum across all terms,
-    which should match the score returned by the scoring function.
+    Raw values are the unweighted sums over all atom pairs. Weighted
+    properties divide each raw sum by the torsion divisor so that
+    ``total`` equals the score returned by the scoring function.
 
     Attributes:
         gauss1_raw: Unweighted sum of Gaussian attractive term.
@@ -80,6 +80,8 @@ class ScoreComponents:
         w_repulsion: Weight applied to repulsion.
         w_hydrophobic: Weight applied to hydrophobic.
         w_hbond: Weight applied to hbond.
+        n_rot: Number of rotatable bonds in the ligand.
+        w_rot: Torsional entropy divisor weight.
     """
 
     gauss1_raw: float
@@ -90,22 +92,28 @@ class ScoreComponents:
     w_repulsion: float
     w_hydrophobic: float
     w_hbond: float
+    n_rot: int = 0
+    w_rot: float = 0.0
+
+    @property
+    def _torsion_divisor(self) -> float:
+        return 1.0 + self.w_rot * self.n_rot
 
     @property
     def gauss1(self) -> float:
-        return self.w_gauss1 * self.gauss1_raw
+        return self.w_gauss1 * self.gauss1_raw / self._torsion_divisor
 
     @property
     def repulsion(self) -> float:
-        return self.w_repulsion * self.repulsion_raw
+        return self.w_repulsion * self.repulsion_raw / self._torsion_divisor
 
     @property
     def hydrophobic(self) -> float:
-        return self.w_hydrophobic * self.hydrophobic_raw
+        return self.w_hydrophobic * self.hydrophobic_raw / self._torsion_divisor
 
     @property
     def hbond(self) -> float:
-        return self.w_hbond * self.hbond_raw
+        return self.w_hbond * self.hbond_raw / self._torsion_divisor
 
     @property
     def total(self) -> float:
@@ -545,6 +553,8 @@ def vinardo_score(
             w_repulsion=params.w_repulsion,
             w_hydrophobic=params.w_hydrophobic,
             w_hbond=params.w_hbond,
+            n_rot=n_rot,
+            w_rot=params.w_rot,
         )
     return float(score)
 
@@ -684,6 +694,8 @@ def vinardo_score_cached(
             w_repulsion=params.w_repulsion,
             w_hydrophobic=params.w_hydrophobic,
             w_hbond=params.w_hbond,
+            n_rot=n_rot,
+            w_rot=params.w_rot,
         )
     return float(score)
 

@@ -43,7 +43,10 @@ class VinardoParams:
         w_repulsion: Weight for repulsion term.
         w_hydrophobic: Weight for hydrophobic interactions.
         w_hbond: Weight for hydrogen bonding.
-        w_rot: Weight of the rotational bond correction.
+        w_rot: Torsional entropy divisor weight. The final score is divided by
+            ``(1 + w_rot * N_rot)`` where N_rot is the number of rotatable bonds.
+            Default 0.02 matches smina's Vinardo implementation; the original
+            Vinardo paper uses 0.0 (no correction).
         gauss1_offset: Gaussian center offset (o1 in paper).
         gauss1_width: Gaussian width (s1 in paper).
         hydro_good: Inner cutoff for hydrophobic (p1 in paper).
@@ -142,7 +145,7 @@ DEFAULT_RADIUS = 1.7
 # SMARTS patterns for atom classification
 # Vinardo hydrophobic atom definition:
 #   - Aromatic C: always hydrophobic (aromatic ring carbons)
-#   - Aliphatic C: hydrophobic only when not adjacent to polar atoms (N, O, S)
+#   - Aliphatic C: hydrophobic only when not adjacent to polar atoms (N, O, P, S)
 #   - Halogens (F, Cl, Br, I): always hydrophobic
 # This matches smina/AutoDock Vina XS atom typing (C_H = hydrophobic carbon).
 HYDROPHOBIC_SMARTS = (
@@ -452,8 +455,9 @@ def vinardo_score(
 ) -> float | tuple[float, ScoreComponents]:
     """Compute docking score for ligand-protein complex.
 
-    Score = w_gauss1 * sum(Gauss1) + w_rep * sum(Repulsion)
-          + w_hydro * sum(Hydrophobic) + w_hbond * sum(HBond)
+    Score = (w_gauss1 * sum(Gauss1) + w_rep * sum(Repulsion)
+          + w_hydro * sum(Hydrophobic) + w_hbond * sum(HBond))
+          / (1 + w_rot * N_rot)
 
     Lower (more negative) scores indicate better binding.
 
@@ -595,8 +599,9 @@ def vinardo_score_cached(
     pre-computed protein coordinates and atom typing. Use this when scoring
     multiple ligands against the same protein to avoid redundant computation.
 
-    Score = w_gauss1 * sum(Gauss1) + w_rep * sum(Repulsion)
-          + w_hydro * sum(Hydrophobic) + w_hbond * sum(HBond)
+    Score = (w_gauss1 * sum(Gauss1) + w_rep * sum(Repulsion)
+          + w_hydro * sum(Hydrophobic) + w_hbond * sum(HBond))
+          / (1 + w_rot * N_rot)
 
     Lower (more negative) scores indicate better binding.
 

@@ -52,14 +52,12 @@ class MoleculeDockBlock(MoleculeBlock):
         - docking_ec: Electrostatic complementarity value (0.0 when w_ec=0).
         - docking_converged: Whether optimization converged.
         When ``score_components=True`` (default), also writes:
-        - docking_gauss1_raw: Unweighted Gaussian term sum.
-        - docking_repulsion_raw: Unweighted repulsion term sum.
-        - docking_hydrophobic_raw: Unweighted hydrophobic term sum.
-        - docking_hbond_raw: Unweighted H-bond term sum.
-        - docking_gauss1: Weighted Gaussian contribution.
-        - docking_repulsion: Weighted repulsion contribution.
-        - docking_hydrophobic: Weighted hydrophobic contribution.
-        - docking_hbond: Weighted H-bond contribution.
+        - docking_gauss1: Gaussian term contribution to docking_score.
+        - docking_repulsion: Repulsion term contribution to docking_score.
+        - docking_hydrophobic: Hydrophobic term contribution to docking_score.
+        - docking_hbond: H-bond term contribution to docking_score.
+        - docking_n_rot: Torsional entropy energetic term (w_rot * N_rot).
+        - docking_scoring_function: Scoring weights used, for reproducibility.
 
     Example:
         ```python

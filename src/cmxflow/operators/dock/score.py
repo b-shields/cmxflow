@@ -137,7 +137,9 @@ DEFAULT_RADIUS = 1.7
 #   - Aliphatic C: hydrophobic only when not adjacent to polar atoms (N, O, S)
 #   - Halogens (F, Cl, Br, I): always hydrophobic
 # This matches smina/AutoDock Vina XS atom typing (C_H = hydrophobic carbon).
-HYDROPHOBIC_SMARTS = "[$([#6;a]),$([#6;A;!$([#6]~[#7,#8,#16])]),$([#9,#17,#35,#53])]"
+HYDROPHOBIC_SMARTS = (
+    "[$([#6;a]),$([#6;A;!$([#6]~[#7,#8,#15,#16])]),$([#9,#17,#35,#53])]"
+)
 HBOND_DONOR_SMARTS = (
     "[$([N;!H0;v3]),$([N;!H0;+1;v4]),$([O;H1;+0]),$([n;H1;+0]),$([n;!H0;+1])"
     ",Li+1,Na+1,K+1,Cs+1,Mg+2,Ca+2,Mn+2,Zn+2]"
@@ -467,7 +469,7 @@ def vinardo_score(
         params = VinardoParams()
 
     # United atom
-    ligand_mol = Chem.RemoveHs(ligand_mol)
+    ligand_mol = Chem.RemoveAllHs(ligand_mol)
 
     # Validate conformers
     if ligand_mol.GetNumConformers() == 0:
@@ -615,7 +617,7 @@ def vinardo_score_cached(
         params = VinardoParams()
 
     # United atom
-    ligand_mol = Chem.RemoveHs(ligand_mol)
+    ligand_mol = Chem.RemoveAllHs(ligand_mol)
 
     # Validate conformers
     if ligand_mol.GetNumConformers() == 0:

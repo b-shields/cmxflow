@@ -5,27 +5,34 @@ binding site using rigid-body transformations and torsion angle optimization.
 """
 
 import logging
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Callable, TypeAlias
+from typing import TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
 from rdkit import Chem
 from rdkit.Chem import rdMolTransforms
-from scipy.optimize import basinhopping, minimize
+from scipy.optimize import minimize
 from scipy.spatial.transform import Rotation
+from scipy.stats import qmc
 
 from cmxflow.operators.dock.score import (
     AtomTyping,
-    VinardoParams,
-    vinardo_score,
-    vinardo_score_cached,
+    EmpiricalParams,
+    empirical_score_and_grad_cached,
+    empirical_score_cached,
 )
 
 logger = logging.getLogger(__name__)
 
 # Type aliases
 Coords: TypeAlias = NDArray[np.floating]
+
+# Amide/thioamide N–C bond SMARTS for exclusion from rotatable bonds.
+# Amide bonds have ~20 kcal/mol rotational barrier (partial double-bond character)
+# and are treated as rigid in docking, consistent with smina/Vina.
+_AMIDE_SMARTS: Chem.Mol = Chem.MolFromSmarts("[#7;X3]-[#6;X3]=[O,S]")  # type: ignore[assignment]
 
 
 # =============================================================================
@@ -43,6 +50,19 @@ class PoseParams:
         translation_bounds: (min, max) bounds for translation in each axis.
         optimize_torsions: Whether to optimize rotatable bond torsions.
         max_torsion_change: Maximum torsion angle change in degrees.
+        n_starts: Number of L-BFGS-B restarts. Start 0 is always the aligned
+            pose (x0=zeros). Starts 1..n_starts-1 are Sobol quasi-random
+            samples. n_starts=1 preserves single-start behavior. For optimal
+            Sobol coverage, prefer values where n_starts-1 is a power of 2
+            (i.e. n_starts = 2, 3, 5, 9, 17, 33).
+        use_analytical_grad: Use analytical gradients (True) or finite
+            differences (False). Analytical is ~20× faster. Automatically
+            falls back to finite differences when w_ec > 0 (EC has no
+            analytical gradient).
+        constrained_atom_indices: Heavy-atom indices to constrain near their
+            initial positions. Resolved from SMARTS in MoleculeDockBlock.
+        constraint_weight: Penalty weight in kcal/mol/Å². 0 = disabled.
+            Weight 100 confines atoms to ~0.1 Å RMSD from initial positions.
     """
 
     max_iterations: int = 100
@@ -50,6 +70,10 @@ class PoseParams:
     translation_bounds: tuple[float, float] = (-10.0, 10.0)
     optimize_torsions: bool = True
     max_torsion_change: float = 180.0
+    n_starts: int = 17
+    use_analytical_grad: bool = True
+    constrained_atom_indices: tuple[int, ...] = field(default_factory=tuple)
+    constraint_weight: float = 0.0
 
 
 @dataclass
@@ -63,8 +87,9 @@ class OptimizationResult:
         translation: Applied translation vector (x, y, z).
         rotation: Applied rotation as scipy Rotation object.
         torsion_changes: Dict mapping (j, k) bond indices to angle changes.
-        converged: Whether optimization converged.
-        n_iterations: Number of iterations performed.
+        converged: Whether optimization converged (best restart only).
+        n_iterations: Number of L-BFGS-B iterations for the best restart.
+        ec: Final electrostatic complementarity value (0.0 when w_ec=0).
     """
 
     mol: Chem.Mol
@@ -128,12 +153,10 @@ def apply_rigid_transform(
     if center is None:
         center = np.mean(coords, axis=0)
 
-    # Center, rotate, uncenter, then translate
     centered = coords - center
     rotated = rotation.apply(centered)
     transformed = rotated + center + translation
 
-    # Update conformer coordinates
     for i, pos in enumerate(transformed):
         conf.SetAtomPosition(i, tuple(pos))
 
@@ -146,13 +169,14 @@ def apply_rigid_transform(
 
 
 def get_rotatable_bonds(mol: Chem.Mol) -> list[tuple[int, int, int, int]]:
-    """Get rotatable bond dihedral atom indices.
+    """Get rotatable bond dihedral atom indices, excluding amide bonds.
 
     Returns 4-tuples of atom indices (i, j, k, l) defining each rotatable
-    bond's dihedral angle where j-k is the rotatable bond.
+    bond's dihedral angle where j-k is the rotatable bond. Amide/thioamide
+    N–C bonds are excluded (high rotational barrier, treated as rigid).
 
     Args:
-        mol: RDKit Mol object.
+        mol: RDKit Mol object (heavy-atom only).
 
     Returns:
         List of (i, j, k, l) atom index tuples for each rotatable bond.
@@ -163,20 +187,25 @@ def get_rotatable_bonds(mol: Chem.Mol) -> list[tuple[int, int, int, int]]:
 
     matches = mol.GetSubstructMatches(rotatable_smarts)
 
+    # Amide/thioamide bonds: high barrier, treated as rigid
+    amide_bonds: set[frozenset[int]] = set()
+    if _AMIDE_SMARTS is not None:
+        amide_bonds = {
+            frozenset([m[0], m[1]]) for m in mol.GetSubstructMatches(_AMIDE_SMARTS)
+        }
+
     dihedrals: list[tuple[int, int, int, int]] = []
     for j, k in matches:
-        # Find atoms to define dihedral: need neighbors of j and k
+        if frozenset([j, k]) in amide_bonds:
+            continue
         j_neighbors = [
             a.GetIdx() for a in mol.GetAtomWithIdx(j).GetNeighbors() if a.GetIdx() != k
         ]
         k_neighbors = [
             a.GetIdx() for a in mol.GetAtomWithIdx(k).GetNeighbors() if a.GetIdx() != j
         ]
-
         if j_neighbors and k_neighbors:
-            idx_i = j_neighbors[0]
-            idx_l = k_neighbors[0]
-            dihedrals.append((idx_i, j, k, idx_l))
+            dihedrals.append((j_neighbors[0], j, k, k_neighbors[0]))
 
     return dihedrals
 
@@ -228,125 +257,712 @@ def apply_torsion_changes(
 
 
 # =============================================================================
-# Optimization Helpers
+# Subtree Infrastructure
 # =============================================================================
 
 
-def _pack_pose_vector(
-    translation: NDArray[np.floating],
-    rotation_rotvec: NDArray[np.floating],
-    torsions: NDArray[np.floating] | None = None,
-) -> NDArray[np.floating]:
-    """Pack pose parameters into optimization vector.
+def _get_downstream_atoms(mol: Chem.Mol, j: int, k: int) -> tuple[int, ...]:
+    """BFS from k blocking j — atoms that move when torsion (j→k) rotates.
 
     Args:
-        translation: Translation (x, y, z).
-        rotation_rotvec: Rotation as rotation vector (3 values).
-        torsions: Torsion angle changes in degrees.
+        mol: RDKit Mol (heavy-atom only).
+        j: Pivot atom index (blocked).
+        k: Downstream start atom index.
 
     Returns:
-        Flattened parameter vector.
+        Tuple of heavy-atom indices in the downstream subtree.
     """
-    if torsions is None or len(torsions) == 0:
-        return np.concatenate([translation, rotation_rotvec])
-    return np.concatenate([translation, rotation_rotvec, torsions])
+    visited = {j}
+    queue: deque[int] = deque([k])
+    downstream: list[int] = []
+    while queue:
+        idx = queue.popleft()
+        if idx in visited:
+            continue
+        visited.add(idx)
+        downstream.append(idx)
+        for nb in mol.GetAtomWithIdx(idx).GetNeighbors():
+            if nb.GetIdx() not in visited:
+                queue.append(nb.GetIdx())
+    return tuple(downstream)
 
 
-def _unpack_pose_vector(
-    x: NDArray[np.floating],
-    n_torsions: int = 0,
-) -> tuple[NDArray[np.floating], Rotation, NDArray[np.floating] | None]:
-    """Unpack optimization vector to pose parameters.
+# =============================================================================
+# Gradient Projection
+# =============================================================================
+
+
+def _right_jac_T(r: NDArray) -> NDArray:
+    """Transpose of right Jacobian of SO(3).
+
+    Maps body-frame torque to rotvec gradient: grad_r = J_r^T @ tau_body.
+    Reduces to identity at r=0.
+
+    J_r(r) = (sinθ/θ)I + (1 − sinθ/θ)nnᵀ + ((cosθ−1)/θ)[n]×
+    J_r^T  = (sinθ/θ)I + (1 − sinθ/θ)nnᵀ + ((1−cosθ)/θ)[n]×
 
     Args:
-        x: Flattened parameter vector.
-        n_torsions: Number of torsion angles.
+        r: Rotation vector (3,).
 
     Returns:
-        Tuple of (translation, rotation, torsion_deltas).
+        3×3 matrix J_r^T.
     """
-    translation = x[:3]
-    rotation = Rotation.from_rotvec(x[3:6])
+    theta = np.linalg.norm(r)
+    if theta < 1e-8:
+        return np.eye(3)
+    n = r / theta
+    n_skew = np.array([[0.0, -n[2], n[1]], [n[2], 0.0, -n[0]], [-n[1], n[0], 0.0]])
+    s = np.sin(theta) / theta
+    c = (1.0 - np.cos(theta)) / theta
+    return s * np.eye(3) + (1.0 - s) * np.outer(n, n) + c * n_skew
 
-    if n_torsions > 0:
-        torsions = x[6:]
-        return translation, rotation, torsions
-    return translation, rotation, None
 
-
-def _create_objective(
-    ligand_mol: Chem.Mol,
-    protein_mol: Chem.Mol,
-    scoring_fn: Callable[[Chem.Mol, Chem.Mol, int, int], float],
+def _compute_dof_gradient(
+    x: NDArray,
+    pos: NDArray,
+    atom_grad: NDArray,
+    p0_heavy: NDArray,
+    centroid: NDArray,
     rotatable_dihedrals: list[tuple[int, int, int, int]],
-    initial_torsions: NDArray[np.floating],
-    ligand_conf_id: int,
-    protein_conf_id: int,
-    centroid: NDArray[np.floating],
-) -> Callable[[NDArray[np.floating]], float]:
-    """Create objective function for optimization.
+    subtrees: list[tuple[int, ...]],
+) -> NDArray:
+    """Project per-atom gradient onto DOF gradient (T, r, θ).
 
     Args:
-        ligand_mol: Initial ligand molecule.
-        protein_mol: Protein molecule (fixed).
-        scoring_fn: Scoring function.
-        rotatable_dihedrals: List of rotatable dihedral definitions.
-        initial_torsions: Initial torsion angles.
-        ligand_conf_id: Ligand conformer ID.
-        protein_conf_id: Protein conformer ID.
-        centroid: Ligand centroid for rotation.
+        x: Pose vector [T(3), r(3), θ(n_torsions)].
+        pos: Current heavy-atom positions (n_heavy, 3).
+        atom_grad: Per-atom gradient from scoring fn (n_heavy, 3).
+        p0_heavy: Original heavy-atom positions before any transform (n_heavy, 3).
+        centroid: Rotation centre (3,).
+        rotatable_dihedrals: List of (i, j, k, l) dihedral tuples.
+        subtrees: Precomputed downstream atom indices per torsion.
 
     Returns:
-        Objective function that takes parameter vector and returns score.
+        DOF gradient of shape (6 + n_torsions,).
     """
+    # Translation: sum of atom gradients
+    grad_T = np.sum(atom_grad, axis=0)  # (3,)
+
+    # Rotation: exact rotvec gradient via body-frame torque
+    r = x[3:6]
+    R_mat = Rotation.from_rotvec(r).as_matrix()
+    v_body = p0_heavy - centroid  # (n_heavy, 3) pre-rotation lever arms
+    g_body = atom_grad @ R_mat  # (n_heavy, 3) gradients in body frame
+    tau_body = np.sum(np.cross(v_body, g_body), axis=0)  # (3,)
+    grad_r = _right_jac_T(r) @ tau_body  # (3,)
+
+    # Torsions: lever-arm projection for each bond
     n_torsions = len(rotatable_dihedrals)
-
-    def objective(x: NDArray[np.floating]) -> float:
-        translation, rotation, torsion_deltas = _unpack_pose_vector(x, n_torsions)
-
-        # Apply rigid transform
-        transformed = apply_rigid_transform(
-            ligand_mol, translation, rotation, ligand_conf_id, centroid
+    grad_theta = np.zeros(n_torsions)
+    for k_tor, (_, j_atom, k_atom, _) in enumerate(rotatable_dihedrals):
+        axis = pos[k_atom] - pos[j_atom]
+        axis = axis / np.linalg.norm(axis)
+        idx = list(subtrees[k_tor])
+        r_i = pos[idx] - pos[k_atom]  # (n_downstream, 3)
+        lever = np.cross(axis[None, :], r_i)  # (n_downstream, 3)
+        # π/180 converts per-radian gradient to per-degree (torsions in degrees)
+        grad_theta[k_tor] = np.einsum("ij,ij->", lever, atom_grad[idx]) * (
+            np.pi / 180.0
         )
 
-        # Apply torsion changes if requested
-        if torsion_deltas is not None and len(rotatable_dihedrals) > 0:
-            new_torsions = initial_torsions + torsion_deltas
-            torsion_dict = {
-                dihedral: angle
-                for dihedral, angle in zip(rotatable_dihedrals, new_torsions)
-            }
-            transformed = apply_torsion_changes(
-                transformed, torsion_dict, ligand_conf_id
-            )
-
-        return scoring_fn(transformed, protein_mol, ligand_conf_id, protein_conf_id)
-
-    return objective
+    return np.concatenate([grad_T, grad_r, grad_theta])
 
 
 # =============================================================================
-# Main Optimization Functions
+# Constraint Penalties
+# =============================================================================
+
+
+def _constraint_penalty_value(
+    pos: NDArray,
+    p0_heavy: NDArray,
+    params: PoseParams,
+) -> float:
+    """Compute atom constraint penalty (no gradient).
+
+    Args:
+        pos: Current heavy-atom positions (n_heavy, 3).
+        p0_heavy: Target positions (n_heavy, 3).
+        params: Pose params with constrained_atom_indices and constraint_weight.
+
+    Returns:
+        Penalty value λ * Σ ||pos_i - target_i||².
+    """
+    if not params.constrained_atom_indices or params.constraint_weight == 0.0:
+        return 0.0
+    idx = list(params.constrained_atom_indices)
+    delta = pos[idx] - p0_heavy[idx]
+    return params.constraint_weight * float(np.sum(delta**2))
+
+
+def _apply_constraint_penalty(
+    score: float,
+    atom_grad: NDArray,
+    pos: NDArray,
+    p0_heavy: NDArray,
+    params: PoseParams,
+) -> tuple[float, NDArray]:
+    """Add atom constraint penalty to score and gradient.
+
+    Penalty gradient is added to atom_grad before DOF projection so the
+    kinematic chain rule automatically propagates it to all DOF types.
+
+    Args:
+        score: Current score.
+        atom_grad: Per-atom gradient (n_heavy, 3) — not mutated in place.
+        pos: Current heavy-atom positions (n_heavy, 3).
+        p0_heavy: Target positions (n_heavy, 3).
+        params: Pose params.
+
+    Returns:
+        Tuple of (score + penalty, atom_grad + penalty_grad).
+    """
+    if not params.constrained_atom_indices or params.constraint_weight == 0.0:
+        return score, atom_grad
+    atom_grad = atom_grad.copy()
+    idx = list(params.constrained_atom_indices)
+    delta = pos[idx] - p0_heavy[idx]
+    score += params.constraint_weight * float(np.sum(delta**2))
+    atom_grad[idx] += 2.0 * params.constraint_weight * delta
+    return score, atom_grad
+
+
+def constraint_weight_for_rmsd(target_rmsd_angstrom: float) -> float:
+    """Approximate constraint weight to achieve a given RMSD tolerance.
+
+    Args:
+        target_rmsd_angstrom: Desired RMSD tolerance in Angstroms.
+
+    Returns:
+        Weight in kcal/mol/Å².
+    """
+    return 1.0 / (target_rmsd_angstrom**2)
+
+
+# =============================================================================
+# Sobol Restart Sampling
+# =============================================================================
+
+
+def _sample_restarts(
+    n_restarts: int,
+    box_size: float,
+    n_torsions: int,
+    max_torsion_change: float,
+    site_offset: NDArray | None = None,
+) -> NDArray:
+    """Sample Sobol quasi-random starting points for multi-start optimization.
+
+    Row 0 is always zeros — a local minimization from the input pose (the
+    aligned conformer). Rows 1..n_restarts-1 are Sobol quasi-random samples.
+
+    When ``site_offset`` is provided (binding-site-centered docking), rows 1+
+    are sampled uniformly within ``±box_size`` of the binding site center in
+    translation space, with full SO(3) coverage in rotation. This ensures the
+    global search is anchored to the pocket regardless of where the initial
+    conformer landed.
+
+    Without ``site_offset``, rows 1+ sample within ``±box_size`` of the input
+    pose — suitable for local refinement workflows (MCS overlay).
+
+    For ideal Sobol balance, n_restarts-1 should be a power of 2. Preferred
+    values: 2, 3, 5, 9, 17, 33 (i.e. 1 + 2^k).
+
+    Args:
+        n_restarts: Total number of starts (including the aligned pose).
+        box_size: Half-width of translation search box in Angstroms.
+        n_torsions: Number of torsion DOFs.
+        max_torsion_change: Maximum torsion change in degrees.
+        site_offset: Optional (3,) vector = site_center − mol_centroid. When
+            provided, Sobol translation samples are centered on the binding
+            site rather than on the input conformer.
+
+    Returns:
+        Array of shape (n_restarts, 6 + n_torsions).
+    """
+    dim = 6 + n_torsions
+    starts = np.zeros((n_restarts, dim))
+    if n_restarts <= 1:
+        return starts
+
+    # scramble=True: un-scrambled Sobol maps first sample to (0.5,...,0.5),
+    # which after scaling lands at the midpoint — a duplicate of row 0.
+    sampler = qmc.Sobol(d=dim, scramble=True, seed=0)
+    unit = sampler.random(n_restarts - 1)
+
+    lo = np.array([-box_size] * 3 + [-np.pi] * 3 + [-max_torsion_change] * n_torsions)
+    hi = np.array([box_size] * 3 + [np.pi] * 3 + [max_torsion_change] * n_torsions)
+    starts[1:] = qmc.scale(unit, lo, hi)
+
+    if site_offset is not None:
+        starts[1:, :3] += site_offset
+
+    return starts
+
+
+# =============================================================================
+# Rigid-only top-k search
+# =============================================================================
+
+
+def _rigid_topk(
+    ligand_mol: Chem.Mol,
+    protein_coords: np.ndarray,
+    protein_typing: AtomTyping,
+    params: PoseParams,
+    score_params: EmpiricalParams,
+    site_center: np.ndarray | None = None,
+    n_top: int = 3,
+    ligand_conf_id: int = 0,
+    oversample: int = 16,
+    diversity_rmsd: float = 2.0,
+) -> list[tuple[float, Chem.Mol]]:
+    """Rigid-body multi-start search with pre-screening, returning top-n poses.
+
+    Generates ``oversample × (n_starts - 1)`` Sobol candidate starting points,
+    quick-scores each with a single ``empirical_score_cached`` call (no
+    minimization), then selects ``n_starts - 1`` survivors via a greedy
+    max-diversity filter (minimum ``diversity_rmsd`` RMSD between selected
+    starts). Only the survivors proceed to L-BFGS-B, discarding candidates
+    buried inside the receptor or redundant with already-selected starts.
+
+    Row 0 is always the input aligned pose and is never filtered.
+
+    Args:
+        ligand_mol: Ligand with 3D coordinates.
+        protein_coords: Pre-computed protein atom coordinates (n_atoms, 3).
+        protein_typing: Pre-computed protein atom typing.
+        params: Pose params. ``optimize_torsions`` is ignored; always rigid.
+        score_params: Scoring function parameters.
+        site_center: Optional binding site centroid — anchors Sobol restarts
+            to the pocket (rows 1+). Row 0 always starts from the input pose.
+        n_top: Number of top poses to return after minimization.
+        ligand_conf_id: Ligand conformer ID.
+        oversample: Sobol oversampling factor. Generates
+            ``oversample × (n_starts - 1)`` candidates before pre-screening.
+            Higher values improve diversity at negligible scoring cost.
+            Could be made mutable if tuning shows benefit.
+        diversity_rmsd: Minimum heavy-atom RMSD (Å) between selected starting
+            poses. Prevents L-BFGS-B restarts from redundantly exploring the
+            same basin. Could be made mutable if tuning shows benefit.
+
+    Returns:
+        List of (score, mol) tuples, sorted ascending by score, length ≤ n_top.
+    """
+    ligand_heavy = Chem.RemoveAllHs(ligand_mol)
+    p0_heavy = np.array(ligand_heavy.GetConformer(ligand_conf_id).GetPositions())
+    centroid = np.mean(p0_heavy, axis=0)
+
+    box_size = max(abs(params.translation_bounds[0]), abs(params.translation_bounds[1]))
+    site_offset: NDArray | None = None
+    if site_center is not None:
+        site_offset = site_center - centroid
+        trans_bounds = [
+            (min(0.0, site_offset[k] - box_size), max(0.0, site_offset[k] + box_size))
+            for k in range(3)
+        ]
+    else:
+        trans_bounds = [(-box_size, box_size)] * 3
+    bounds = trans_bounds + [(-np.pi, np.pi)] * 3
+
+    n_random = params.n_starts - 1  # row 0 reserved for aligned pose
+
+    # --- Oversample + pre-screen ---
+    # Generate oversample × n_random Sobol candidates, quick-score each,
+    # then select n_random diverse, non-clashing starts for L-BFGS-B.
+    n_candidates = max(n_random, n_random * oversample)
+    all_candidates = _sample_restarts(
+        n_candidates + 1, box_size, 0, 0.0, site_offset=site_offset
+    )
+
+    scored: list[tuple[float, NDArray, NDArray]] = []  # (score, x, positions)
+    for x in all_candidates[1:]:
+        T = x[:3]
+        rot = Rotation.from_rotvec(x[3:6])
+        mol_c = apply_rigid_transform(
+            ligand_heavy, T, rot, ligand_conf_id, center=centroid
+        )
+        pos = np.array(mol_c.GetConformer(ligand_conf_id).GetPositions())
+        sc = empirical_score_cached(
+            mol_c, protein_coords, protein_typing, ligand_conf_id, score_params
+        ).total
+        scored.append((sc, x, pos))
+    scored.sort(key=lambda r: r[0])
+
+    # Greedy diversity selection: best score first, skip if too similar to
+    # an already-selected start.
+    selected_x: list[NDArray] = []
+    selected_pos: list[NDArray] = []
+    for sc, x, pos in scored:
+        if len(selected_x) >= n_random:
+            break
+        if all(
+            float(np.sqrt(np.mean(np.sum((pos - p) ** 2, axis=1)))) >= diversity_rmsd
+            for p in selected_pos
+        ):
+            selected_x.append(x)
+            selected_pos.append(pos)
+
+    # Fallback: if diversity filter is too strict, fill remaining slots in
+    # score order without the diversity constraint.
+    if len(selected_x) < n_random:
+        used = {id(x) for x in selected_x}
+        for sc, x, pos in scored:
+            if len(selected_x) >= n_random:
+                break
+            if id(x) not in used:
+                selected_x.append(x)
+                used.add(id(x))
+
+    starts = np.zeros((1 + len(selected_x), 6))
+    starts[0] = all_candidates[0]  # aligned pose
+    for i, x in enumerate(selected_x):
+        starts[i + 1] = x
+
+    # --- L-BFGS-B on filtered starts ---
+    use_grad = params.use_analytical_grad
+
+    def objective(x: NDArray):  # type: ignore[return]
+        T = x[:3]
+        rot = Rotation.from_rotvec(x[3:6])
+        mol = apply_rigid_transform(
+            ligand_heavy, T, rot, ligand_conf_id, center=centroid
+        )
+        if use_grad:
+            score, atom_grad = empirical_score_and_grad_cached(
+                mol, protein_coords, protein_typing, ligand_conf_id, score_params
+            )
+            pos = np.array(mol.GetConformer(ligand_conf_id).GetPositions())
+            dof_grad = _compute_dof_gradient(
+                x, pos, atom_grad, p0_heavy, centroid, [], []
+            )
+            return score, dof_grad
+        return empirical_score_cached(
+            mol, protein_coords, protein_typing, ligand_conf_id, score_params
+        ).total
+
+    all_results: list[tuple[float, NDArray]] = []
+    for x0 in starts:
+        res = minimize(
+            objective,
+            x0,
+            method="L-BFGS-B",
+            jac=use_grad,
+            bounds=bounds,
+            options={"maxiter": params.max_iterations, "gtol": params.tolerance},
+        )
+        all_results.append((float(res.fun), res.x))
+
+    all_results.sort(key=lambda r: r[0])
+
+    top_mols: list[tuple[float, Chem.Mol]] = []
+    for score, x in all_results[:n_top]:
+        T = x[:3]
+        rot = Rotation.from_rotvec(x[3:6])
+        out_mol = apply_rigid_transform(
+            ligand_mol, T, rot, ligand_conf_id, center=centroid
+        )
+        top_mols.append((score, out_mol))
+
+    return top_mols
+
+
+# =============================================================================
+# Main Optimization Functions (cached path)
+# =============================================================================
+
+
+def optimize_pose_cached(
+    ligand_mol: Chem.Mol,
+    protein_coords: np.ndarray,
+    protein_typing: AtomTyping,
+    params: PoseParams | None = None,
+    score_params: EmpiricalParams | None = None,
+    ligand_conf_id: int = 0,
+    site_center: np.ndarray | None = None,
+    protein_ec_coords: np.ndarray | None = None,
+    protein_ec_charges: np.ndarray | None = None,
+    w_ec: float = 0.0,
+) -> OptimizationResult:
+    """Optimize ligand pose with pre-computed protein data.
+
+    Performs rigid-body optimization (translation + rotation) and optionally
+    flexible optimization (torsion angles) using L-BFGS-B. Supports
+    multi-start optimization via Sobol quasi-random sampling, analytical
+    gradients, and atom-position constraints.
+
+    When ``site_center`` is provided, Sobol restart samples (rows 1+) are
+    anchored to the binding site rather than the input conformer. Row 0
+    always minimizes locally from the input pose. This is the correct mode
+    for blind docking from a fresh conformer. Without ``site_center``, all
+    restarts are relative to the input conformer, suitable for MCS overlay
+    refinement workflows.
+
+    When ``w_ec > 0`` and EC data is provided, the optimizer jointly minimizes
+    ``empirical_score - w_ec * ec_score`` using finite differences (EC lacks
+    analytical gradients).
+
+    Args:
+        ligand_mol: Ligand RDKit Mol with 3D coordinates.
+        protein_coords: Pre-computed protein atom 3D coordinates (n_atoms, 3).
+        protein_typing: Pre-computed protein atom typing.
+        params: Pose optimization parameters. If None, uses defaults.
+        score_params: Scoring function parameters. If None, uses defaults.
+        ligand_conf_id: Ligand conformer ID to optimize.
+        site_center: Optional (3,) binding site centroid in Angstroms. When
+            provided, Sobol restarts are distributed within ``±box_size`` of
+            the site center. Typically the centroid of a co-crystallized
+            ligand or a known active pose.
+        protein_ec_coords: Pre-computed protein coordinates (with H) for EC.
+        protein_ec_charges: Pre-computed protein Gasteiger charges for EC.
+        w_ec: Weight for EC term. When 0, EC is not computed during optimization.
+
+    Returns:
+        OptimizationResult with optimized molecule and metadata.
+    """
+    if params is None:
+        params = PoseParams()
+    if score_params is None:
+        score_params = EmpiricalParams()
+
+    # --- Setup (once per call) ---
+    ligand_heavy = Chem.RemoveAllHs(ligand_mol)
+    p0_heavy = np.array(ligand_heavy.GetConformer(ligand_conf_id).GetPositions())
+    centroid = np.mean(p0_heavy, axis=0)
+
+    rotatable_dihedrals: list[tuple[int, int, int, int]] = []
+    subtrees: list[tuple[int, ...]] = []
+    initial_torsions: NDArray[np.floating] = np.array([])
+
+    if params.optimize_torsions:
+        rotatable_dihedrals = get_rotatable_bonds(ligand_heavy)
+        subtrees = [
+            _get_downstream_atoms(ligand_heavy, j, k)
+            for (_, j, k, _) in rotatable_dihedrals
+        ]
+        if rotatable_dihedrals:
+            initial_torsions = np.array(
+                [
+                    get_dihedral_angle(ligand_heavy, *d, ligand_conf_id)
+                    for d in rotatable_dihedrals
+                ]
+            )
+
+    n_torsions = len(rotatable_dihedrals)
+
+    # Index map: heavy_to_full[heavy_idx] = full_mol_idx (for output mol)
+    heavy_to_full = [
+        i
+        for i in range(ligand_mol.GetNumAtoms())
+        if ligand_mol.GetAtomWithIdx(i).GetAtomicNum() > 1
+    ]
+    rotatable_dihedrals_full: list[tuple[int, int, int, int]] = [
+        (
+            heavy_to_full[d[0]],
+            heavy_to_full[d[1]],
+            heavy_to_full[d[2]],
+            heavy_to_full[d[3]],
+        )
+        for d in rotatable_dihedrals
+    ]
+
+    box_size = max(abs(params.translation_bounds[0]), abs(params.translation_bounds[1]))
+    site_offset: NDArray | None = None
+    if site_center is not None:
+        site_offset = site_center - centroid
+        # Bounds cover both x=0 (aligned pose) and the full site-centred box.
+        trans_bounds = [
+            (min(0.0, site_offset[k] - box_size), max(0.0, site_offset[k] + box_size))
+            for k in range(3)
+        ]
+    else:
+        trans_bounds = [(-box_size, box_size)] * 3
+
+    bounds = (
+        trans_bounds
+        + [(-np.pi, np.pi)] * 3
+        + [(-params.max_torsion_change, params.max_torsion_change)] * n_torsions
+    )
+
+    # Initial score (combined empirical + EC)
+    initial_score = empirical_score_cached(
+        ligand_heavy, protein_coords, protein_typing, ligand_conf_id, score_params
+    ).total
+    if w_ec > 0 and protein_ec_coords is not None and protein_ec_charges is not None:
+        from cmxflow.operators.dock.score import ec_score_cached
+
+        initial_ec = ec_score_cached(
+            ligand_mol, protein_ec_coords, protein_ec_charges, ligand_conf_id
+        )
+        initial_score -= w_ec * initial_ec
+
+    # --- Helper: apply pose vector to ligand_heavy ---
+    def _apply_pose_heavy(x: NDArray) -> Chem.Mol:
+        T = x[:3]
+        rot = Rotation.from_rotvec(x[3:6])
+        mol = apply_rigid_transform(
+            ligand_heavy, T, rot, ligand_conf_id, center=centroid
+        )
+        if rotatable_dihedrals and n_torsions > 0:
+            new_torsions = initial_torsions + x[6:]
+            mol = apply_torsion_changes(
+                mol, dict(zip(rotatable_dihedrals, new_torsions)), ligand_conf_id
+            )
+        return mol
+
+    # --- Select objective (analytical grad or finite differences) ---
+    use_grad = params.use_analytical_grad and w_ec == 0.0
+
+    if use_grad:
+
+        def objective(x: NDArray) -> tuple[float, NDArray]:
+            transformed = _apply_pose_heavy(x)
+            pos = np.array(transformed.GetConformer(ligand_conf_id).GetPositions())
+            score, atom_grad = empirical_score_and_grad_cached(
+                transformed,
+                protein_coords,
+                protein_typing,
+                ligand_conf_id,
+                score_params,
+            )
+            score, atom_grad = _apply_constraint_penalty(
+                score, atom_grad, pos, p0_heavy, params
+            )
+            dof_grad = _compute_dof_gradient(
+                x, pos, atom_grad, p0_heavy, centroid, rotatable_dihedrals, subtrees
+            )
+            return score, dof_grad
+
+    else:
+
+        def objective(x: NDArray) -> float:  # type: ignore[misc]
+            transformed_heavy = _apply_pose_heavy(x)
+            pos = np.array(
+                transformed_heavy.GetConformer(ligand_conf_id).GetPositions()
+            )
+            vinardo = empirical_score_cached(
+                transformed_heavy,
+                protein_coords,
+                protein_typing,
+                ligand_conf_id,
+                score_params,
+            ).total
+            penalty = _constraint_penalty_value(pos, p0_heavy, params)
+            if (
+                w_ec > 0
+                and protein_ec_coords is not None
+                and protein_ec_charges is not None
+            ):
+                from cmxflow.operators.dock.score import ec_score_cached
+
+                T = x[:3]
+                rot = Rotation.from_rotvec(x[3:6])
+                transformed_full = apply_rigid_transform(
+                    ligand_mol, T, rot, ligand_conf_id, center=centroid
+                )
+                if rotatable_dihedrals_full and n_torsions > 0:
+                    new_torsions = initial_torsions + x[6:]
+                    transformed_full = apply_torsion_changes(
+                        transformed_full,
+                        dict(zip(rotatable_dihedrals_full, new_torsions)),
+                        ligand_conf_id,
+                    )
+                ec = ec_score_cached(
+                    transformed_full,
+                    protein_ec_coords,
+                    protein_ec_charges,
+                    ligand_conf_id,
+                )
+                return vinardo - w_ec * ec + penalty
+            return vinardo + penalty
+
+    # --- Multi-start loop ---
+    starts = _sample_restarts(
+        params.n_starts,
+        box_size,
+        n_torsions,
+        params.max_torsion_change,
+        site_offset=site_offset,
+    )
+    best_res = None
+    for x0_start in starts:
+        res = minimize(
+            objective,
+            x0_start,
+            method="L-BFGS-B",
+            jac=use_grad,
+            bounds=bounds,
+            options={"maxiter": params.max_iterations, "gtol": params.tolerance},
+        )
+        if best_res is None or res.fun < best_res.fun:
+            best_res = res
+
+    assert best_res is not None
+
+    # --- Build output mol (full, with H) ---
+    T = best_res.x[:3]
+    rot = Rotation.from_rotvec(best_res.x[3:6])
+    optimized_mol = apply_rigid_transform(
+        ligand_mol, T, rot, ligand_conf_id, center=centroid
+    )
+
+    torsion_changes: dict[tuple[int, int], float] = {}
+    if rotatable_dihedrals_full and n_torsions > 0:
+        torsion_deltas = best_res.x[6:]
+        new_torsions = initial_torsions + torsion_deltas
+        optimized_mol = apply_torsion_changes(
+            optimized_mol,
+            dict(zip(rotatable_dihedrals_full, new_torsions)),
+            ligand_conf_id,
+        )
+        torsion_changes = {
+            (d[1], d[2]): float(delta)
+            for d, delta in zip(rotatable_dihedrals, torsion_deltas)
+        }
+
+    # Final EC on optimized pose
+    final_ec = 0.0
+    if w_ec > 0 and protein_ec_coords is not None and protein_ec_charges is not None:
+        from cmxflow.operators.dock.score import ec_score_cached
+
+        final_ec = ec_score_cached(
+            optimized_mol, protein_ec_coords, protein_ec_charges, ligand_conf_id
+        )
+
+    return OptimizationResult(
+        mol=optimized_mol,
+        score=float(best_res.fun),
+        initial_score=initial_score,
+        translation=T,
+        rotation=rot,
+        torsion_changes=torsion_changes,
+        converged=best_res.success,
+        n_iterations=best_res.nit,
+        ec=final_ec,
+    )
+
+
+# =============================================================================
+# Convenience Wrappers (non-cached, use empirical_score directly)
 # =============================================================================
 
 
 def optimize_pose(
     ligand_mol: Chem.Mol,
     protein_mol: Chem.Mol,
-    scoring_fn: Callable[[Chem.Mol, Chem.Mol, int, int], float] | None = None,
     params: PoseParams | None = None,
     ligand_conf_id: int = 0,
     protein_conf_id: int = 0,
 ) -> OptimizationResult:
     """Optimize ligand pose in protein binding site.
 
-    Performs rigid-body optimization (translation + rotation) and
-    optionally flexible optimization (torsion angles) using L-BFGS-B.
+    Convenience wrapper using full RDKit mol objects. For performance,
+    prefer ``optimize_pose_cached`` when scoring multiple ligands against
+    the same protein.
 
     Args:
         ligand_mol: Ligand RDKit Mol with 3D coordinates.
         protein_mol: Protein RDKit Mol with 3D coordinates.
-        scoring_fn: Scoring function. If None, uses Vinardo.
         params: Optimization parameters. If None, uses defaults.
         ligand_conf_id: Ligand conformer ID to optimize.
         protein_conf_id: Protein conformer ID (fixed).
@@ -354,123 +970,38 @@ def optimize_pose(
     Returns:
         OptimizationResult with optimized molecule and metadata.
     """
-    if scoring_fn is None:
-        scoring_fn = vinardo_score
     if params is None:
         params = PoseParams()
 
-    # Get rotatable bonds if flexible docking
-    rotatable_dihedrals: list[tuple[int, int, int, int]] = []
-    initial_torsions: NDArray[np.floating] = np.array([])
+    protein_heavy = Chem.RemoveAllHs(protein_mol)
 
-    if params.optimize_torsions:
-        rotatable_dihedrals = get_rotatable_bonds(ligand_mol)
-        if rotatable_dihedrals:
-            initial_torsions = np.array(
-                [
-                    get_dihedral_angle(ligand_mol, *dihedral, ligand_conf_id)
-                    for dihedral in rotatable_dihedrals
-                ]
-            )
+    protein_conf = protein_heavy.GetConformer(protein_conf_id)
+    protein_coords = np.array(protein_conf.GetPositions())
+    from cmxflow.operators.dock.score import get_atom_typing
 
-    n_torsions = len(rotatable_dihedrals)
+    protein_typing = get_atom_typing(protein_heavy)
 
-    # Initial pose: no transformation
-    x0 = _pack_pose_vector(
-        translation=np.zeros(3),
-        rotation_rotvec=np.zeros(3),
-        torsions=np.zeros(n_torsions) if n_torsions > 0 else None,
-    )
-
-    # Compute initial score
-    initial_score = scoring_fn(ligand_mol, protein_mol, ligand_conf_id, protein_conf_id)
-
-    # Get ligand centroid for rotation
-    centroid = get_molecule_centroid(ligand_mol, ligand_conf_id)
-
-    # Set up bounds
-    trans_bounds = [params.translation_bounds] * 3
-    rot_bounds = [(-np.pi, np.pi)] * 3
-    torsion_bounds = [
-        (-params.max_torsion_change, params.max_torsion_change)
-    ] * n_torsions
-    bounds = trans_bounds + rot_bounds + torsion_bounds
-
-    # Create objective
-    objective = _create_objective(
+    return optimize_pose_cached(
         ligand_mol,
-        protein_mol,
-        scoring_fn,
-        rotatable_dihedrals,
-        initial_torsions,
-        ligand_conf_id,
-        protein_conf_id,
-        centroid,
-    )
-
-    # Optimize
-    result = minimize(
-        objective,
-        x0,
-        method="L-BFGS-B",
-        bounds=bounds,
-        options={
-            "maxiter": params.max_iterations,
-            "gtol": params.tolerance,
-        },
-    )
-
-    # Unpack result
-    translation, rotation, torsion_deltas = _unpack_pose_vector(result.x, n_torsions)
-
-    # Apply final transformation
-    optimized_mol = apply_rigid_transform(
-        ligand_mol, translation, rotation, ligand_conf_id, centroid
-    )
-
-    torsion_changes: dict[tuple[int, int], float] = {}
-    if torsion_deltas is not None and len(rotatable_dihedrals) > 0:
-        new_torsions = initial_torsions + torsion_deltas
-        torsion_dict = {
-            dihedral: angle
-            for dihedral, angle in zip(rotatable_dihedrals, new_torsions)
-        }
-        optimized_mol = apply_torsion_changes(
-            optimized_mol, torsion_dict, ligand_conf_id
-        )
-        torsion_changes = {
-            (dihedral[1], dihedral[2]): float(delta)
-            for dihedral, delta in zip(rotatable_dihedrals, torsion_deltas)
-        }
-
-    return OptimizationResult(
-        mol=optimized_mol,
-        score=float(result.fun),
-        initial_score=initial_score,
-        translation=translation,
-        rotation=rotation,
-        torsion_changes=torsion_changes,
-        converged=result.success,
-        n_iterations=result.nit,
+        protein_coords,
+        protein_typing,
+        params=params,
+        ligand_conf_id=ligand_conf_id,
     )
 
 
 def optimize_pose_rigid(
     ligand_mol: Chem.Mol,
     protein_mol: Chem.Mol,
-    scoring_fn: Callable[[Chem.Mol, Chem.Mol, int, int], float] | None = None,
     max_iterations: int = 100,
     ligand_conf_id: int = 0,
     protein_conf_id: int = 0,
 ) -> OptimizationResult:
     """Optimize ligand pose with rigid-body transformation only.
 
-    Convenience wrapper for optimize_pose with torsion optimization disabled.
-
     Args:
         ligand_mol: Ligand molecule.
         protein_mol: Protein molecule.
-        scoring_fn: Scoring function.
         max_iterations: Maximum iterations.
         ligand_conf_id: Ligand conformer ID.
         protein_conf_id: Protein conformer ID.
@@ -478,24 +1009,15 @@ def optimize_pose_rigid(
     Returns:
         OptimizationResult with optimized rigid pose.
     """
-    params = PoseParams(
-        max_iterations=max_iterations,
-        optimize_torsions=False,
-    )
+    params = PoseParams(max_iterations=max_iterations, optimize_torsions=False)
     return optimize_pose(
-        ligand_mol,
-        protein_mol,
-        scoring_fn,
-        params,
-        ligand_conf_id,
-        protein_conf_id,
+        ligand_mol, protein_mol, params, ligand_conf_id, protein_conf_id
     )
 
 
 def optimize_pose_flexible(
     ligand_mol: Chem.Mol,
     protein_mol: Chem.Mol,
-    scoring_fn: Callable[[Chem.Mol, Chem.Mol, int, int], float] | None = None,
     max_iterations: int = 200,
     max_torsion_change: float = 30.0,
     ligand_conf_id: int = 0,
@@ -503,12 +1025,9 @@ def optimize_pose_flexible(
 ) -> OptimizationResult:
     """Optimize ligand pose with rigid-body and torsion flexibility.
 
-    Convenience wrapper for optimize_pose with torsion optimization enabled.
-
     Args:
         ligand_mol: Ligand molecule.
         protein_mol: Protein molecule.
-        scoring_fn: Scoring function.
         max_iterations: Maximum iterations.
         max_torsion_change: Maximum torsion change per bond in degrees.
         ligand_conf_id: Ligand conformer ID.
@@ -523,314 +1042,5 @@ def optimize_pose_flexible(
         max_torsion_change=max_torsion_change,
     )
     return optimize_pose(
-        ligand_mol,
-        protein_mol,
-        scoring_fn,
-        params,
-        ligand_conf_id,
-        protein_conf_id,
-    )
-
-
-# =============================================================================
-# Faster But Less User Friendly Optimization Functions
-# =============================================================================
-
-
-def _create_objective_cached(
-    ligand_mol: Chem.Mol,
-    protein_coords: np.ndarray,
-    protein_typing: AtomTyping,
-    scoring_fn: Callable[[Chem.Mol, np.ndarray, AtomTyping, int, VinardoParams], float],
-    scoring_fn_params: VinardoParams,
-    rotatable_dihedrals: list[tuple[int, int, int, int]],
-    initial_torsions: NDArray[np.floating],
-    ligand_conf_id: int,
-    centroid: NDArray[np.floating],
-    protein_ec_coords: np.ndarray | None = None,
-    protein_ec_charges: np.ndarray | None = None,
-    w_ec: float = 0.0,
-    ec_scoring_fn: (
-        Callable[[Chem.Mol, np.ndarray, np.ndarray, int], float] | None
-    ) = None,
-) -> Callable[[NDArray[np.floating]], float]:
-    """Create objective function for optimization with cached protein data.
-
-    This is an internal helper that creates a closure for the optimizer.
-    The returned function applies transformations to the ligand and scores
-    it against the pre-computed protein data.
-
-    When ``w_ec > 0`` and EC data is provided, the objective combines
-    Vinardo and electrostatic complementarity:
-    ``objective = vinardo_score - w_ec * ec_score``.
-
-    Args:
-        ligand_mol: Initial ligand molecule.
-        protein_coords: Pre-computed protein atom 3D coordinates.
-        protein_typing: Pre-computed protein atom typing.
-        scoring_fn: Cached scoring function accepting pre-computed protein data.
-        scoring_fn_params: Parameters for the scoring function.
-        rotatable_dihedrals: List of (i, j, k, l) tuples for rotatable bonds.
-        initial_torsions: Initial torsion angles in degrees.
-        ligand_conf_id: Ligand conformer ID to transform.
-        centroid: Ligand centroid for rotation center.
-        protein_ec_coords: Pre-computed protein coordinates (with H) for EC.
-        protein_ec_charges: Pre-computed protein Gasteiger charges for EC.
-        w_ec: Weight for EC term. When 0, EC is not computed.
-        ec_scoring_fn: EC scoring function. Required when w_ec > 0.
-
-    Returns:
-        Objective function that takes a parameter vector and returns a score.
-    """
-    n_torsions = len(rotatable_dihedrals)
-    use_ec = (
-        w_ec > 0
-        and protein_ec_coords is not None
-        and protein_ec_charges is not None
-        and ec_scoring_fn is not None
-    )
-
-    def objective(x: NDArray[np.floating]) -> float:
-        translation, rotation, torsion_deltas = _unpack_pose_vector(x, n_torsions)
-
-        # Apply rigid transform
-        transformed = apply_rigid_transform(
-            ligand_mol, translation, rotation, ligand_conf_id, centroid
-        )
-
-        # Apply torsion changes if requested
-        if torsion_deltas is not None and len(rotatable_dihedrals) > 0:
-            new_torsions = initial_torsions + torsion_deltas
-            torsion_dict = {
-                dihedral: angle
-                for dihedral, angle in zip(rotatable_dihedrals, new_torsions)
-            }
-            transformed = apply_torsion_changes(
-                transformed, torsion_dict, ligand_conf_id
-            )
-
-        vinardo = scoring_fn(
-            transformed,
-            protein_coords,
-            protein_typing,
-            ligand_conf_id,
-            scoring_fn_params,
-        )
-
-        if use_ec:
-            assert ec_scoring_fn is not None
-            assert protein_ec_coords is not None
-            assert protein_ec_charges is not None
-            ec = ec_scoring_fn(
-                transformed, protein_ec_coords, protein_ec_charges, ligand_conf_id
-            )
-            return vinardo - w_ec * ec
-
-        return vinardo
-
-    return objective
-
-
-def optimize_pose_cached(
-    ligand_mol: Chem.Mol,
-    protein_coords: np.ndarray,
-    protein_typing: AtomTyping,
-    scoring_fn: (
-        Callable[[Chem.Mol, np.ndarray, AtomTyping, int, VinardoParams | None], float]
-        | None
-    ) = None,
-    scoring_fn_params: VinardoParams | None = None,
-    params: PoseParams | None = None,
-    ligand_conf_id: int = 0,
-    basin_hopping: bool = False,
-    protein_ec_coords: np.ndarray | None = None,
-    protein_ec_charges: np.ndarray | None = None,
-    w_ec: float = 0.0,
-    ec_scoring_fn: (
-        Callable[[Chem.Mol, np.ndarray, np.ndarray, int], float] | None
-    ) = None,
-) -> OptimizationResult:
-    """Optimize ligand pose with pre-computed protein data.
-
-    This is a performance-optimized version of optimize_pose() that accepts
-    pre-computed protein coordinates and atom typing. Use this when optimizing
-    multiple ligands against the same protein to avoid redundant computation.
-
-    Performs rigid-body optimization (translation + rotation) and optionally
-    flexible optimization (torsion angles) using L-BFGS-B.
-
-    When ``w_ec > 0`` and EC data is provided, the optimizer jointly
-    minimizes ``vinardo - w_ec * ec``, steering toward poses with better
-    electrostatic complementarity.
-
-    Args:
-        ligand_mol: Ligand RDKit Mol with 3D coordinates.
-        protein_coords: Pre-computed protein atom 3D coordinates as numpy
-            array with shape (n_atoms, 3).
-        protein_typing: Pre-computed protein atom typing from get_atom_typing().
-        scoring_fn: Cached scoring function. If None, uses vinardo_score_cached.
-        scoring_fn_params: Parameters for the scoring function.
-        params: Optimization parameters. If None, uses defaults.
-        ligand_conf_id: Ligand conformer ID to optimize.
-        basin_hopping: Use basin hopping instead of local minimization.
-        protein_ec_coords: Pre-computed protein coordinates (with H) for EC.
-        protein_ec_charges: Pre-computed protein Gasteiger charges for EC.
-        w_ec: Weight for EC term. When 0, EC is not computed during
-            optimization.
-        ec_scoring_fn: EC scoring function. If None, uses ec_score_cached.
-
-    Returns:
-        OptimizationResult with optimized molecule and metadata. The
-        ``score`` field contains the combined objective (vinardo - w_ec * ec),
-        and the ``ec`` field contains the final EC value.
-
-    Example:
-        >>> protein_coords = np.array(protein.GetConformer().GetPositions())
-        >>> protein_typing = get_atom_typing(protein)
-        >>> for ligand in ligands:
-        ...     result = optimize_pose_cached(
-        ...         ligand, protein_coords, protein_typing
-        ...     )
-    """
-    if scoring_fn is None:
-        scoring_fn = vinardo_score_cached
-    if scoring_fn_params is None:
-        scoring_fn_params = VinardoParams()
-    if params is None:
-        params = PoseParams()
-    if ec_scoring_fn is None:
-        from cmxflow.operators.dock.score import ec_score_cached
-
-        ec_scoring_fn = ec_score_cached
-
-    # Get rotatable bonds if flexible docking
-    rotatable_dihedrals: list[tuple[int, int, int, int]] = []
-    initial_torsions: NDArray[np.floating] = np.array([])
-
-    if params.optimize_torsions:
-        rotatable_dihedrals = get_rotatable_bonds(ligand_mol)
-        if rotatable_dihedrals:
-            initial_torsions = np.array(
-                [
-                    get_dihedral_angle(ligand_mol, *dihedral, ligand_conf_id)
-                    for dihedral in rotatable_dihedrals
-                ]
-            )
-
-    n_torsions = len(rotatable_dihedrals)
-
-    # Initial pose: no transformation
-    x0 = _pack_pose_vector(
-        translation=np.zeros(3),
-        rotation_rotvec=np.zeros(3),
-        torsions=np.zeros(n_torsions) if n_torsions > 0 else None,
-    )
-
-    # Compute initial Vinardo score
-    initial_vinardo = scoring_fn(
-        ligand_mol, protein_coords, protein_typing, ligand_conf_id, scoring_fn_params
-    )
-
-    # Compute initial EC and combined score
-    initial_ec = 0.0
-    if w_ec > 0 and protein_ec_coords is not None and protein_ec_charges is not None:
-        initial_ec = ec_scoring_fn(
-            ligand_mol, protein_ec_coords, protein_ec_charges, ligand_conf_id
-        )
-    initial_score = initial_vinardo - w_ec * initial_ec
-
-    # Get ligand centroid for rotation
-    centroid = get_molecule_centroid(ligand_mol, ligand_conf_id)
-
-    # Set up bounds
-    trans_bounds = [params.translation_bounds] * 3
-    rot_bounds = [(-np.pi, np.pi)] * 3
-    torsion_bounds = [
-        (-params.max_torsion_change, params.max_torsion_change)
-    ] * n_torsions
-    bounds = trans_bounds + rot_bounds + torsion_bounds
-
-    # Create objective
-    objective = _create_objective_cached(
-        ligand_mol,
-        protein_coords,
-        protein_typing,
-        scoring_fn,
-        scoring_fn_params,
-        rotatable_dihedrals,
-        initial_torsions,
-        ligand_conf_id,
-        centroid,
-        protein_ec_coords=protein_ec_coords,
-        protein_ec_charges=protein_ec_charges,
-        w_ec=w_ec,
-        ec_scoring_fn=ec_scoring_fn,
-    )
-
-    # Optimize
-    result = minimize(
-        objective,
-        x0,
-        method="L-BFGS-B",
-        bounds=bounds,
-        options={
-            "maxiter": params.max_iterations,
-            "gtol": params.tolerance,
-        },
-    )
-    if basin_hopping:
-        result = basinhopping(
-            objective,
-            x0,
-            rng=0,
-            minimizer_kwargs={
-                "method": "L-BFGS-B",
-                "bounds": bounds,
-                "options": {
-                    "maxiter": params.max_iterations,
-                    "gtol": params.tolerance,
-                },
-            },
-        )
-
-    # Unpack result
-    translation, rotation, torsion_deltas = _unpack_pose_vector(result.x, n_torsions)
-
-    # Apply final transformation
-    optimized_mol = apply_rigid_transform(
-        ligand_mol, translation, rotation, ligand_conf_id, centroid
-    )
-
-    torsion_changes: dict[tuple[int, int], float] = {}
-    if torsion_deltas is not None and len(rotatable_dihedrals) > 0:
-        new_torsions = initial_torsions + torsion_deltas
-        torsion_dict = {
-            dihedral: angle
-            for dihedral, angle in zip(rotatable_dihedrals, new_torsions)
-        }
-        optimized_mol = apply_torsion_changes(
-            optimized_mol, torsion_dict, ligand_conf_id
-        )
-        torsion_changes = {
-            (dihedral[1], dihedral[2]): float(delta)
-            for dihedral, delta in zip(rotatable_dihedrals, torsion_deltas)
-        }
-
-    # Compute final EC on the optimized pose
-    final_ec = 0.0
-    if w_ec > 0 and protein_ec_coords is not None and protein_ec_charges is not None:
-        final_ec = ec_scoring_fn(
-            optimized_mol, protein_ec_coords, protein_ec_charges, ligand_conf_id
-        )
-
-    return OptimizationResult(
-        mol=optimized_mol,
-        score=float(result.fun),
-        initial_score=initial_score,
-        translation=translation,
-        rotation=rotation,
-        torsion_changes=torsion_changes,
-        converged=result.success,
-        n_iterations=result.nit,
-        ec=final_ec,
+        ligand_mol, protein_mol, params, ligand_conf_id, protein_conf_id
     )

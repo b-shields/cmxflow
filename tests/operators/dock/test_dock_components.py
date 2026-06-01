@@ -1,23 +1,17 @@
-"""Integration tests for score_components kwarg on MoleculeDockBlock.
+"""Integration tests for score_components kwarg on MoleculeDockBlock."""
 
-TDD: written against the intended API *before* implementation.
-All tests fail until score_components is wired into dock.py.
-"""
-
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 from rdkit import Chem
 from rdkit.Chem import AllChem
+from scipy.spatial.transform import Rotation
 
+from cmxflow.operators.dock.pose import OptimizationResult
 from cmxflow.operators.dock.score import AtomTyping
 
 COMPONENT_TAGS = [
-    "docking_gauss1_raw",
-    "docking_repulsion_raw",
-    "docking_hydrophobic_raw",
-    "docking_hbond_raw",
     "docking_gauss1",
     "docking_repulsion",
     "docking_hydrophobic",
@@ -48,14 +42,16 @@ def _make_mol() -> Chem.Mol:
     return mol
 
 
-def _mock_result(mol: Chem.Mol) -> MagicMock:
-    r = MagicMock()
-    r.mol = mol
-    r.score = -5.0
-    r.initial_score = -3.0
-    r.converged = True
-    r.ec = 0.0
-    return r
+def _mock_result(mol: Chem.Mol) -> OptimizationResult:
+    return OptimizationResult(
+        mol=mol,
+        score=-5.0,
+        initial_score=-3.0,
+        translation=np.zeros(3),
+        rotation=Rotation.identity(),
+        converged=True,
+        ec=0.0,
+    )
 
 
 class TestMoleculeDockBlockScoreComponents:
@@ -76,6 +72,9 @@ class TestMoleculeDockBlockScoreComponents:
         with patch(
             "cmxflow.operators.dock.dock.optimize_pose_cached",
             return_value=_mock_result(mol),
+        ), patch(
+            "cmxflow.operators.dock.dock._rigid_topk",
+            return_value=[(-5.0, mol)],
         ):
             result = block._forward(mol)
         assert result is not None
@@ -88,32 +87,41 @@ class TestMoleculeDockBlockScoreComponents:
         with patch(
             "cmxflow.operators.dock.dock.optimize_pose_cached",
             return_value=_mock_result(mol),
+        ), patch(
+            "cmxflow.operators.dock.dock._rigid_topk",
+            return_value=[(-5.0, mol)],
         ):
             result = block._forward(mol)
         assert result is not None
         for tag in COMPONENT_TAGS:
             assert not result.HasProp(tag), f"Unexpected tag: {tag}"
 
-    def test_weighted_equals_w_times_raw(self) -> None:
-        """docking_gauss1 == w_gauss1 * docking_gauss1_raw (likewise for all terms)."""
+    def test_component_tags_sum_to_empirical_score(self) -> None:
+        """Sum of component SDF tags matches empirical_score_cached.total."""
+        from cmxflow.operators.dock.score import EmpiricalParams, empirical_score_cached
+
         block = _make_block(score_components=True)
         mol = _make_mol()
         with patch(
             "cmxflow.operators.dock.dock.optimize_pose_cached",
             return_value=_mock_result(mol),
+        ), patch(
+            "cmxflow.operators.dock.dock._rigid_topk",
+            return_value=[(-5.0, mol)],
         ):
             result = block._forward(mol)
         assert result is not None
-        for raw_tag, wtd_tag, param in [
-            ("docking_gauss1_raw", "docking_gauss1", "w_gauss1"),
-            ("docking_repulsion_raw", "docking_repulsion", "w_repulsion"),
-            ("docking_hydrophobic_raw", "docking_hydrophobic", "w_hydrophobic"),
-            ("docking_hbond_raw", "docking_hbond", "w_hbond"),
-        ]:
-            w = block.get_param(param)
-            raw = result.GetDoubleProp(raw_tag)
-            wtd = result.GetDoubleProp(wtd_tag)
-            assert wtd == pytest.approx(w * raw), f"{wtd_tag} != {param} * {raw_tag}"
+
+        sdf_total = sum(result.GetDoubleProp(tag) for tag in COMPONENT_TAGS)
+        # Re-compute via empirical_score_cached the same way dock.py does
+        ligand_heavy = Chem.RemoveAllHs(result)
+        comps = empirical_score_cached(
+            ligand_heavy,
+            block._protein_coords,
+            block._protein_typing,
+            params=EmpiricalParams(),
+        )
+        assert sdf_total == pytest.approx(comps.total)
 
     def test_check_output_does_not_require_component_tags(self) -> None:
         """check_output must pass without component tags present."""

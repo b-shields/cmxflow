@@ -1,7 +1,8 @@
-"""Vinardo scoring function for molecular docking.
+"""Empirical scoring function for molecular docking.
 
-This module implements the Vinardo empirical scoring function for
-protein-ligand binding affinity estimation.
+Implements the Vinardo empirical scoring function for protein-ligand binding
+affinity estimation as described in Quiroga & Villarreal (2016), as implemented
+in smina.
 
 Reference:
     Quiroga & Villarreal (2016). Vinardo: A Scoring Function Based on
@@ -11,7 +12,7 @@ Reference:
 
 import logging
 from dataclasses import dataclass
-from typing import Literal, Protocol, TypeAlias, overload
+from typing import Protocol, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -27,16 +28,16 @@ DistanceMatrix: TypeAlias = NDArray[np.floating]
 
 
 # =============================================================================
-# Vinardo Parameters
+# Empirical Parameters
 # =============================================================================
 
 
 @dataclass(frozen=True)
-class VinardoParams:
-    """Vinardo scoring function parameters.
+class EmpiricalParams:
+    """Vinardo/empirical scoring function parameters.
 
-    All default values are from Quiroga & Villarreal (2016).
-    Parameters can be modified for experimentation.
+    All default values are from Quiroga & Villarreal (2016) as implemented
+    in smina.
 
     Attributes:
         w_gauss1: Weight for Gaussian attractive term.
@@ -163,7 +164,7 @@ HBOND_ACCEPTOR_SMARTS = (
 
 @dataclass
 class AtomTyping:
-    """Atom classification for Vinardo scoring.
+    """Atom classification for empirical scoring.
 
     Attributes:
         radii: Van der Waals radii for each atom.
@@ -231,7 +232,7 @@ def get_smarts_matches(mol: Chem.Mol, smarts: str) -> NDArray[np.bool_]:
 
 
 def get_atom_typing(mol: Chem.Mol) -> AtomTyping:
-    """Classify atoms for Vinardo scoring.
+    """Classify atoms for empirical scoring.
 
     Assigns van der Waals radii and identifies hydrophobic atoms,
     H-bond donors, and H-bond acceptors using SMARTS patterns.
@@ -355,16 +356,10 @@ def hydrophobic_term(
     Returns:
         Hydrophobic interaction values.
     """
-    # Create pair mask for hydrophobic-hydrophobic interactions
     pair_mask = ligand_hydrophobic[:, np.newaxis] & protein_hydrophobic[np.newaxis, :]
-
     result = np.zeros_like(distances)
-
-    # Inner region: full interaction
     inner_mask = (distances <= good_cutoff) & pair_mask
     result[inner_mask] = 1.0
-
-    # Transition region: linear decay
     trans_mask = (distances > good_cutoff) & (distances < bad_cutoff) & pair_mask
     range_size = bad_cutoff - good_cutoff
     result[trans_mask] = (bad_cutoff - distances[trans_mask]) / range_size
@@ -400,18 +395,12 @@ def hbond_term(
     Returns:
         H-bond interaction values.
     """
-    # Valid H-bond pairs: donor-acceptor or acceptor-donor
     pair_mask = (ligand_donor[:, np.newaxis] & protein_acceptor[np.newaxis, :]) | (
         ligand_acceptor[:, np.newaxis] & protein_donor[np.newaxis, :]
     )
-
     result = np.zeros_like(distances)
-
-    # Inner region: full interaction
     inner_mask = (distances <= good_cutoff) & pair_mask
     result[inner_mask] = 1.0
-
-    # Transition region: linear decay to 0
     trans_mask = (distances > good_cutoff) & (distances < 0) & pair_mask
     result[trans_mask] = -distances[trans_mask] / (-good_cutoff)
 
@@ -419,41 +408,22 @@ def hbond_term(
 
 
 # =============================================================================
-# Main Scoring Function
+# Main Scoring Functions
 # =============================================================================
 
 
-@overload
-def vinardo_score(
-    ligand_mol: Chem.Mol,
-    protein_mol: Chem.Mol,
-    ligand_conf_id: int = ...,
-    protein_conf_id: int = ...,
-    params: VinardoParams | None = ...,
-    return_components: Literal[False] = ...,
-) -> float: ...
-
-
-@overload
-def vinardo_score(
-    ligand_mol: Chem.Mol,
-    protein_mol: Chem.Mol,
-    ligand_conf_id: int = ...,
-    protein_conf_id: int = ...,
-    params: VinardoParams | None = ...,
-    return_components: Literal[True] = ...,
-) -> tuple[float, ScoreComponents]: ...
-
-
-def vinardo_score(
+def empirical_score(
     ligand_mol: Chem.Mol,
     protein_mol: Chem.Mol,
     ligand_conf_id: int = 0,
     protein_conf_id: int = 0,
-    params: VinardoParams | None = None,
-    return_components: bool = False,
-) -> float | tuple[float, ScoreComponents]:
-    """Compute docking score for ligand-protein complex.
+    params: EmpiricalParams | None = None,
+) -> float:
+    """Compute docking score for a ligand-protein complex.
+
+    Convenience function that accepts full RDKit mol objects. Strips H
+    internally. For repeated scoring against the same protein, prefer
+    ``empirical_score_cached`` with pre-computed protein data.
 
     Score = (w_gauss1 * sum(Gauss1) + w_rep * sum(Repulsion)
           + w_hydro * sum(Hydrophobic) + w_hbond * sum(HBond))
@@ -466,183 +436,69 @@ def vinardo_score(
         protein_mol: Protein RDKit Mol with 3D coordinates.
         ligand_conf_id: Ligand conformer ID to use.
         protein_conf_id: Protein conformer ID to use.
-        params: Vinardo parameters. If None, uses defaults.
-        return_components: If True, return (score, ScoreComponents) instead
-            of just the score.
+        params: Scoring parameters. If None, uses defaults.
 
     Returns:
-        Docking score (kcal/mol-like units), or a (score, ScoreComponents)
-        tuple when return_components=True.
+        Docking score (kcal/mol-like units).
 
     Raises:
         ValueError: If molecules lack 3D conformers.
     """
     if params is None:
-        params = VinardoParams()
+        params = EmpiricalParams()
 
-    # United atom
-    ligand_mol = Chem.RemoveAllHs(ligand_mol)
+    ligand_heavy = Chem.RemoveAllHs(ligand_mol)
+    protein_heavy = Chem.RemoveAllHs(protein_mol)
 
-    # Validate conformers
-    if ligand_mol.GetNumConformers() == 0:
+    if ligand_heavy.GetNumConformers() == 0:
         raise ValueError("Ligand molecule has no conformers")
-    if protein_mol.GetNumConformers() == 0:
+    if protein_heavy.GetNumConformers() == 0:
         raise ValueError("Protein molecule has no conformers")
 
-    # Get coordinates
-    ligand_conf = ligand_mol.GetConformer(ligand_conf_id)
-    protein_conf = protein_mol.GetConformer(protein_conf_id)
-
-    ligand_coords = np.array(ligand_conf.GetPositions())
+    protein_conf = protein_heavy.GetConformer(protein_conf_id)
     protein_coords = np.array(protein_conf.GetPositions())
+    protein_typing = get_atom_typing(protein_heavy)
 
-    # Get atom typing
-    ligand_typing = get_atom_typing(ligand_mol)
-    protein_typing = get_atom_typing(protein_mol)
-
-    # Compute surface distances
-    distances = compute_surface_distances(
-        ligand_coords,
-        protein_coords,
-        ligand_typing.radii,
-        protein_typing.radii,
-    )
-
-    # Compute interaction terms and capture raw sums
-    g1_raw = float(
-        np.sum(gauss1_term(distances, params.gauss1_offset, params.gauss1_width))
-    )
-    rep_raw = float(np.sum(repulsion_term(distances)))
-    hydro_raw = float(
-        np.sum(
-            hydrophobic_term(
-                distances,
-                ligand_typing.is_hydrophobic,
-                protein_typing.is_hydrophobic,
-                params.hydro_good,
-                params.hydro_bad,
-            )
-        )
-    )
-    hb_raw = float(
-        np.sum(
-            hbond_term(
-                distances,
-                ligand_typing.is_hbond_donor,
-                ligand_typing.is_hbond_acceptor,
-                protein_typing.is_hbond_donor,
-                protein_typing.is_hbond_acceptor,
-                params.hbond_good,
-            )
-        )
-    )
-
-    score = (
-        params.w_gauss1 * g1_raw
-        + params.w_repulsion * rep_raw
-        + params.w_hydrophobic * hydro_raw
-        + params.w_hbond * hb_raw
-    )
-
-    n_rot = rdMolDescriptors.CalcNumRotatableBonds(ligand_mol, strict=False)
-    score /= 1.0 + params.w_rot * n_rot
-
-    if return_components:
-        return float(score), ScoreComponents(
-            gauss1_raw=g1_raw,
-            repulsion_raw=rep_raw,
-            hydrophobic_raw=hydro_raw,
-            hbond_raw=hb_raw,
-            w_gauss1=params.w_gauss1,
-            w_repulsion=params.w_repulsion,
-            w_hydrophobic=params.w_hydrophobic,
-            w_hbond=params.w_hbond,
-            n_rot=n_rot,
-            w_rot=params.w_rot,
-        )
-    return float(score)
+    return empirical_score_cached(
+        ligand_heavy, protein_coords, protein_typing, ligand_conf_id, params
+    ).total
 
 
-@overload
-def vinardo_score_cached(
-    ligand_mol: Chem.Mol,
-    protein_coords: np.ndarray,
-    protein_typing: AtomTyping,
-    ligand_conf_id: int = ...,
-    params: VinardoParams | None = ...,
-    return_components: Literal[False] = ...,
-) -> float: ...
-
-
-@overload
-def vinardo_score_cached(
-    ligand_mol: Chem.Mol,
-    protein_coords: np.ndarray,
-    protein_typing: AtomTyping,
-    ligand_conf_id: int = ...,
-    params: VinardoParams | None = ...,
-    return_components: Literal[True] = ...,
-) -> tuple[float, ScoreComponents]: ...
-
-
-def vinardo_score_cached(
-    ligand_mol: Chem.Mol,
+def empirical_score_cached(
+    ligand_heavy: Chem.Mol,
     protein_coords: np.ndarray,
     protein_typing: AtomTyping,
     ligand_conf_id: int = 0,
-    params: VinardoParams | None = None,
-    return_components: bool = False,
-) -> float | tuple[float, ScoreComponents]:
-    """Compute docking score with pre-computed protein data.
+    params: EmpiricalParams | None = None,
+) -> ScoreComponents:
+    """Compute docking score and component breakdown with pre-computed protein data.
 
-    Performance-optimized version of vinardo_score() that accepts
-    pre-computed protein coordinates and atom typing. Use this when scoring
-    multiple ligands against the same protein to avoid redundant computation.
-
-    Score = (w_gauss1 * sum(Gauss1) + w_rep * sum(Repulsion)
-          + w_hydro * sum(Hydrophobic) + w_hbond * sum(HBond))
-          / (1 + w_rot * N_rot)
-
-    Lower (more negative) scores indicate better binding.
+    Reporting path. Input ligand must be heavy-atom only — call
+    ``Chem.RemoveAllHs()`` before passing.
 
     Args:
-        ligand_mol: Ligand RDKit Mol with 3D coordinates.
-        protein_coords: Pre-computed protein atom 3D coordinates as numpy
-            array with shape (n_atoms, 3).
+        ligand_heavy: Heavy-atom-only ligand RDKit Mol with 3D coordinates.
+        protein_coords: Pre-computed protein atom 3D coordinates (n_atoms, 3).
         protein_typing: Pre-computed protein atom typing from get_atom_typing().
         ligand_conf_id: Ligand conformer ID to use.
         params: Scoring parameters. If None, uses defaults.
-        return_components: If True, return (score, ScoreComponents) instead
-            of just the score.
 
     Returns:
-        Docking score (kcal/mol-like units), or a (score, ScoreComponents)
-        tuple when return_components=True.
+        ScoreComponents with per-term raw sums, weights, and total score.
 
     Raises:
         ValueError: If ligand molecule lacks 3D conformers.
-
-    Example:
-        >>> protein_coords = np.array(protein.GetConformer().GetPositions())
-        >>> protein_typing = get_atom_typing(protein)
-        >>> for ligand in ligands:
-        ...     score = vinardo_score_cached(ligand, protein_coords, protein_typing)
     """
     if params is None:
-        params = VinardoParams()
+        params = EmpiricalParams()
 
-    # United atom
-    ligand_mol = Chem.RemoveAllHs(ligand_mol)
-
-    # Validate conformers
-    if ligand_mol.GetNumConformers() == 0:
+    if ligand_heavy.GetNumConformers() == 0:
         raise ValueError("Ligand molecule has no conformers")
 
-    ligand_conf = ligand_mol.GetConformer(ligand_conf_id)
+    ligand_conf = ligand_heavy.GetConformer(ligand_conf_id)
     ligand_coords = np.array(ligand_conf.GetPositions())
-    ligand_typing = get_atom_typing(ligand_mol)
+    ligand_typing = get_atom_typing(ligand_heavy)
 
-    # Compute surface distances
     distances = compute_surface_distances(
         ligand_coords,
         protein_coords,
@@ -650,7 +506,6 @@ def vinardo_score_cached(
         protein_typing.radii,
     )
 
-    # Compute interaction terms and capture raw sums
     g1_raw = float(
         np.sum(gauss1_term(distances, params.gauss1_offset, params.gauss1_width))
     )
@@ -679,74 +534,143 @@ def vinardo_score_cached(
         )
     )
 
+    n_rot = rdMolDescriptors.CalcNumRotatableBonds(ligand_heavy, strict=False)
+
+    return ScoreComponents(
+        gauss1_raw=g1_raw,
+        repulsion_raw=rep_raw,
+        hydrophobic_raw=hydro_raw,
+        hbond_raw=hb_raw,
+        w_gauss1=params.w_gauss1,
+        w_repulsion=params.w_repulsion,
+        w_hydrophobic=params.w_hydrophobic,
+        w_hbond=params.w_hbond,
+        n_rot=n_rot,
+        w_rot=params.w_rot,
+    )
+
+
+def empirical_score_and_grad_cached(
+    ligand_heavy: Chem.Mol,
+    protein_coords: np.ndarray,
+    protein_typing: AtomTyping,
+    ligand_conf_id: int = 0,
+    params: EmpiricalParams | None = None,
+) -> tuple[float, NDArray]:
+    """Compute docking score and per-heavy-atom gradient with pre-computed protein data.
+
+    Optimizer path. Input ligand must be heavy-atom only — call
+    ``Chem.RemoveAllHs()`` before passing. Score and gradient are computed
+    in a single vectorized pass.
+
+    Args:
+        ligand_heavy: Heavy-atom-only ligand RDKit Mol with 3D coordinates.
+        protein_coords: Pre-computed protein atom 3D coordinates (n_atoms, 3).
+        protein_typing: Pre-computed protein atom typing from get_atom_typing().
+        ligand_conf_id: Ligand conformer ID to use.
+        params: Scoring parameters. If None, uses defaults.
+
+    Returns:
+        Tuple of (score, atom_grad) where atom_grad has shape (n_heavy, 3).
+        atom_grad[i] = dScore/d(pos_i).
+
+    Raises:
+        ValueError: If ligand molecule lacks 3D conformers.
+    """
+    if params is None:
+        params = EmpiricalParams()
+
+    if ligand_heavy.GetNumConformers() == 0:
+        raise ValueError("Ligand molecule has no conformers")
+
+    ligand_coords = np.array(ligand_heavy.GetConformer(ligand_conf_id).GetPositions())
+    ligand_typing = get_atom_typing(ligand_heavy)
+    n_rot = rdMolDescriptors.CalcNumRotatableBonds(ligand_heavy, strict=False)
+
+    # Vectorized geometry: (n_lig, n_prot, 3) and (n_lig, n_prot)
+    diff = ligand_coords[:, None, :] - protein_coords[None, :, :]
+    eucl = np.linalg.norm(diff, axis=-1)
+    d = eucl - ligand_typing.radii[:, None] - protein_typing.radii[None, :]
+
+    # --- Score terms (same as empirical_score_cached) ---
+    z = (d - params.gauss1_offset) / params.gauss1_width
+    g1_vals = np.exp(-(z**2))
+    g1_raw = float(np.sum(g1_vals))
+
+    rep_mask = d < 0
+    rep_raw = float(np.sum(np.where(rep_mask, d**2, 0.0)))
+
+    hydro_pair = (
+        ligand_typing.is_hydrophobic[:, None] & protein_typing.is_hydrophobic[None, :]
+    )
+    hydro_inner = (d <= params.hydro_good) & hydro_pair
+    hydro_trans = (d > params.hydro_good) & (d < params.hydro_bad) & hydro_pair
+    range_hydro = params.hydro_bad - params.hydro_good
+    hydro_raw = float(
+        np.sum(
+            np.where(
+                hydro_inner,
+                1.0,
+                np.where(hydro_trans, (params.hydro_bad - d) / range_hydro, 0.0),
+            )
+        )
+    )
+
+    hbond_pair = (
+        ligand_typing.is_hbond_donor[:, None]
+        & protein_typing.is_hbond_acceptor[None, :]
+    ) | (
+        ligand_typing.is_hbond_acceptor[:, None]
+        & protein_typing.is_hbond_donor[None, :]
+    )
+    hb_inner = (d <= params.hbond_good) & hbond_pair
+    hb_trans = (d > params.hbond_good) & (d < 0) & hbond_pair
+    hb_raw = float(
+        np.sum(
+            np.where(hb_inner, 1.0, np.where(hb_trans, -d / (-params.hbond_good), 0.0))
+        )
+    )
+
+    torsion_divisor = 1.0 + params.w_rot * n_rot
     score = (
         params.w_gauss1 * g1_raw
         + params.w_repulsion * rep_raw
         + params.w_hydrophobic * hydro_raw
         + params.w_hbond * hb_raw
-    )
+    ) / torsion_divisor
 
-    n_rot = rdMolDescriptors.CalcNumRotatableBonds(ligand_mol, strict=False)
-    score /= 1.0 + params.w_rot * n_rot
+    # --- Gradient of score w.r.t. surface distance d_ij ---
+    # df_dd[i,j] = d(Score)/d(d_ij)
+    df_dd = np.zeros_like(d)
 
-    if return_components:
-        return float(score), ScoreComponents(
-            gauss1_raw=g1_raw,
-            repulsion_raw=rep_raw,
-            hydrophobic_raw=hydro_raw,
-            hbond_raw=hb_raw,
-            w_gauss1=params.w_gauss1,
-            w_repulsion=params.w_repulsion,
-            w_hydrophobic=params.w_hydrophobic,
-            w_hbond=params.w_hbond,
-            n_rot=n_rot,
-            w_rot=params.w_rot,
-        )
-    return float(score)
+    # Gauss1: d/dd [w * exp(-z^2)] = w * (-2z/width) * exp(-z^2)
+    df_dd += params.w_gauss1 * (-2.0 * z / params.gauss1_width) * g1_vals
+
+    # Repulsion: d/dd [w * d^2] = w * 2d  (d < 0 only)
+    df_dd += params.w_repulsion * np.where(rep_mask, 2.0 * d, 0.0)
+
+    # Hydrophobic: d/dd [(bad-d)/range] = -1/range  (transition region only)
+    df_dd += params.w_hydrophobic * np.where(hydro_trans, -1.0 / range_hydro, 0.0)
+
+    # HBond: d/dd [-d/(-good)] = -1/(-good)  (transition region only)
+    df_dd += params.w_hbond * np.where(hb_trans, -1.0 / (-params.hbond_good), 0.0)
+
+    df_dd /= torsion_divisor
+
+    # --- Chain rule: atom gradient g_i = sum_j df_dd[i,j] * unit[i,j] ---
+    # unit[i,j] = (pos_ligand_i - pos_protein_j) / eucl[i,j]
+    safe_eucl = np.where(eucl > 1e-8, eucl, 1.0)
+    unit = diff / safe_eucl[:, :, None]
+    unit = np.where(eucl[:, :, None] > 1e-8, unit, 0.0)
+
+    atom_grad: NDArray = np.einsum("ij,ijk->ik", df_dd, unit)  # (n_heavy, 3)
+
+    return float(score), atom_grad
 
 
 # =============================================================================
-# Extensibility
+# Electrostatic Complementarity
 # =============================================================================
-
-
-class ScoringFunction(Protocol):
-    """Protocol for docking scoring functions.
-
-    This protocol defines the interface for scoring functions that can be
-    used with the pose optimization functions. Any callable matching this
-    signature can be used as a scoring function.
-
-    Example:
-        def my_scoring_fn(
-            ligand_mol: Chem.Mol,
-            protein_mol: Chem.Mol,
-            ligand_conf_id: int = 0,
-            protein_conf_id: int = 0,
-        ) -> float:
-            # Custom scoring logic
-            return score
-    """
-
-    def __call__(
-        self,
-        ligand_mol: Chem.Mol,
-        protein_mol: Chem.Mol,
-        ligand_conf_id: int = 0,
-        protein_conf_id: int = 0,
-    ) -> float:
-        """Compute docking score for a ligand-protein complex.
-
-        Args:
-            ligand_mol: Ligand RDKit Mol with 3D coordinates.
-            protein_mol: Protein RDKit Mol with 3D coordinates.
-            ligand_conf_id: Ligand conformer ID to use.
-            protein_conf_id: Protein conformer ID to use.
-
-        Returns:
-            Docking score (lower is better for binding).
-        """
-        ...
 
 
 def ec_score_cached(
@@ -757,17 +681,13 @@ def ec_score_cached(
 ) -> float:
     """Compute electrostatic complementarity with pre-computed protein data.
 
-    This is a cached scoring function for EC that parallels
-    ``vinardo_score_cached()``. It computes the Pearson correlation
-    between ligand and negated protein electrostatic potentials on the
-    ligand solvent-accessible surface.
+    Requires the full mol with H (Gasteiger charges). Exempt from the
+    heavy-atom-only contract used by the empirical scoring functions.
 
     Args:
-        ligand_mol: Ligand RDKit Mol with 3D coordinates.
-        protein_ec_coords: Pre-computed protein atom coordinates (with H)
-            as numpy array with shape (n_atoms, 3).
-        protein_ec_charges: Pre-computed protein Gasteiger charges (with H)
-            as numpy array with shape (n_atoms,).
+        ligand_mol: Ligand RDKit Mol with 3D coordinates (with H).
+        protein_ec_coords: Pre-computed protein atom coordinates (with H) (n_atoms, 3).
+        protein_ec_charges: Pre-computed protein Gasteiger charges (n_atoms,).
         ligand_conf_id: Ligand conformer ID to use.
 
     Returns:
@@ -780,11 +700,28 @@ def ec_score_cached(
     )
 
 
-def get_scoring_function(name: str = "vinardo") -> ScoringFunction:
+# =============================================================================
+# Extensibility
+# =============================================================================
+
+
+class ScoringFunction(Protocol):
+    """Protocol for docking scoring functions."""
+
+    def __call__(
+        self,
+        ligand_mol: Chem.Mol,
+        protein_mol: Chem.Mol,
+        ligand_conf_id: int = 0,
+        protein_conf_id: int = 0,
+    ) -> float: ...
+
+
+def get_scoring_function(name: str = "empirical") -> ScoringFunction:
     """Get a scoring function by name.
 
     Args:
-        name: Scoring function name ("vinardo", etc.).
+        name: Scoring function name ("empirical").
 
     Returns:
         Callable scoring function.
@@ -793,7 +730,7 @@ def get_scoring_function(name: str = "vinardo") -> ScoringFunction:
         ValueError: If scoring function not found.
     """
     functions: dict[str, ScoringFunction] = {
-        "vinardo": vinardo_score,
+        "empirical": empirical_score,
     }
     if name not in functions:
         raise ValueError(

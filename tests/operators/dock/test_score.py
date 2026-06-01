@@ -1,8 +1,4 @@
-"""Unit tests for Vinardo score components.
-
-TDD: written against the intended API *before* implementation.
-All tests fail until ScoreComponents and return_components are added to score.py.
-"""
+"""Unit tests for empirical score components."""
 
 import numpy as np
 import pytest
@@ -11,9 +7,9 @@ from rdkit.Chem import AllChem
 
 from cmxflow.operators.dock.score import (
     AtomTyping,
+    EmpiricalParams,
     ScoreComponents,
-    VinardoParams,
-    vinardo_score_cached,
+    empirical_score_cached,
 )
 
 # =============================================================================
@@ -43,82 +39,67 @@ def _make_protein_typing(
 
 
 def _benzene_system():
-    """Benzene ligand + 3 hydrophobic protein atoms ~3 Å away (surface dist ≈ 0)."""
-    ligand = Chem.RemoveHs(_make_mol_3d("c1ccccc1"))
+    """Heavy-atom benzene ligand + 3 hydrophobic protein atoms ~3 Å away."""
+    ligand = Chem.RemoveAllHs(_make_mol_3d("c1ccccc1"))
     protein_coords = np.array([[4.0, 0.0, 0.0], [4.0, 1.4, 0.0], [4.0, -1.4, 0.0]])
     protein_typing = _make_protein_typing(3, hydrophobic=True)
     return ligand, protein_coords, protein_typing
 
 
 # =============================================================================
-# TestVinardoScoreCachedComponents
+# TestEmpiricalScoreCachedComponents
 # =============================================================================
 
 
-class TestVinardoScoreCachedComponents:
-    """Tests for the return_components kwarg on vinardo_score_cached."""
+class TestEmpiricalScoreCachedComponents:
+    """Tests for empirical_score_cached which always returns ScoreComponents."""
 
-    def test_default_returns_float(self) -> None:
-        """Unchanged call signature still returns a plain float."""
+    def test_returns_score_components(self) -> None:
+        """empirical_score_cached always returns ScoreComponents."""
         ligand, pc, pt = _benzene_system()
-        assert isinstance(vinardo_score_cached(ligand, pc, pt), float)
+        result = empirical_score_cached(ligand, pc, pt)
+        assert isinstance(result, ScoreComponents)
 
-    def test_return_components_true_returns_tuple(self) -> None:
-        """return_components=True returns (float, ScoreComponents)."""
+    def test_total_is_float(self) -> None:
+        """comps.total is a float."""
         ligand, pc, pt = _benzene_system()
-        result = vinardo_score_cached(ligand, pc, pt, return_components=True)
-        assert isinstance(result, tuple) and len(result) == 2
-        score, comps = result
-        assert isinstance(score, float)
-        assert isinstance(comps, ScoreComponents)
+        comps = empirical_score_cached(ligand, pc, pt)
+        assert isinstance(comps.total, float)
 
-    def test_score_identical_with_and_without_components(self) -> None:
-        """Returned score is identical with and without components."""
+    def test_components_sum_to_total(self) -> None:
+        """comps.total must equal the sum of component terms."""
         ligand, pc, pt = _benzene_system()
-        plain = vinardo_score_cached(ligand, pc, pt)
-        with_comps, _ = vinardo_score_cached(ligand, pc, pt, return_components=True)
-        assert plain == pytest.approx(with_comps)
-
-    def test_components_total_matches_score(self) -> None:
-        """comps.total must equal the returned score — the key consistency invariant."""
-        ligand, pc, pt = _benzene_system()
-        score, comps = vinardo_score_cached(ligand, pc, pt, return_components=True)
-        assert comps.total == pytest.approx(score)
+        comps = empirical_score_cached(ligand, pc, pt)
+        reconstructed = comps.gauss1 + comps.repulsion + comps.hydrophobic + comps.hbond
+        assert reconstructed == pytest.approx(comps.total)
 
     def test_hydrophobic_raw_zero_when_no_hydrophobic_pairs(self) -> None:
         """hydrophobic_raw == 0 when protein has no hydrophobic atoms."""
         ligand, pc, _ = _benzene_system()
-        _, comps = vinardo_score_cached(
-            ligand,
-            pc,
-            _make_protein_typing(3, hydrophobic=False),
-            return_components=True,
+        comps = empirical_score_cached(
+            ligand, pc, _make_protein_typing(3, hydrophobic=False)
         )
         assert comps.hydrophobic_raw == 0.0
 
     def test_hbond_raw_zero_when_no_donor_acceptor_pairs(self) -> None:
         """hbond_raw == 0 when neither molecule has donors or acceptors."""
         ligand, pc, _ = _benzene_system()
-        _, comps = vinardo_score_cached(
-            ligand, pc, _make_protein_typing(3), return_components=True
-        )
+        comps = empirical_score_cached(ligand, pc, _make_protein_typing(3))
         assert comps.hbond_raw == 0.0
 
     def test_hydrophobic_raw_nonzero_when_close_hydrophobic_pairs(self) -> None:
         """Sanity: hydrophobic_raw > 0 when atoms are within the good cutoff."""
         ligand, pc, pt = _benzene_system()
-        _, comps = vinardo_score_cached(ligand, pc, pt, return_components=True)
+        comps = empirical_score_cached(ligand, pc, pt)
         assert comps.hydrophobic_raw > 0.0
 
     def test_weights_in_components_match_params(self) -> None:
-        """Weights stored in ScoreComponents must match the VinardoParams passed in."""
+        """Weights in ScoreComponents must match the EmpiricalParams passed in."""
         ligand, pc, pt = _benzene_system()
-        params = VinardoParams(
+        params = EmpiricalParams(
             w_gauss1=-0.050, w_repulsion=0.900, w_hydrophobic=-0.040, w_hbond=-0.700
         )
-        _, comps = vinardo_score_cached(
-            ligand, pc, pt, params=params, return_components=True
-        )
+        comps = empirical_score_cached(ligand, pc, pt, params=params)
         assert comps.w_gauss1 == pytest.approx(-0.050)
         assert comps.w_repulsion == pytest.approx(0.900)
         assert comps.w_hydrophobic == pytest.approx(-0.040)

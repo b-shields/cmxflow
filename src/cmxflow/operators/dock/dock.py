@@ -5,6 +5,7 @@ into protein binding sites using the empirical (Vinardo) scoring function and
 rigid-body/torsional pose optimization.
 """
 
+import dataclasses
 import logging
 from pathlib import Path
 from typing import Any
@@ -18,8 +19,8 @@ from cmxflow.operators.dock.ec import compute_gasteiger_charges
 from cmxflow.operators.dock.pose import (
     OptimizationResult,
     PoseParams,
-    _rigid_topk,
     optimize_pose_cached,
+    optimize_sobol_restarts,
 )
 from cmxflow.operators.dock.score import (
     AtomTyping,
@@ -325,97 +326,52 @@ class MoleculeDockBlock(MoleculeBlock):
         site_center = self._load_site_reference()
         w_ec = self.get_param("w_ec")
 
-        # Number of top rigid poses to pass to flexible refinement.
-        # Fixed at 3: covers the main failure mode (best rigid basin doesn't
-        # survive torsion relaxation) without 3× the flexible cost.
-        # Could be made mutable if tuning shows benefit.
-        N_FLEX_REFINE = 3
+        # When constraints are active, Sobol starts don't respect them — keep
+        # n_starts=1 so only the aligned pose (row 0) enters refinement.
+        n_starts = 1 if constrained_atoms else self.get_param("n_starts")
 
-        if rigid_only:
-            # Rigid-only mode: single-phase global search, no torsion DOFs.
-            pose_params = PoseParams(
-                max_iterations=self.get_param("max_iterations"),
-                translation_bounds=(-box_size, box_size),
-                optimize_torsions=False,
-                n_starts=self.get_param("n_starts"),
-                constrained_atom_indices=constrained_atoms,
-                constraint_weight=self._constraint_weight,
-            )
-            result = optimize_pose_cached(
-                mol,
+        # Phase 1: Sobol pre-screening — score sampled poses to find good basins.
+        sobol_params = PoseParams(
+            translation_bounds=(-box_size, box_size),
+            n_starts=n_starts,
+        )
+        starts = optimize_sobol_restarts(
+            mol,
+            protein_coords=self._protein_coords,
+            protein_typing=self._protein_typing,
+            params=sobol_params,
+            score_params=score_params,
+            site_center=site_center,
+            rigid=rigid_only,
+        )
+
+        # Phase 2: L-BFGS-B refinement from each Sobol starting pose.
+        refine_params = PoseParams(
+            max_iterations=self.get_param("max_iterations"),
+            translation_bounds=(-box_size, box_size),
+            optimize_torsions=not rigid_only,
+            n_starts=1,
+            constrained_atom_indices=constrained_atoms,
+            constraint_weight=self._constraint_weight,
+        )
+        result: OptimizationResult | None = None
+        for _, start_mol in starts:
+            candidate = optimize_pose_cached(
+                start_mol,
                 protein_coords=self._protein_coords,
                 protein_typing=self._protein_typing,
-                params=pose_params,
+                params=refine_params,
                 score_params=score_params,
-                site_center=site_center,
+                site_center=None,
                 protein_ec_coords=self._protein_ec_coords,
                 protein_ec_charges=self._protein_ec_charges,
                 w_ec=w_ec,
             )
-        else:
-            # Phase 1: rigid global search — cheap, covers the full box.
-            rigid_params = PoseParams(
-                max_iterations=self.get_param("max_iterations"),
-                translation_bounds=(-box_size, box_size),
-                optimize_torsions=False,
-                n_starts=self.get_param("n_starts"),
-            )
-            top_rigid = _rigid_topk(
-                mol,
-                protein_coords=self._protein_coords,
-                protein_typing=self._protein_typing,
-                params=rigid_params,
-                score_params=score_params,
-                site_center=site_center,
-                n_top=N_FLEX_REFINE,
-            )
+            if result is None or candidate.score < result.score:
+                result = candidate
 
-            # Phase 2: flexible local refinement from each top rigid pose.
-            # Small box — molecule is already in the right basin.
-            flex_params = PoseParams(
-                max_iterations=self.get_param("max_iterations"),
-                translation_bounds=(-2.0, 2.0),
-                optimize_torsions=True,
-                n_starts=1,
-                constrained_atom_indices=constrained_atoms,
-                constraint_weight=self._constraint_weight,
-            )
-
-            _protein_coords = self._protein_coords
-            _protein_typing = self._protein_typing
-            assert isinstance(_protein_coords, np.ndarray)
-            assert isinstance(_protein_typing, AtomTyping)
-
-            def _flex(rigid_mol: Chem.Mol) -> OptimizationResult:
-                return optimize_pose_cached(
-                    rigid_mol,
-                    protein_coords=_protein_coords,
-                    protein_typing=_protein_typing,
-                    params=flex_params,
-                    score_params=score_params,
-                    site_center=None,
-                    protein_ec_coords=self._protein_ec_coords,
-                    protein_ec_charges=self._protein_ec_charges,
-                    w_ec=w_ec,
-                )
-
-            result = _flex(top_rigid[0][1])
-            for _, rigid_mol in top_rigid[1:]:
-                candidate = _flex(rigid_mol)
-                if candidate.score < result.score:
-                    result = candidate
-
-            # Preserve the original input pose's score as the baseline.
-            import dataclasses
-
-            ligand_heavy_init = Chem.RemoveAllHs(mol)
-            initial_score = empirical_score_cached(
-                ligand_heavy_init,
-                self._protein_coords,
-                self._protein_typing,
-                params=score_params,
-            ).total
-            result = dataclasses.replace(result, initial_score=initial_score)
+        assert result is not None
+        result = dataclasses.replace(result, initial_score=starts[0][0])
 
         # Set properties
         result.mol.SetDoubleProp("docking_initial_pose_score", result.initial_score)

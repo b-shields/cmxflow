@@ -444,68 +444,7 @@ def constraint_weight_for_rmsd(target_rmsd_angstrom: float) -> float:
 # =============================================================================
 
 
-def _sample_restarts(
-    n_restarts: int,
-    box_size: float,
-    n_torsions: int,
-    max_torsion_change: float,
-    site_offset: NDArray | None = None,
-) -> NDArray:
-    """Sample Sobol quasi-random starting points for multi-start optimization.
-
-    Row 0 is always zeros — a local minimization from the input pose (the
-    aligned conformer). Rows 1..n_restarts-1 are Sobol quasi-random samples.
-
-    When ``site_offset`` is provided (binding-site-centered docking), rows 1+
-    are sampled uniformly within ``±box_size`` of the binding site center in
-    translation space, with full SO(3) coverage in rotation. This ensures the
-    global search is anchored to the pocket regardless of where the initial
-    conformer landed.
-
-    Without ``site_offset``, rows 1+ sample within ``±box_size`` of the input
-    pose — suitable for local refinement workflows (MCS overlay).
-
-    For ideal Sobol balance, n_restarts-1 should be a power of 2. Preferred
-    values: 2, 3, 5, 9, 17, 33 (i.e. 1 + 2^k).
-
-    Args:
-        n_restarts: Total number of starts (including the aligned pose).
-        box_size: Half-width of translation search box in Angstroms.
-        n_torsions: Number of torsion DOFs.
-        max_torsion_change: Maximum torsion change in degrees.
-        site_offset: Optional (3,) vector = site_center − mol_centroid. When
-            provided, Sobol translation samples are centered on the binding
-            site rather than on the input conformer.
-
-    Returns:
-        Array of shape (n_restarts, 6 + n_torsions).
-    """
-    dim = 6 + n_torsions
-    starts = np.zeros((n_restarts, dim))
-    if n_restarts <= 1:
-        return starts
-
-    # scramble=True: un-scrambled Sobol maps first sample to (0.5,...,0.5),
-    # which after scaling lands at the midpoint — a duplicate of row 0.
-    sampler = qmc.Sobol(d=dim, scramble=True, seed=0)
-    unit = sampler.random(n_restarts - 1)
-
-    lo = np.array([-box_size] * 3 + [-np.pi] * 3 + [-max_torsion_change] * n_torsions)
-    hi = np.array([box_size] * 3 + [np.pi] * 3 + [max_torsion_change] * n_torsions)
-    starts[1:] = qmc.scale(unit, lo, hi)
-
-    if site_offset is not None:
-        starts[1:, :3] += site_offset
-
-    return starts
-
-
-# =============================================================================
-# Starting point top-k search
-# =============================================================================
-
-
-def _optimize_topk(
+def optimize_sobol_restarts(
     ligand_mol: Chem.Mol,
     protein_coords: np.ndarray,
     protein_typing: AtomTyping,
@@ -517,7 +456,7 @@ def _optimize_topk(
     max_tries: int = 1024,
     max_score_per_heavy_atom: float = 3.0,
     diversity_rmsd: float = 0.0,
-) -> list[tuple[float, NDArray, NDArray]]:
+) -> list[tuple[float, Chem.Mol]]:
     """Multi-start sobol pre-screening, returning starting poses for minimization.
 
     Row 0 is always the input aligned pose (unconditional). This wastes one slot
@@ -546,7 +485,7 @@ def _optimize_topk(
             same basin.
 
     Returns:
-        List of (score, x0, pos) tuples of max length ``n_starts`` (params).
+        List of (score, mol) tuples of max length ``n_starts`` (params).
     """
     # Get heavy atom centroid
     ligand_heavy = Chem.RemoveAllHs(ligand_mol)
@@ -566,7 +505,7 @@ def _optimize_topk(
     # Set torsional bounds
     n_tor = 0
     if not rigid:
-        rotatable_dihedrals = get_rotatable_bonds(ligand_mol)
+        rotatable_dihedrals = get_rotatable_bonds(ligand_heavy)
         initial_torsions = np.array(
             [
                 get_dihedral_angle(ligand_heavy, *d, ligand_conf_id)
@@ -578,10 +517,11 @@ def _optimize_topk(
     # Sobol sampling
     n_random = params.n_starts - 1  # row 0 reserved for aligned pose
     sample_box = box_size / 2.0
-    n_radial = 3 + n_tor
-    n_total = 3 + n_radial
-    lo = np.array([-sample_box] * 3 + [-np.pi] * n_radial)
-    hi = np.array([sample_box] * 3 + [np.pi] * n_radial)
+    n_total = 6 + n_tor
+    lo = np.array(
+        [-sample_box] * 3 + [-np.pi] * 3 + [-params.max_torsion_change] * n_tor
+    )
+    hi = np.array([sample_box] * 3 + [np.pi] * 3 + [params.max_torsion_change] * n_tor)
     sampler = qmc.Sobol(d=n_total, scramble=True, seed=0)
 
     # Generate all max_tries points upfront so the Sobol sequence is contiguous.
@@ -595,7 +535,7 @@ def _optimize_topk(
     xs_all = np.vstack([x0, xs_sobol])
 
     # Rejection sampling loop: max_score and RMSD constraint
-    passed: list[tuple[float, NDArray, NDArray]] = []  # (score, x, positions)
+    passed: list[tuple[float, Chem.Mol, NDArray]] = []  # (score, x, positions)
     n_tried = 0
     for x in xs_all:
         n_tried += 1
@@ -629,14 +569,14 @@ def _optimize_topk(
         ).total
 
         if len(passed) == 0 or sc < max_score:
-            passed.append((sc, x, pos))
+            passed.append((sc, mol_c, pos))
 
         # Early stopping
         if len(passed) >= n_random:
             break
 
     logger.info(
-        "_optimize_topk: %d/%d candidates passed score < %.1f after %d tries.",
+        "sobol_restarts: %d/%d candidates passed score < %.1f after %d tries.",
         len(passed),
         n_random,
         max_score,
@@ -644,12 +584,12 @@ def _optimize_topk(
     )
     if len(passed) < n_random:
         logger.warning(
-            "_optimize_topk: only %d of %d non-clashing starts found.",
+            "sobol_restarts: only %d of %d non-clashing starts found.",
             len(passed),
             n_random,
         )
 
-    return passed
+    return [(p[0], p[1]) for p in passed]
 
 
 # =============================================================================
@@ -861,28 +801,16 @@ def optimize_pose_cached(
                 return vinardo - w_ec * ec + penalty
             return vinardo + penalty
 
-    # --- Multi-start loop ---
-    starts = _sample_restarts(
-        params.n_starts,
-        box_size,
-        n_torsions,
-        params.max_torsion_change,
-        site_offset=site_offset,
+    # --- Single L-BFGS-B minimize from x0=zeros (input pose) ---
+    x0 = np.zeros(6 + n_torsions)
+    best_res = minimize(
+        objective,
+        x0,
+        method="L-BFGS-B",
+        jac=use_grad,
+        bounds=bounds,
+        options={"maxiter": params.max_iterations, "gtol": params.tolerance},
     )
-    best_res = None
-    for x0_start in starts:
-        res = minimize(
-            objective,
-            x0_start,
-            method="L-BFGS-B",
-            jac=use_grad,
-            bounds=bounds,
-            options={"maxiter": params.max_iterations, "gtol": params.tolerance},
-        )
-        if best_res is None or res.fun < best_res.fun:
-            best_res = res
-
-    assert best_res is not None
 
     # --- Build output mol (full, with H) ---
     T = best_res.x[:3]

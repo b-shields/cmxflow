@@ -147,7 +147,7 @@ class MoleculeDockBlock(MoleculeBlock):
             # Pose search
             Integer("n_starts", 17, 1, 33),
             Integer("max_iterations", 200, 0, 300),
-            Continuous("box_size", 5.0, 0.5, 10.0),
+            Continuous("box_size", 10.0, 0.5, 20.0),
             Categorical("rigid", False, [True, False]),
         )
         self.set_inputs(**kwargs)

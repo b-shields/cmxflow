@@ -501,32 +501,31 @@ def _sample_restarts(
 
 
 # =============================================================================
-# Rigid-only top-k search
+# Starting point top-k search
 # =============================================================================
 
 
-def _rigid_topk(
+def _optimize_topk(
     ligand_mol: Chem.Mol,
     protein_coords: np.ndarray,
     protein_typing: AtomTyping,
     params: PoseParams,
     score_params: EmpiricalParams,
     site_center: np.ndarray | None = None,
-    n_top: int = 3,
+    rigid: bool = False,
     ligand_conf_id: int = 0,
-    oversample: int = 16,
-    diversity_rmsd: float = 2.0,
-) -> list[tuple[float, Chem.Mol]]:
-    """Rigid-body multi-start search with pre-screening, returning top-n poses.
+    max_tries: int = 1024,
+    max_score_per_heavy_atom: float = 3.0,
+    diversity_rmsd: float = 0.0,
+) -> list[tuple[float, NDArray, NDArray]]:
+    """Multi-start sobol pre-screening, returning starting poses for minimization.
 
-    Generates ``oversample × (n_starts - 1)`` Sobol candidate starting points,
-    quick-scores each with a single ``empirical_score_cached`` call (no
-    minimization), then selects ``n_starts - 1`` survivors via a greedy
-    max-diversity filter (minimum ``diversity_rmsd`` RMSD between selected
-    starts). Only the survivors proceed to L-BFGS-B, discarding candidates
-    buried inside the receptor or redundant with already-selected starts.
+    Row 0 is always the input aligned pose (unconditional). This wastes one slot
+    when the aligned pose is clashing, but preserves MCS/overlay behaviour where
+    the aligned start is intentionally the binding hypothesis.
 
-    Row 0 is always the input aligned pose and is never filtered.
+    Candidates are sampled within ``box_size / 2`` so they land near the pocket;
+    L-BFGS-B bounds remain at the full ``box_size``.
 
     Args:
         ligand_mol: Ligand with 3D coordinates.
@@ -536,135 +535,121 @@ def _rigid_topk(
         score_params: Scoring function parameters.
         site_center: Optional binding site centroid — anchors Sobol restarts
             to the pocket (rows 1+). Row 0 always starts from the input pose.
-        n_top: Number of top poses to return after minimization.
+        rigid: If True only optimize over translation and rotation.
         ligand_conf_id: Ligand conformer ID.
-        oversample: Sobol oversampling factor. Generates
-            ``oversample × (n_starts - 1)`` candidates before pre-screening.
-            Higher values improve diversity at negligible scoring cost.
-            Could be made mutable if tuning shows benefit.
+        max_tries: Maximum number of Sobol candidates to evaluate when
+            searching for ``n_starts - 1`` acceptable starts.
+        max_score_per_heavy_atom: Score threshold for accepting a Sobol candidate
+            where ``max_score`` is computed by multiplying by ``n_heavy``.
         diversity_rmsd: Minimum heavy-atom RMSD (Å) between selected starting
             poses. Prevents L-BFGS-B restarts from redundantly exploring the
-            same basin. Could be made mutable if tuning shows benefit.
+            same basin.
 
     Returns:
-        List of (score, mol) tuples, sorted ascending by score, length ≤ n_top.
+        List of (score, x0, pos) tuples of max length ``n_starts`` (params).
     """
+    # Get heavy atom centroid
     ligand_heavy = Chem.RemoveAllHs(ligand_mol)
     p0_heavy = np.array(ligand_heavy.GetConformer(ligand_conf_id).GetPositions())
     centroid = np.mean(p0_heavy, axis=0)
 
+    # Set max score
+    max_score = ligand_heavy.GetNumHeavyAtoms() * max_score_per_heavy_atom
+
+    # Set translational box size
     box_size = max(abs(params.translation_bounds[0]), abs(params.translation_bounds[1]))
     site_offset: NDArray | None = None
     if site_center is not None:
+        # Offset from center if specified
         site_offset = site_center - centroid
-        trans_bounds = [
-            (min(0.0, site_offset[k] - box_size), max(0.0, site_offset[k] + box_size))
-            for k in range(3)
-        ]
-    else:
-        trans_bounds = [(-box_size, box_size)] * 3
-    bounds = trans_bounds + [(-np.pi, np.pi)] * 3
 
+    # Set torsional bounds
+    n_tor = 0
+    if not rigid:
+        rotatable_dihedrals = get_rotatable_bonds(ligand_mol)
+        initial_torsions = np.array(
+            [
+                get_dihedral_angle(ligand_heavy, *d, ligand_conf_id)
+                for d in rotatable_dihedrals
+            ]
+        )
+        n_tor = len(rotatable_dihedrals)
+
+    # Sobol sampling
     n_random = params.n_starts - 1  # row 0 reserved for aligned pose
+    sample_box = box_size / 2.0
+    n_radial = 3 + n_tor
+    n_total = 3 + n_radial
+    lo = np.array([-sample_box] * 3 + [-np.pi] * n_radial)
+    hi = np.array([sample_box] * 3 + [np.pi] * n_radial)
+    sampler = qmc.Sobol(d=n_total, scramble=True, seed=0)
 
-    # --- Oversample + pre-screen ---
-    # Generate oversample × n_random Sobol candidates, quick-score each,
-    # then select n_random diverse, non-clashing starts for L-BFGS-B.
-    n_candidates = max(n_random, n_random * oversample)
-    all_candidates = _sample_restarts(
-        n_candidates + 1, box_size, 0, 0.0, site_offset=site_offset
-    )
+    # Generate all max_tries points upfront so the Sobol sequence is contiguous.
+    unit_all = sampler.random(max_tries)
+    xs_sobol = qmc.scale(unit_all, lo, hi)
+    if site_offset is not None:
+        xs_sobol[:, :3] += site_offset
 
-    scored: list[tuple[float, NDArray, NDArray]] = []  # (score, x, positions)
-    for x in all_candidates[1:]:
+    # Merge with initial point (always score starting pose)
+    x0 = np.zeros(shape=(1, n_total), dtype=np.float64)
+    xs_all = np.vstack([x0, xs_sobol])
+
+    # Rejection sampling loop: max_score and RMSD constraint
+    passed: list[tuple[float, NDArray, NDArray]] = []  # (score, x, positions)
+    n_tried = 0
+    for x in xs_all:
+        n_tried += 1
+        # Rigid translation + rotation
         T = x[:3]
         rot = Rotation.from_rotvec(x[3:6])
         mol_c = apply_rigid_transform(
             ligand_heavy, T, rot, ligand_conf_id, center=centroid
         )
+
+        # Torsions
+        if not rigid and n_tor > 0:
+            new_torsions = initial_torsions + x[6:]
+            mol_c = apply_torsion_changes(
+                mol_c, dict(zip(rotatable_dihedrals, new_torsions)), ligand_conf_id
+            )
+
+        # New positions
         pos = np.array(mol_c.GetConformer(ligand_conf_id).GetPositions())
+
+        # Check RMSD diversity contratin
+        if len(passed) > 1 and not all(
+            np.sqrt(np.mean(np.sum((pos - p[2]) ** 2, axis=1))) >= diversity_rmsd
+            for p in passed
+        ):
+            continue
+
+        # Check total empirical score constraint
         sc = empirical_score_cached(
             mol_c, protein_coords, protein_typing, ligand_conf_id, score_params
         ).total
-        scored.append((sc, x, pos))
-    scored.sort(key=lambda r: r[0])
 
-    # Greedy diversity selection: best score first, skip if too similar to
-    # an already-selected start.
-    selected_x: list[NDArray] = []
-    selected_pos: list[NDArray] = []
-    for sc, x, pos in scored:
-        if len(selected_x) >= n_random:
+        if len(passed) == 0 or sc < max_score:
+            passed.append((sc, x, pos))
+
+        # Early stopping
+        if len(passed) >= n_random:
             break
-        if all(
-            float(np.sqrt(np.mean(np.sum((pos - p) ** 2, axis=1)))) >= diversity_rmsd
-            for p in selected_pos
-        ):
-            selected_x.append(x)
-            selected_pos.append(pos)
 
-    # Fallback: if diversity filter is too strict, fill remaining slots in
-    # score order without the diversity constraint.
-    if len(selected_x) < n_random:
-        used = {id(x) for x in selected_x}
-        for sc, x, pos in scored:
-            if len(selected_x) >= n_random:
-                break
-            if id(x) not in used:
-                selected_x.append(x)
-                used.add(id(x))
-
-    starts = np.zeros((1 + len(selected_x), 6))
-    starts[0] = all_candidates[0]  # aligned pose
-    for i, x in enumerate(selected_x):
-        starts[i + 1] = x
-
-    # --- L-BFGS-B on filtered starts ---
-    use_grad = params.use_analytical_grad
-
-    def objective(x: NDArray):  # type: ignore[return]
-        T = x[:3]
-        rot = Rotation.from_rotvec(x[3:6])
-        mol = apply_rigid_transform(
-            ligand_heavy, T, rot, ligand_conf_id, center=centroid
+    logger.info(
+        "_optimize_topk: %d/%d candidates passed score < %.1f after %d tries.",
+        len(passed),
+        n_random,
+        max_score,
+        n_tried,
+    )
+    if len(passed) < n_random:
+        logger.warning(
+            "_optimize_topk: only %d of %d non-clashing starts found.",
+            len(passed),
+            n_random,
         )
-        if use_grad:
-            score, atom_grad = empirical_score_and_grad_cached(
-                mol, protein_coords, protein_typing, ligand_conf_id, score_params
-            )
-            pos = np.array(mol.GetConformer(ligand_conf_id).GetPositions())
-            dof_grad = _compute_dof_gradient(
-                x, pos, atom_grad, p0_heavy, centroid, [], []
-            )
-            return score, dof_grad
-        return empirical_score_cached(
-            mol, protein_coords, protein_typing, ligand_conf_id, score_params
-        ).total
 
-    all_results: list[tuple[float, NDArray]] = []
-    for x0 in starts:
-        res = minimize(
-            objective,
-            x0,
-            method="L-BFGS-B",
-            jac=use_grad,
-            bounds=bounds,
-            options={"maxiter": params.max_iterations, "gtol": params.tolerance},
-        )
-        all_results.append((float(res.fun), res.x))
-
-    all_results.sort(key=lambda r: r[0])
-
-    top_mols: list[tuple[float, Chem.Mol]] = []
-    for score, x in all_results[:n_top]:
-        T = x[:3]
-        rot = Rotation.from_rotvec(x[3:6])
-        out_mol = apply_rigid_transform(
-            ligand_mol, T, rot, ligand_conf_id, center=centroid
-        )
-        top_mols.append((score, out_mol))
-
-    return top_mols
+    return passed
 
 
 # =============================================================================

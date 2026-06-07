@@ -13,7 +13,7 @@ import numpy as np
 from numpy.typing import NDArray
 from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors, rdMolTransforms
-from scipy.optimize import minimize
+from scipy.optimize import basinhopping, minimize
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 from scipy.stats import qmc
@@ -74,6 +74,16 @@ class PoseParams:
             self-clash. 0 disables (exact pre-Phase-2 behavior). Vina uses 1.0.
             Intramolecular energy affects the search only — it is not included
             in the reported score.
+        basin_hops: Number of basin-hopping (iterated local search) steps per
+            start. 0 = single L-BFGS-B minimize from the start (pre-Phase-3
+            behavior). >0 runs a Metropolis-coupled walk: mutate → minimize →
+            accept/reject, keeping the best. This is the global-search engine.
+        basin_temperature: Metropolis temperature for accepting uphill local
+            minima during basin-hopping (kcal/mol scale).
+        step_translation: Std dev (Å) of the per-hop translation perturbation.
+        step_rotation: Std dev (rad) of the per-hop rotation-vector perturbation.
+        step_torsion: Std dev (deg) of the per-hop torsion perturbation.
+        seed: RNG seed for basin-hopping proposals and acceptance.
     """
 
     max_iterations: int = 100
@@ -86,6 +96,12 @@ class PoseParams:
     constrained_atom_indices: tuple[int, ...] = field(default_factory=tuple)
     constraint_weight: float = 0.0
     w_intra: float = 1.0
+    basin_hops: int = 0
+    basin_temperature: float = 1.0
+    step_translation: float = 2.0
+    step_rotation: float = 0.5
+    step_torsion: float = 60.0
+    seed: int = 0
 
 
 @dataclass
@@ -693,6 +709,46 @@ def optimize_sobol_restarts(
 
 
 # =============================================================================
+# Basin-hopping (iterated local search)
+# =============================================================================
+
+
+class _DOFStep:
+    """Per-DOF Gaussian proposal for basin-hopping, clipped to box bounds.
+
+    Perturbs translation, rotation-vector, and torsion DOFs with separate
+    amplitudes so each takes a controlled step (unlike a single isotropic
+    displacement), then clips back into the L-BFGS-B bounds.
+    """
+
+    def __init__(
+        self,
+        n_torsions: int,
+        lo: NDArray[np.floating],
+        hi: NDArray[np.floating],
+        t_sigma: float,
+        r_sigma: float,
+        tor_sigma: float,
+        rng: np.random.Generator,
+    ) -> None:
+        self.n_torsions = n_torsions
+        self.lo = lo
+        self.hi = hi
+        self.t_sigma = t_sigma
+        self.r_sigma = r_sigma
+        self.tor_sigma = tor_sigma
+        self.rng = rng
+
+    def __call__(self, x: NDArray) -> NDArray:
+        x = x.copy()
+        x[:3] += self.rng.normal(0.0, self.t_sigma, 3)
+        x[3:6] += self.rng.normal(0.0, self.r_sigma, 3)
+        if self.n_torsions:
+            x[6:] += self.rng.normal(0.0, self.tor_sigma, self.n_torsions)
+        return np.clip(x, self.lo, self.hi)
+
+
+# =============================================================================
 # Main Optimization Functions (cached path)
 # =============================================================================
 
@@ -713,9 +769,7 @@ def optimize_pose_cached(
     """Optimize ligand pose with pre-computed protein data.
 
     Performs rigid-body optimization (translation + rotation) and optionally
-    flexible optimization (torsion angles) using L-BFGS-B. Supports
-    multi-start optimization via Sobol quasi-random sampling, analytical
-    gradients, and atom-position constraints.
+    flexible optimization (torsion angles) using L-BFGS-B.
 
     When ``site_center`` is provided, Sobol restart samples (rows 1+) are
     anchored to the binding site rather than the input conformer. Row 0
@@ -742,6 +796,7 @@ def optimize_pose_cached(
         protein_ec_coords: Pre-computed protein coordinates (with H) for EC.
         protein_ec_charges: Pre-computed protein Gasteiger charges for EC.
         w_ec: Weight for EC term. When 0, EC is not computed during optimization.
+        protein_tree: Precomputed KDTree for sparse scoring.
 
     Returns:
         OptimizationResult with optimized molecule and metadata.
@@ -757,10 +812,10 @@ def optimize_pose_cached(
     centroid = np.mean(p0_heavy, axis=0)
     ligand_typing = get_atom_typing(ligand_heavy)  # fixed topology; compute once
 
+    # Identify rotatable bonds and subtrees for paired movement
     rotatable_dihedrals: list[tuple[int, int, int, int]] = []
     subtrees: list[tuple[int, ...]] = []
     initial_torsions: NDArray[np.floating] = np.array([])
-
     if params.optimize_torsions:
         rotatable_dihedrals = get_rotatable_bonds(ligand_heavy)
         subtrees = [
@@ -808,6 +863,7 @@ def optimize_pose_cached(
         for d in rotatable_dihedrals
     ]
 
+    # Search box definition
     box_size = max(abs(params.translation_bounds[0]), abs(params.translation_bounds[1]))
     site_offset: NDArray | None = None
     if site_center is not None:
@@ -899,7 +955,7 @@ def optimize_pose_cached(
             pos = np.array(
                 transformed_heavy.GetConformer(ligand_conf_id).GetPositions()
             )
-            vinardo = empirical_score_cached(
+            score = empirical_score_cached(
                 transformed_heavy,
                 protein_coords,
                 protein_typing,
@@ -941,19 +997,44 @@ def optimize_pose_cached(
                     protein_ec_charges,
                     ligand_conf_id,
                 )
-                return vinardo - w_ec * ec + penalty
-            return vinardo + penalty
+                return score - w_ec * ec + penalty
+            return score + penalty
 
-    # --- Single L-BFGS-B minimize from x0=zeros (input pose) ---
+    # --- Local minimize from x0=zeros, optionally wrapped in basin-hopping ---
     x0 = np.zeros(6 + n_torsions)
-    best_res = minimize(
-        objective,
-        x0,
+    minimizer_kwargs = dict(
         method="L-BFGS-B",
         jac=use_grad,
         bounds=bounds,
         options={"maxiter": params.max_iterations, "gtol": params.tolerance},
     )
+    if params.basin_hops > 0:
+        lo = np.array([b[0] for b in bounds])
+        hi = np.array([b[1] for b in bounds])
+        take_step = _DOFStep(
+            n_torsions,
+            lo,
+            hi,
+            params.step_translation,
+            params.step_rotation,
+            params.step_torsion,
+            np.random.default_rng(params.seed),
+        )
+        best_res = basinhopping(
+            objective,
+            x0,
+            niter=params.basin_hops,
+            T=params.basin_temperature,
+            minimizer_kwargs=minimizer_kwargs,
+            take_step=take_step,
+            seed=params.seed,
+        )
+        converged = bool(best_res.lowest_optimization_result.success)
+        n_iter = int(best_res.nit)
+    else:
+        best_res = minimize(objective, x0, **minimizer_kwargs)
+        converged = bool(best_res.success)
+        n_iter = int(best_res.nit)
 
     # --- Build output mol (full, with H) ---
     T = best_res.x[:3]
@@ -1017,8 +1098,8 @@ def optimize_pose_cached(
         translation=T,
         rotation=rot,
         torsion_changes=torsion_changes,
-        converged=best_res.success,
-        n_iterations=best_res.nit,
+        converged=converged,
+        n_iterations=n_iter,
         ec=final_ec,
         strain=strain,
     )

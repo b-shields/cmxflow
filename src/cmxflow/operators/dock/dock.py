@@ -159,6 +159,7 @@ class MoleculeDockBlock(MoleculeBlock):
             Continuous("w_ec", 0.0, 0.0, 5.0),
             # Pose search
             Integer("n_starts", 17, 1, 33),
+            Integer("basin_hops", 0, 0, 64),
             Integer("max_iterations", 200, 0, 300),
             Continuous("box_size", 10.0, 0.5, 20.0),
             Categorical("rigid", False, [True, False]),
@@ -366,6 +367,7 @@ class MoleculeDockBlock(MoleculeBlock):
             translation_bounds=(-box_size, box_size),
             optimize_torsions=not rigid_only,
             n_starts=1,
+            basin_hops=self.get_param("basin_hops"),
             constrained_atom_indices=constrained_atoms,
             constraint_weight=self._constraint_weight,
         )
@@ -376,12 +378,13 @@ class MoleculeDockBlock(MoleculeBlock):
             return r.score + (r.strain if self._score_strain else 0.0)
 
         result: OptimizationResult | None = None
-        for _, start_mol in starts:
+        for idx, (_, start_mol) in enumerate(starts):
             candidate = optimize_pose_cached(
                 start_mol,
                 protein_coords=self._protein_coords,
                 protein_typing=self._protein_typing,
-                params=refine_params,
+                # Distinct seed per chain so basin-hopping walks decorrelate.
+                params=dataclasses.replace(refine_params, seed=idx),
                 score_params=score_params,
                 site_center=None,
                 protein_ec_coords=self._protein_ec_coords,

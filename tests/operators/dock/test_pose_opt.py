@@ -618,3 +618,38 @@ class TestIntramolecularGradient:
         coords[0] = coords[-1]
         score, _ = intramolecular_score_and_grad(coords, pairs, EmpiricalParams())
         assert score > 0.0
+
+
+# =============================================================================
+# Basin-hopping / iterated local search (Phase 3)
+# =============================================================================
+
+
+class TestBasinHopping:
+    """ILS path: never worse than a single local minimize, and deterministic."""
+
+    def test_not_worse_than_single_minimize(self) -> None:
+        """Basin-hopping includes hop 0 (= single minimize), so it can't be worse.
+
+        Uses w_intra=0 so the reported intermolecular score equals the optimized
+        objective and the inequality is exact.
+        """
+        lig, pc, pt, _ = _make_system("c1ccccc1CCCCO")
+        single = optimize_pose_cached(
+            lig, pc, pt, params=PoseParams(basin_hops=0, w_intra=0.0, max_iterations=50)
+        )
+        ils = optimize_pose_cached(
+            lig,
+            pc,
+            pt,
+            params=PoseParams(basin_hops=15, w_intra=0.0, max_iterations=50, seed=0),
+        )
+        assert ils.score <= single.score + 1e-6
+
+    def test_deterministic_with_seed(self) -> None:
+        """Same seed → identical basin-hopping result."""
+        lig, pc, pt, _ = _make_system("c1ccccc1CCCCO")
+        params = PoseParams(basin_hops=10, max_iterations=50, seed=7)
+        a = optimize_pose_cached(lig, pc, pt, params=params)
+        b = optimize_pose_cached(lig, pc, pt, params=params)
+        assert a.score == pytest.approx(b.score)

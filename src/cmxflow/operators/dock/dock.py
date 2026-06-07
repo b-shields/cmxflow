@@ -164,6 +164,15 @@ class MoleculeDockBlock(MoleculeBlock):
             Continuous("box_size", 10.0, 2.0, 20.0),
             Categorical("rigid", False, [True, False]),
             # Sobol initialization screening (rejection sampling of starts)
+            # TODO(pose-search): tighten these HPO ranges from Stage 0 findings
+            # (abl1 sweep, see POSE_SEARCH_PLAN.md). Stage 0 showed:
+            #   - max_score_per_heavy_atom: a strict gate STARVES starts (mss=1
+            #     filled only ~6/16) and worsened gap; mss=5 (fills all starts)
+            #     was best. Useful region is the loose end ~3-8; the low floor
+            #     0.5 is counterproductive. Consider raising default->5, floor->3.
+            #   - diversity_rmsd: INERT in [0,3] (random Sobol poses are already
+            #     >3A apart, so the gate never binds). Either drop from HPO and
+            #     pin at 0, or only sweep >~4A (which re-introduces starvation).
             Integer("sobol_max_tries", 1024, 512, 8192),
             Continuous("max_score_per_heavy_atom", 3.0, 0.5, 10.0),
             Continuous("diversity_rmsd", 0.0, 0.0, 5.0),

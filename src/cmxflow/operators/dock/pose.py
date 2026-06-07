@@ -83,6 +83,11 @@ class PoseParams:
         step_translation: Std dev (Å) of the per-hop translation perturbation.
         step_rotation: Std dev (rad) of the per-hop rotation-vector perturbation.
         step_torsion: Std dev (deg) of the per-hop torsion perturbation.
+        ils_step_mode: Basin-hopping proposal style. "single" (default) mutates
+            one DOF group per hop (translation, rotation, or a single torsion),
+            Vina-style, so the local minimization refines the current basin and
+            the chain accumulates partial progress. "all" perturbs every DOF at
+            once (legacy; retained for comparison).
         seed: RNG seed for basin-hopping proposals and acceptance.
     """
 
@@ -101,6 +106,7 @@ class PoseParams:
     step_translation: float = 2.0
     step_rotation: float = 0.5
     step_torsion: float = 60.0
+    ils_step_mode: str = "single"
     seed: int = 0
 
 
@@ -753,6 +759,52 @@ class _DOFStep:
         return np.clip(x, self.lo, self.hi)
 
 
+class _SingleDOFStep:
+    """Vina-style single-group proposal for iterated local search.
+
+    Each call perturbs exactly ONE degree-of-freedom group -- translation
+    (3 components together), the rotation vector (3 together), or one torsion
+    -- chosen uniformly at random, then clips back into the L-BFGS-B bounds.
+    Mutating a single group keeps the proposal near the current pose so the
+    subsequent local minimization refines that basin rather than restarting,
+    which is what lets the Metropolis chain accumulate partial progress across
+    hops (the mechanism independent restarts lack).
+
+    Shares the constructor signature of ``_DOFStep`` so the two are
+    interchangeable at the call site.
+    """
+
+    def __init__(
+        self,
+        n_torsions: int,
+        lo: NDArray[np.floating],
+        hi: NDArray[np.floating],
+        t_sigma: float,
+        r_sigma: float,
+        tor_sigma: float,
+        rng: np.random.Generator,
+    ) -> None:
+        self.n_torsions = n_torsions
+        self.lo = lo
+        self.hi = hi
+        self.t_sigma = t_sigma
+        self.r_sigma = r_sigma
+        self.tor_sigma = tor_sigma
+        self.rng = rng
+
+    def __call__(self, x: NDArray) -> NDArray:
+        x = x.copy()
+        # Groups: 0 = translation, 1 = rotation, 2.. = individual torsions.
+        group = int(self.rng.integers(0, 2 + self.n_torsions))
+        if group == 0:
+            x[:3] += self.rng.normal(0.0, self.t_sigma, 3)
+        elif group == 1:
+            x[3:6] += self.rng.normal(0.0, self.r_sigma, 3)
+        else:
+            x[6 + (group - 2)] += self.rng.normal(0.0, self.tor_sigma)
+        return np.clip(x, self.lo, self.hi)
+
+
 # =============================================================================
 # Main Optimization Functions (cached path)
 # =============================================================================
@@ -1016,7 +1068,8 @@ def optimize_pose_cached(
     if params.basin_hops > 0:
         lo = np.array([b[0] for b in bounds])
         hi = np.array([b[1] for b in bounds])
-        take_step = _DOFStep(
+        step_cls = _DOFStep if params.ils_step_mode == "all" else _SingleDOFStep
+        take_step = step_cls(
             n_torsions,
             lo,
             hi,

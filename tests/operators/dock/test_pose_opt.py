@@ -22,6 +22,7 @@ from cmxflow.operators.dock.pose import (
     _constraint_penalty_value,
     _get_downstream_atoms,
     _rigid_fragments,
+    _SingleDOFStep,
     apply_rigid_transform,
     apply_torsion_changes,
     get_rotatable_bonds,
@@ -690,3 +691,77 @@ class TestBasinHopping:
         a = optimize_pose_cached(lig, pc, pt, params=params)
         b = optimize_pose_cached(lig, pc, pt, params=params)
         assert a.score == pytest.approx(b.score)
+
+    def test_all_dof_mode_still_runs(self) -> None:
+        """Legacy all-DOF proposal stays selectable for comparison runs."""
+        lig, pc, pt, _ = _make_system("c1ccccc1CCCCO")
+        single = optimize_pose_cached(
+            lig, pc, pt, params=PoseParams(basin_hops=0, w_intra=0.0, max_iterations=50)
+        )
+        ils_all = optimize_pose_cached(
+            lig,
+            pc,
+            pt,
+            params=PoseParams(
+                basin_hops=8,
+                w_intra=0.0,
+                max_iterations=50,
+                seed=0,
+                ils_step_mode="all",
+            ),
+        )
+        assert ils_all.score <= single.score + 1e-6
+
+
+class TestSingleDOFStep:
+    """Vina-style proposal: each hop perturbs exactly one DOF group."""
+
+    def _make_stepper(self, n_torsions: int) -> _SingleDOFStep:
+        dim = 6 + n_torsions
+        lo = np.full(dim, -1e9)
+        hi = np.full(dim, 1e9)
+        return _SingleDOFStep(
+            n_torsions, lo, hi, 2.0, 0.5, 60.0, np.random.default_rng(0)
+        )
+
+    def test_mutates_exactly_one_group(self) -> None:
+        """Over many calls, only one of {T, R, single torsion} changes."""
+        n_torsions = 4
+        step = self._make_stepper(n_torsions)
+        x0 = np.zeros(6 + n_torsions)
+        groups_seen = set()
+        for _ in range(200):
+            x = step(x0)
+            t_changed = np.any(x[:3] != x0[:3])
+            r_changed = np.any(x[3:6] != x0[3:6])
+            tor_changed = [x[6 + k] != x0[6 + k] for k in range(n_torsions)]
+            n_changed = int(t_changed) + int(r_changed) + sum(tor_changed)
+            assert n_changed == 1, "exactly one group must move per hop"
+            if t_changed:
+                groups_seen.add("T")
+            elif r_changed:
+                groups_seen.add("R")
+            else:
+                groups_seen.add(f"tor{tor_changed.index(True)}")
+        # Sampling should eventually touch every group.
+        assert groups_seen == {"T", "R", "tor0", "tor1", "tor2", "tor3"}
+
+    def test_respects_bounds(self) -> None:
+        """Proposals are clipped into [lo, hi]."""
+        dim = 6 + 2
+        lo = np.full(dim, -0.5)
+        hi = np.full(dim, 0.5)
+        step = _SingleDOFStep(2, lo, hi, 5.0, 5.0, 360.0, np.random.default_rng(1))
+        x0 = np.zeros(dim)
+        for _ in range(100):
+            x = step(x0)
+            assert np.all(x >= lo - 1e-12)
+            assert np.all(x <= hi + 1e-12)
+
+    def test_rigid_only_picks_translation_or_rotation(self) -> None:
+        """With no torsions, only translation/rotation groups are selectable."""
+        step = self._make_stepper(0)
+        x0 = np.zeros(6)
+        for _ in range(50):
+            x = step(x0)
+            assert not np.any(x[6:] != x0[6:])  # no torsion components exist

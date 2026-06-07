@@ -429,7 +429,6 @@ def _compute_dof_gradient(
     x: NDArray,
     pos: NDArray,
     atom_grad: NDArray,
-    p0_heavy: NDArray,
     centroid: NDArray,
     rotatable_dihedrals: list[tuple[int, int, int, int]],
     subtrees: list[tuple[int, ...]],
@@ -440,7 +439,6 @@ def _compute_dof_gradient(
         x: Pose vector [T(3), r(3), θ(n_torsions)].
         pos: Current heavy-atom positions (n_heavy, 3).
         atom_grad: Per-atom gradient from scoring fn (n_heavy, 3).
-        p0_heavy: Original heavy-atom positions before any transform (n_heavy, 3).
         centroid: Rotation centre (3,).
         rotatable_dihedrals: List of (i, j, k, l) dihedral tuples.
         subtrees: Precomputed downstream atom indices per torsion.
@@ -451,10 +449,17 @@ def _compute_dof_gradient(
     # Translation: sum of atom gradients
     grad_T = np.sum(atom_grad, axis=0)  # (3,)
 
-    # Rotation: exact rotvec gradient via body-frame torque
+    # Rotation: exact rotvec gradient via body-frame torque.
+    # The global rotation is applied to the *post-torsion* body coordinates:
+    #   pos = R @ q + centroid + T,  with q = R^T @ (pos - centroid - T).
+    # The body-frame lever arms must therefore be q (current positions mapped
+    # back through R and the pivot), NOT the pre-torsion p0_heavy - centroid.
+    # The two coincide only for a rigid body; using p0 corrupts the rotation
+    # gradient whenever torsions have displaced atoms.
     r = x[3:6]
     R_mat = Rotation.from_rotvec(r).as_matrix()
-    v_body = p0_heavy - centroid  # (n_heavy, 3) pre-rotation lever arms
+    d_spatial = pos - centroid - x[:3]  # (n_heavy, 3) lever arms about pivot
+    v_body = d_spatial @ R_mat  # = R^T @ d_spatial, post-torsion body arms
     g_body = atom_grad @ R_mat  # (n_heavy, 3) gradients in body frame
     tau_body = np.sum(np.cross(v_body, g_body), axis=0)  # (3,)
     grad_r = _right_jac_T(r) @ tau_body  # (3,)
@@ -944,7 +949,7 @@ def optimize_pose_cached(
                 score, atom_grad, pos, p0_heavy, params
             )
             dof_grad = _compute_dof_gradient(
-                x, pos, atom_grad, p0_heavy, centroid, rotatable_dihedrals, subtrees
+                x, pos, atom_grad, centroid, rotatable_dihedrals, subtrees
             )
             return score, dof_grad
 

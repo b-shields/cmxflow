@@ -203,7 +203,7 @@ class TestDofGradient:
             score_params,
         )
         analytical = _compute_dof_gradient(
-            x0, pos0, atom_grad0, p0_heavy, centroid, dihedrals, subtrees
+            x0, pos0, atom_grad0, centroid, dihedrals, subtrees
         )
 
         dim = len(x0)
@@ -285,6 +285,43 @@ class TestDofGradient:
         x0 = np.zeros(6 + n_torsions)
         # Set rotvec to 90° rotation about [1, 0, 0]
         x0[3] = np.pi / 2
+        self._check_dof_grad(
+            x0,
+            ligand_heavy,
+            p0_heavy,
+            centroid,
+            dihedrals,
+            subtrees,
+            protein_coords,
+            protein_typing,
+            score_params,
+        )
+
+    def test_dof_grad_at_nonzero_rotation_and_torsions(self) -> None:
+        """DOF grad with rotation AND torsions both off zero.
+
+        Regression: the rotation gradient must use the post-torsion body-frame
+        lever arms (R^T @ (pos - centroid - T)), not the pre-torsion p0. With
+        the stale p0 lever arms the rotation gradient is wrong whenever torsions
+        have displaced atoms -- the regime exercised here.
+        """
+        (
+            ligand_mol,
+            ligand_heavy,
+            p0_heavy,
+            centroid,
+            dihedrals,
+            subtrees,
+            protein_coords,
+            protein_typing,
+            score_params,
+        ) = _make_pose_system()
+        n_torsions = len(dihedrals)
+        assert n_torsions > 0, "test ligand must have rotatable bonds"
+        x0 = np.zeros(6 + n_torsions)
+        x0[3] = 0.4  # rotation about x
+        x0[4] = -0.3  # rotation about y
+        x0[6:] = np.linspace(20.0, -25.0, n_torsions)  # nonzero torsion changes
         self._check_dof_grad(
             x0,
             ligand_heavy,

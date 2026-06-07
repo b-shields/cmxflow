@@ -9,6 +9,8 @@ from cmxflow.operators.dock.score import (
     AtomTyping,
     EmpiricalParams,
     ScoreComponents,
+    build_protein_tree,
+    empirical_score_and_grad_cached,
     empirical_score_cached,
 )
 
@@ -104,3 +106,75 @@ class TestEmpiricalScoreCachedComponents:
         assert comps.w_repulsion == pytest.approx(0.900)
         assert comps.w_hydrophobic == pytest.approx(-0.040)
         assert comps.w_hbond == pytest.approx(-0.700)
+
+
+# =============================================================================
+# TestSparseCutoffPath
+# =============================================================================
+
+
+def _protein_cloud(ligand: Chem.Mol, n: int = 200, seed: int = 7) -> tuple:
+    """Random protein cloud around the ligand with mixed atom typing.
+
+    Returns (protein_coords, protein_typing) spanning near-contact to far
+    (>cutoff) atoms so both the close-range terms and the cutoff are exercised.
+    """
+    rng = np.random.default_rng(seed)
+    center = np.array(ligand.GetConformer().GetPositions()).mean(axis=0)
+    coords = center + rng.uniform(-12.0, 12.0, size=(n, 3))
+    typing = AtomTyping(
+        radii=rng.choice([1.6, 1.7, 2.0], size=n),
+        is_hydrophobic=rng.random(n) < 0.4,
+        is_hbond_donor=rng.random(n) < 0.2,
+        is_hbond_acceptor=rng.random(n) < 0.2,
+    )
+    return coords, typing
+
+
+class TestSparseCutoffPath:
+    """The KD-tree cutoff path must match the dense path to numerical precision."""
+
+    def test_score_matches_dense(self) -> None:
+        ligand = Chem.RemoveAllHs(_make_mol_3d("c1ccccc1CCO"))
+        pc, pt = _protein_cloud(ligand)
+        tree = build_protein_tree(pc)
+        dense = empirical_score_cached(ligand, pc, pt).total
+        sparse = empirical_score_cached(ligand, pc, pt, protein_tree=tree).total
+        assert sparse == pytest.approx(dense, abs=1e-8)
+
+    def test_grad_matches_dense(self) -> None:
+        ligand = Chem.RemoveAllHs(_make_mol_3d("c1ccccc1CCO"))
+        pc, pt = _protein_cloud(ligand)
+        tree = build_protein_tree(pc)
+        s_dense, g_dense = empirical_score_and_grad_cached(ligand, pc, pt)
+        s_sparse, g_sparse = empirical_score_and_grad_cached(
+            ligand, pc, pt, protein_tree=tree
+        )
+        assert s_sparse == pytest.approx(s_dense, abs=1e-8)
+        np.testing.assert_allclose(g_sparse, g_dense, atol=1e-8)
+
+    def test_cached_ligand_typing_matches(self) -> None:
+        """Passing pre-computed ligand_typing must not change the result."""
+        from cmxflow.operators.dock.score import get_atom_typing
+
+        ligand = Chem.RemoveAllHs(_make_mol_3d("c1ccccc1CCO"))
+        pc, pt = _protein_cloud(ligand)
+        tree = build_protein_tree(pc)
+        lt = get_atom_typing(ligand)
+        base = empirical_score_cached(ligand, pc, pt, protein_tree=tree).total
+        cached = empirical_score_cached(
+            ligand, pc, pt, protein_tree=tree, ligand_typing=lt
+        ).total
+        assert cached == pytest.approx(base, abs=1e-12)
+
+    def test_no_neighbors_in_range(self) -> None:
+        """Ligand far from all protein atoms: zero interaction, zero gradient."""
+        ligand = Chem.RemoveAllHs(_make_mol_3d("c1ccccc1CCO"))
+        pc = np.array(ligand.GetConformer().GetPositions()).mean(axis=0) + np.array(
+            [[100.0, 0.0, 0.0], [100.0, 2.0, 0.0]]
+        )
+        pt = _make_protein_typing(2, hydrophobic=True, donor=True, acceptor=True)
+        tree = build_protein_tree(pc)
+        score, grad = empirical_score_and_grad_cached(ligand, pc, pt, protein_tree=tree)
+        assert score == pytest.approx(0.0, abs=1e-12)
+        np.testing.assert_allclose(grad, 0.0, atol=1e-12)

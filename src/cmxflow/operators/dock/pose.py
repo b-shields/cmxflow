@@ -14,6 +14,7 @@ from numpy.typing import NDArray
 from rdkit import Chem
 from rdkit.Chem import rdMolTransforms
 from scipy.optimize import minimize
+from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 from scipy.stats import qmc
 
@@ -22,6 +23,7 @@ from cmxflow.operators.dock.score import (
     EmpiricalParams,
     empirical_score_and_grad_cached,
     empirical_score_cached,
+    get_atom_typing,
 )
 
 logger = logging.getLogger(__name__)
@@ -456,6 +458,7 @@ def optimize_sobol_restarts(
     max_tries: int = 1024,
     max_score_per_heavy_atom: float = 3.0,
     diversity_rmsd: float = 0.0,
+    protein_tree: cKDTree | None = None,
 ) -> list[tuple[float, Chem.Mol]]:
     """Multi-start sobol pre-screening, returning starting poses for minimization.
 
@@ -491,6 +494,7 @@ def optimize_sobol_restarts(
     ligand_heavy = Chem.RemoveAllHs(ligand_mol)
     p0_heavy = np.array(ligand_heavy.GetConformer(ligand_conf_id).GetPositions())
     centroid = np.mean(p0_heavy, axis=0)
+    ligand_typing = get_atom_typing(ligand_heavy)  # fixed topology; compute once
 
     # Set max score
     max_score = ligand_heavy.GetNumHeavyAtoms() * max_score_per_heavy_atom
@@ -565,7 +569,13 @@ def optimize_sobol_restarts(
 
         # Check total empirical score constraint
         sc = empirical_score_cached(
-            mol_c, protein_coords, protein_typing, ligand_conf_id, score_params
+            mol_c,
+            protein_coords,
+            protein_typing,
+            ligand_conf_id,
+            score_params,
+            protein_tree=protein_tree,
+            ligand_typing=ligand_typing,
         ).total
 
         if len(passed) == 0 or sc < max_score:
@@ -608,6 +618,7 @@ def optimize_pose_cached(
     protein_ec_coords: np.ndarray | None = None,
     protein_ec_charges: np.ndarray | None = None,
     w_ec: float = 0.0,
+    protein_tree: cKDTree | None = None,
 ) -> OptimizationResult:
     """Optimize ligand pose with pre-computed protein data.
 
@@ -654,6 +665,7 @@ def optimize_pose_cached(
     ligand_heavy = Chem.RemoveAllHs(ligand_mol)
     p0_heavy = np.array(ligand_heavy.GetConformer(ligand_conf_id).GetPositions())
     centroid = np.mean(p0_heavy, axis=0)
+    ligand_typing = get_atom_typing(ligand_heavy)  # fixed topology; compute once
 
     rotatable_dihedrals: list[tuple[int, int, int, int]] = []
     subtrees: list[tuple[int, ...]] = []
@@ -711,7 +723,13 @@ def optimize_pose_cached(
 
     # Initial score (combined empirical + EC)
     initial_score = empirical_score_cached(
-        ligand_heavy, protein_coords, protein_typing, ligand_conf_id, score_params
+        ligand_heavy,
+        protein_coords,
+        protein_typing,
+        ligand_conf_id,
+        score_params,
+        protein_tree=protein_tree,
+        ligand_typing=ligand_typing,
     ).total
     if w_ec > 0 and protein_ec_coords is not None and protein_ec_charges is not None:
         from cmxflow.operators.dock.score import ec_score_cached
@@ -749,6 +767,8 @@ def optimize_pose_cached(
                 protein_typing,
                 ligand_conf_id,
                 score_params,
+                protein_tree=protein_tree,
+                ligand_typing=ligand_typing,
             )
             score, atom_grad = _apply_constraint_penalty(
                 score, atom_grad, pos, p0_heavy, params
@@ -771,6 +791,8 @@ def optimize_pose_cached(
                 protein_typing,
                 ligand_conf_id,
                 score_params,
+                protein_tree=protein_tree,
+                ligand_typing=ligand_typing,
             ).total
             penalty = _constraint_penalty_value(pos, p0_heavy, params)
             if (

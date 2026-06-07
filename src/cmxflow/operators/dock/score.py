@@ -18,6 +18,7 @@ import numpy as np
 from numpy.typing import NDArray
 from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors
+from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
 
 logger = logging.getLogger(__name__)
@@ -408,6 +409,118 @@ def hbond_term(
 
 
 # =============================================================================
+# Neighbor cutoff (sparse scoring)
+# =============================================================================
+
+# Euclidean cutoff (Angstroms) beyond which no atom pair contributes. All terms
+# are exactly zero past hydro_bad=2.5 Å *surface* distance; with the largest
+# Vinardo radii summing to ~4.4 Å, a pair at 8 Å euclidean has surface distance
+# >=3.6 Å, where even the Gaussian tail is ~1e-9. So 8 Å is numerically exact.
+INTERACTION_CUTOFF: float = 8.0
+
+
+def build_protein_tree(protein_coords: np.ndarray) -> cKDTree:
+    """Build a KD-tree over protein atoms for neighbor queries.
+
+    Build once per receptor and pass to the scoring functions to enable the
+    sparse (cutoff) path, whose cost scales with the number of nearby atoms
+    rather than the full protein.
+
+    Args:
+        protein_coords: Protein atom coordinates (n_atoms, 3).
+
+    Returns:
+        cKDTree over the protein coordinates.
+    """
+    return cKDTree(protein_coords)
+
+
+def _neighbor_pairs(
+    ligand_coords: np.ndarray,
+    protein_tree: cKDTree,
+    cutoff: float,
+) -> tuple[NDArray[np.intp], NDArray[np.intp]]:
+    """Ligand/protein atom index pairs within ``cutoff`` (euclidean).
+
+    Args:
+        ligand_coords: Ligand atom coordinates (n_ligand, 3).
+        protein_tree: KD-tree over protein atoms.
+        cutoff: Euclidean cutoff in Angstroms.
+
+    Returns:
+        Tuple (i_idx, j_idx) of ligand and protein atom indices for each pair.
+    """
+    neighbors = protein_tree.query_ball_point(ligand_coords, r=cutoff)
+    counts = np.fromiter(
+        (len(n) for n in neighbors), dtype=np.intp, count=len(neighbors)
+    )
+    if counts.sum() == 0:
+        return np.empty(0, dtype=np.intp), np.empty(0, dtype=np.intp)
+    i_idx = np.repeat(np.arange(len(neighbors), dtype=np.intp), counts)
+    j_idx = np.concatenate([np.asarray(n, dtype=np.intp) for n in neighbors if n])
+    return i_idx, j_idx
+
+
+def _pair_term_sums_and_grad(
+    d: NDArray[np.floating],
+    hydro_pair: NDArray[np.bool_],
+    hbond_pair: NDArray[np.bool_],
+    params: EmpiricalParams,
+    torsion_divisor: float,
+) -> tuple[tuple[float, float, float, float], NDArray[np.floating]]:
+    """Per-pair Vinardo term sums and ``d(score)/d(surface_distance)``.
+
+    Elementwise in ``d`` so it serves both the dense (2-D distance matrix) and
+    sparse (1-D neighbor-pair) paths, keeping the term math in one place.
+
+    Args:
+        d: Surface distances, any shape.
+        hydro_pair: Hydrophobic-pair mask, broadcastable to ``d``.
+        hbond_pair: H-bond donor/acceptor-pair mask, broadcastable to ``d``.
+        params: Scoring parameters.
+        torsion_divisor: ``1 + w_rot * n_rot`` (applied to df_dd only).
+
+    Returns:
+        ((gauss1_raw, repulsion_raw, hydrophobic_raw, hbond_raw), df_dd) where
+        df_dd has the same shape as ``d``.
+    """
+    z = (d - params.gauss1_offset) / params.gauss1_width
+    g1 = np.exp(-(z**2))
+
+    rep_mask = d < 0
+    rep = np.where(rep_mask, d**2, 0.0)
+
+    range_hydro = params.hydro_bad - params.hydro_good
+    hydro_inner = (d <= params.hydro_good) & hydro_pair
+    hydro_trans = (d > params.hydro_good) & (d < params.hydro_bad) & hydro_pair
+    hydro = np.where(
+        hydro_inner,
+        1.0,
+        np.where(hydro_trans, (params.hydro_bad - d) / range_hydro, 0.0),
+    )
+
+    hb_inner = (d <= params.hbond_good) & hbond_pair
+    hb_trans = (d > params.hbond_good) & (d < 0) & hbond_pair
+    hb = np.where(hb_inner, 1.0, np.where(hb_trans, -d / (-params.hbond_good), 0.0))
+
+    raws = (
+        float(np.sum(g1)),
+        float(np.sum(rep)),
+        float(np.sum(hydro)),
+        float(np.sum(hb)),
+    )
+
+    df_dd = (
+        params.w_gauss1 * (-2.0 * z / params.gauss1_width) * g1
+        + params.w_repulsion * np.where(rep_mask, 2.0 * d, 0.0)
+        + params.w_hydrophobic * np.where(hydro_trans, -1.0 / range_hydro, 0.0)
+        + params.w_hbond * np.where(hb_trans, -1.0 / (-params.hbond_good), 0.0)
+    ) / torsion_divisor
+
+    return raws, df_dd
+
+
+# =============================================================================
 # Main Scoring Functions
 # =============================================================================
 
@@ -470,6 +583,9 @@ def empirical_score_cached(
     protein_typing: AtomTyping,
     ligand_conf_id: int = 0,
     params: EmpiricalParams | None = None,
+    protein_tree: cKDTree | None = None,
+    cutoff: float = INTERACTION_CUTOFF,
+    ligand_typing: AtomTyping | None = None,
 ) -> ScoreComponents:
     """Compute docking score and component breakdown with pre-computed protein data.
 
@@ -482,6 +598,13 @@ def empirical_score_cached(
         protein_typing: Pre-computed protein atom typing from get_atom_typing().
         ligand_conf_id: Ligand conformer ID to use.
         params: Scoring parameters. If None, uses defaults.
+        protein_tree: Optional KD-tree from ``build_protein_tree``. When given,
+            uses the sparse cutoff path (cost scales with nearby atoms, not the
+            full protein); numerically identical to the dense path within ~1e-8.
+        cutoff: Euclidean neighbor cutoff in Angstroms (sparse path only).
+        ligand_typing: Optional pre-computed ligand typing. Pass it to avoid
+            recomputing SMARTS matches every call in an optimization loop
+            (ligand topology is fixed; only coordinates change).
 
     Returns:
         ScoreComponents with per-term raw sums, weights, and total score.
@@ -497,42 +620,65 @@ def empirical_score_cached(
 
     ligand_conf = ligand_heavy.GetConformer(ligand_conf_id)
     ligand_coords = np.array(ligand_conf.GetPositions())
-    ligand_typing = get_atom_typing(ligand_heavy)
+    if ligand_typing is None:
+        ligand_typing = get_atom_typing(ligand_heavy)
 
-    distances = compute_surface_distances(
-        ligand_coords,
-        protein_coords,
-        ligand_typing.radii,
-        protein_typing.radii,
-    )
+    if protein_tree is not None:
+        i_idx, j_idx = _neighbor_pairs(ligand_coords, protein_tree, cutoff)
+        diff = ligand_coords[i_idx] - protein_coords[j_idx]
+        d = (
+            np.linalg.norm(diff, axis=-1)
+            - ligand_typing.radii[i_idx]
+            - protein_typing.radii[j_idx]
+        )
+        hydro_pair = (
+            ligand_typing.is_hydrophobic[i_idx] & protein_typing.is_hydrophobic[j_idx]
+        )
+        hbond_pair = (
+            ligand_typing.is_hbond_donor[i_idx]
+            & protein_typing.is_hbond_acceptor[j_idx]
+        ) | (
+            ligand_typing.is_hbond_acceptor[i_idx]
+            & protein_typing.is_hbond_donor[j_idx]
+        )
+        (g1_raw, rep_raw, hydro_raw, hb_raw), _ = _pair_term_sums_and_grad(
+            d, hydro_pair, hbond_pair, params, 1.0
+        )
+    else:
+        distances = compute_surface_distances(
+            ligand_coords,
+            protein_coords,
+            ligand_typing.radii,
+            protein_typing.radii,
+        )
 
-    g1_raw = float(
-        np.sum(gauss1_term(distances, params.gauss1_offset, params.gauss1_width))
-    )
-    rep_raw = float(np.sum(repulsion_term(distances)))
-    hydro_raw = float(
-        np.sum(
-            hydrophobic_term(
-                distances,
-                ligand_typing.is_hydrophobic,
-                protein_typing.is_hydrophobic,
-                params.hydro_good,
-                params.hydro_bad,
+        g1_raw = float(
+            np.sum(gauss1_term(distances, params.gauss1_offset, params.gauss1_width))
+        )
+        rep_raw = float(np.sum(repulsion_term(distances)))
+        hydro_raw = float(
+            np.sum(
+                hydrophobic_term(
+                    distances,
+                    ligand_typing.is_hydrophobic,
+                    protein_typing.is_hydrophobic,
+                    params.hydro_good,
+                    params.hydro_bad,
+                )
             )
         )
-    )
-    hb_raw = float(
-        np.sum(
-            hbond_term(
-                distances,
-                ligand_typing.is_hbond_donor,
-                ligand_typing.is_hbond_acceptor,
-                protein_typing.is_hbond_donor,
-                protein_typing.is_hbond_acceptor,
-                params.hbond_good,
+        hb_raw = float(
+            np.sum(
+                hbond_term(
+                    distances,
+                    ligand_typing.is_hbond_donor,
+                    ligand_typing.is_hbond_acceptor,
+                    protein_typing.is_hbond_donor,
+                    protein_typing.is_hbond_acceptor,
+                    params.hbond_good,
+                )
             )
         )
-    )
 
     n_rot = rdMolDescriptors.CalcNumRotatableBonds(ligand_heavy, strict=False)
 
@@ -556,6 +702,9 @@ def empirical_score_and_grad_cached(
     protein_typing: AtomTyping,
     ligand_conf_id: int = 0,
     params: EmpiricalParams | None = None,
+    protein_tree: cKDTree | None = None,
+    cutoff: float = INTERACTION_CUTOFF,
+    ligand_typing: AtomTyping | None = None,
 ) -> tuple[float, NDArray]:
     """Compute docking score and per-heavy-atom gradient with pre-computed protein data.
 
@@ -569,6 +718,13 @@ def empirical_score_and_grad_cached(
         protein_typing: Pre-computed protein atom typing from get_atom_typing().
         ligand_conf_id: Ligand conformer ID to use.
         params: Scoring parameters. If None, uses defaults.
+        protein_tree: Optional KD-tree from ``build_protein_tree``. When given,
+            uses the sparse cutoff path (cost scales with nearby atoms, not the
+            full protein); numerically identical to the dense path within ~1e-8.
+        cutoff: Euclidean neighbor cutoff in Angstroms (sparse path only).
+        ligand_typing: Optional pre-computed ligand typing. Pass it to avoid
+            recomputing SMARTS matches every call in an optimization loop
+            (ligand topology is fixed; only coordinates change).
 
     Returns:
         Tuple of (score, atom_grad) where atom_grad has shape (n_heavy, 3).
@@ -584,38 +740,57 @@ def empirical_score_and_grad_cached(
         raise ValueError("Ligand molecule has no conformers")
 
     ligand_coords = np.array(ligand_heavy.GetConformer(ligand_conf_id).GetPositions())
-    ligand_typing = get_atom_typing(ligand_heavy)
+    if ligand_typing is None:
+        ligand_typing = get_atom_typing(ligand_heavy)
     n_rot = rdMolDescriptors.CalcNumRotatableBonds(ligand_heavy, strict=False)
+    n_lig = len(ligand_coords)
+    torsion_divisor = 1.0 + params.w_rot * n_rot
 
-    # Vectorized geometry: (n_lig, n_prot, 3) and (n_lig, n_prot)
+    if protein_tree is not None:
+        # --- Sparse path: only atom pairs within cutoff ---
+        i_idx, j_idx = _neighbor_pairs(ligand_coords, protein_tree, cutoff)
+        diff = ligand_coords[i_idx] - protein_coords[j_idx]  # (n_pairs, 3)
+        eucl = np.linalg.norm(diff, axis=-1)  # (n_pairs,)
+        d = eucl - ligand_typing.radii[i_idx] - protein_typing.radii[j_idx]
+        hydro_pair = (
+            ligand_typing.is_hydrophobic[i_idx] & protein_typing.is_hydrophobic[j_idx]
+        )
+        hbond_pair = (
+            ligand_typing.is_hbond_donor[i_idx]
+            & protein_typing.is_hbond_acceptor[j_idx]
+        ) | (
+            ligand_typing.is_hbond_acceptor[i_idx]
+            & protein_typing.is_hbond_donor[j_idx]
+        )
+        (g1_raw, rep_raw, hydro_raw, hb_raw), df_dd = _pair_term_sums_and_grad(
+            d, hydro_pair, hbond_pair, params, torsion_divisor
+        )
+        score = (
+            params.w_gauss1 * g1_raw
+            + params.w_repulsion * rep_raw
+            + params.w_hydrophobic * hydro_raw
+            + params.w_hbond * hb_raw
+        ) / torsion_divisor
+
+        # Chain rule + scatter-add onto ligand atoms (bincount per axis)
+        safe_eucl = np.where(eucl > 1e-8, eucl, 1.0)
+        unit = np.where(eucl[:, None] > 1e-8, diff / safe_eucl[:, None], 0.0)
+        contrib = df_dd[:, None] * unit  # (n_pairs, 3)
+        atom_grad = np.zeros((n_lig, 3))
+        for axis in range(3):
+            atom_grad[:, axis] = np.bincount(
+                i_idx, weights=contrib[:, axis], minlength=n_lig
+            )
+        return float(score), atom_grad
+
+    # --- Dense path: full (n_lig, n_prot) ---
     diff = ligand_coords[:, None, :] - protein_coords[None, :, :]
     eucl = np.linalg.norm(diff, axis=-1)
     d = eucl - ligand_typing.radii[:, None] - protein_typing.radii[None, :]
 
-    # --- Score terms (same as empirical_score_cached) ---
-    z = (d - params.gauss1_offset) / params.gauss1_width
-    g1_vals = np.exp(-(z**2))
-    g1_raw = float(np.sum(g1_vals))
-
-    rep_mask = d < 0
-    rep_raw = float(np.sum(np.where(rep_mask, d**2, 0.0)))
-
     hydro_pair = (
         ligand_typing.is_hydrophobic[:, None] & protein_typing.is_hydrophobic[None, :]
     )
-    hydro_inner = (d <= params.hydro_good) & hydro_pair
-    hydro_trans = (d > params.hydro_good) & (d < params.hydro_bad) & hydro_pair
-    range_hydro = params.hydro_bad - params.hydro_good
-    hydro_raw = float(
-        np.sum(
-            np.where(
-                hydro_inner,
-                1.0,
-                np.where(hydro_trans, (params.hydro_bad - d) / range_hydro, 0.0),
-            )
-        )
-    )
-
     hbond_pair = (
         ligand_typing.is_hbond_donor[:, None]
         & protein_typing.is_hbond_acceptor[None, :]
@@ -623,15 +798,9 @@ def empirical_score_and_grad_cached(
         ligand_typing.is_hbond_acceptor[:, None]
         & protein_typing.is_hbond_donor[None, :]
     )
-    hb_inner = (d <= params.hbond_good) & hbond_pair
-    hb_trans = (d > params.hbond_good) & (d < 0) & hbond_pair
-    hb_raw = float(
-        np.sum(
-            np.where(hb_inner, 1.0, np.where(hb_trans, -d / (-params.hbond_good), 0.0))
-        )
+    (g1_raw, rep_raw, hydro_raw, hb_raw), df_dd = _pair_term_sums_and_grad(
+        d, hydro_pair, hbond_pair, params, torsion_divisor
     )
-
-    torsion_divisor = 1.0 + params.w_rot * n_rot
     score = (
         params.w_gauss1 * g1_raw
         + params.w_repulsion * rep_raw
@@ -639,31 +808,11 @@ def empirical_score_and_grad_cached(
         + params.w_hbond * hb_raw
     ) / torsion_divisor
 
-    # --- Gradient of score w.r.t. surface distance d_ij ---
-    # df_dd[i,j] = d(Score)/d(d_ij)
-    df_dd = np.zeros_like(d)
-
-    # Gauss1: d/dd [w * exp(-z^2)] = w * (-2z/width) * exp(-z^2)
-    df_dd += params.w_gauss1 * (-2.0 * z / params.gauss1_width) * g1_vals
-
-    # Repulsion: d/dd [w * d^2] = w * 2d  (d < 0 only)
-    df_dd += params.w_repulsion * np.where(rep_mask, 2.0 * d, 0.0)
-
-    # Hydrophobic: d/dd [(bad-d)/range] = -1/range  (transition region only)
-    df_dd += params.w_hydrophobic * np.where(hydro_trans, -1.0 / range_hydro, 0.0)
-
-    # HBond: d/dd [-d/(-good)] = -1/(-good)  (transition region only)
-    df_dd += params.w_hbond * np.where(hb_trans, -1.0 / (-params.hbond_good), 0.0)
-
-    df_dd /= torsion_divisor
-
-    # --- Chain rule: atom gradient g_i = sum_j df_dd[i,j] * unit[i,j] ---
-    # unit[i,j] = (pos_ligand_i - pos_protein_j) / eucl[i,j]
+    # Chain rule: atom gradient g_i = sum_j df_dd[i,j] * unit[i,j]
     safe_eucl = np.where(eucl > 1e-8, eucl, 1.0)
     unit = diff / safe_eucl[:, :, None]
     unit = np.where(eucl[:, :, None] > 1e-8, unit, 0.0)
-
-    atom_grad: NDArray = np.einsum("ij,ijk->ik", df_dd, unit)  # (n_heavy, 3)
+    atom_grad = np.einsum("ij,ijk->ik", df_dd, unit)  # (n_heavy, 3)
 
     return float(score), atom_grad
 

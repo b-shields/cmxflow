@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem
+from scipy.spatial import cKDTree
 
 from cmxflow.operators.base import MoleculeBlock
 from cmxflow.operators.dock.ec import compute_gasteiger_charges
@@ -25,6 +26,7 @@ from cmxflow.operators.dock.pose import (
 from cmxflow.operators.dock.score import (
     AtomTyping,
     EmpiricalParams,
+    build_protein_tree,
     empirical_score_cached,
     get_atom_typing,
 )
@@ -156,6 +158,7 @@ class MoleculeDockBlock(MoleculeBlock):
         # Lazy-loaded protein scoring components
         self._protein_coords: np.ndarray | None = None
         self._protein_typing: AtomTyping | None = None
+        self._protein_tree: cKDTree | None = None
         self._protein_ec_coords: np.ndarray | None = None
         self._protein_ec_charges: np.ndarray | None = None
 
@@ -239,6 +242,7 @@ class MoleculeDockBlock(MoleculeBlock):
         protein_conf = mol.GetConformer()
         self._protein_coords = np.array(protein_conf.GetPositions())
         self._protein_typing = get_atom_typing(mol)
+        self._protein_tree = build_protein_tree(self._protein_coords)
 
     def _prune_to_single_conformer(self, mol: Chem.Mol) -> Chem.Mol:
         """Reduce molecule to single conformer for docking.
@@ -343,6 +347,7 @@ class MoleculeDockBlock(MoleculeBlock):
             score_params=score_params,
             site_center=site_center,
             rigid=rigid_only,
+            protein_tree=self._protein_tree,
         )
 
         # Phase 2: L-BFGS-B refinement from each Sobol starting pose.
@@ -366,6 +371,7 @@ class MoleculeDockBlock(MoleculeBlock):
                 protein_ec_coords=self._protein_ec_coords,
                 protein_ec_charges=self._protein_ec_charges,
                 w_ec=w_ec,
+                protein_tree=self._protein_tree,
             )
             if result is None or candidate.score < result.score:
                 result = candidate
@@ -390,6 +396,7 @@ class MoleculeDockBlock(MoleculeBlock):
                 self._protein_coords,
                 self._protein_typing,
                 params=score_params,
+                protein_tree=self._protein_tree,
             )
             result.mol.SetDoubleProp("docking_gauss1", comps.gauss1)
             result.mol.SetDoubleProp("docking_repulsion", comps.repulsion)

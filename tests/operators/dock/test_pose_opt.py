@@ -17,9 +17,11 @@ from scipy.spatial.transform import Rotation
 from cmxflow.operators.dock.pose import (
     PoseParams,
     _apply_constraint_penalty,
+    _build_intramolecular_pairs,
     _compute_dof_gradient,
     _constraint_penalty_value,
     _get_downstream_atoms,
+    _rigid_fragments,
     apply_rigid_transform,
     apply_torsion_changes,
     get_rotatable_bonds,
@@ -30,6 +32,7 @@ from cmxflow.operators.dock.score import (
     EmpiricalParams,
     empirical_score_and_grad_cached,
     get_atom_typing,
+    intramolecular_score_and_grad,
 )
 
 # =============================================================================
@@ -545,3 +548,73 @@ class TestAmideBondExclusion:
         dihedrals = get_rotatable_bonds(mol)
         # Should have at least one rotatable bond (the acyl-oxygen or alkyl-oxygen)
         assert len(dihedrals) > 0
+
+
+# =============================================================================
+# Intramolecular energy (Phase 2)
+# =============================================================================
+
+
+class TestIntramolecularPairs:
+    """Conf-dependent pair selection: 1-4+ and crossing a rotatable bond."""
+
+    def test_butane_single_pair(self) -> None:
+        """n-butane (C0-C1-C2-C3): only one movable 1-4 pair, (0, 3)."""
+        mol = Chem.RemoveAllHs(Chem.MolFromSmiles("CCCC"))
+        dih = get_rotatable_bonds(mol)
+        pairs = _build_intramolecular_pairs(mol, get_atom_typing(mol), dih)
+        got = set(zip(pairs.i_idx.tolist(), pairs.j_idx.tolist()))
+        assert got == {(0, 3)}
+
+    def test_benzene_no_pairs(self) -> None:
+        """A rigid ring has no rotatable bonds and no movable intra pairs."""
+        mol = Chem.RemoveAllHs(Chem.MolFromSmiles("c1ccccc1"))
+        dih = get_rotatable_bonds(mol)
+        pairs = _build_intramolecular_pairs(mol, get_atom_typing(mol), dih)
+        assert pairs.i_idx.size == 0
+
+    def test_ring_internal_pairs_excluded(self) -> None:
+        """Ethylbenzene: ring-internal pairs are constant, hence excluded."""
+        mol = Chem.RemoveAllHs(Chem.MolFromSmiles("c1ccccc1CC"))
+        dih = get_rotatable_bonds(mol)
+        frag = _rigid_fragments(mol, dih)
+        pairs = _build_intramolecular_pairs(mol, get_atom_typing(mol), dih)
+        # every selected pair crosses a fragment boundary (i.e. a rotatable bond)
+        for i, j in zip(pairs.i_idx.tolist(), pairs.j_idx.tolist()):
+            assert frag[i] != frag[j]
+
+
+class TestIntramolecularGradient:
+    """intramolecular_score_and_grad atom gradient vs finite differences."""
+
+    def test_grad_matches_fd(self) -> None:
+        mol = Chem.RemoveAllHs(_make_ligand("OCCCCCCO"))
+        dih = get_rotatable_bonds(mol)
+        typing = get_atom_typing(mol)
+        pairs = _build_intramolecular_pairs(mol, typing, dih)
+        assert pairs.i_idx.size > 0  # ensure the test exercises real pairs
+        coords = np.array(mol.GetConformer().GetPositions())
+        params = EmpiricalParams()
+
+        _, grad = intramolecular_score_and_grad(coords, pairs, params)
+        fd = np.zeros_like(coords)
+        for a in range(coords.shape[0]):
+            for k in range(3):
+                cp = coords.copy()
+                cp[a, k] += EPS
+                sp = intramolecular_score_and_grad(cp, pairs, params)[0]
+                cp[a, k] -= 2 * EPS
+                sm = intramolecular_score_and_grad(cp, pairs, params)[0]
+                fd[a, k] = (sp - sm) / (2 * EPS)
+        np.testing.assert_allclose(grad, fd, atol=ATOL)
+
+    def test_self_clash_penalized(self) -> None:
+        """Overlapping non-bonded atoms give a positive (repulsive) energy."""
+        mol = Chem.RemoveAllHs(_make_ligand("OCCCCCCO"))
+        dih = get_rotatable_bonds(mol)
+        pairs = _build_intramolecular_pairs(mol, get_atom_typing(mol), dih)
+        coords = np.array(mol.GetConformer().GetPositions())
+        # Collapse atom 0 onto the far end to force a clash.
+        coords[0] = coords[-1]
+        score, _ = intramolecular_score_and_grad(coords, pairs, EmpiricalParams())
+        assert score > 0.0

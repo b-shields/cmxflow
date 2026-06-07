@@ -63,9 +63,12 @@ class MoleculeDockBlock(MoleculeBlock):
 
     Output Properties:
         - docking_initial_pose_score: Score before optimization.
-        - docking_score: Final optimized score (empirical + EC adjustment).
+        - docking_score: Final optimized score (empirical + EC adjustment, plus
+          ligand strain when ``score_strain=True``).
         - docking_empirical: Pure empirical score (without EC term).
         - docking_ec: Electrostatic complementarity value (0.0 when w_ec=0).
+        - docking_strain: Ligand strain penalty — intramolecular energy added vs
+          the input conformer (>=0). Reported regardless of ``score_strain``.
         - docking_converged: Whether optimization converged.
         When ``score_components=True`` (default), also writes:
         - docking_gauss1: Gaussian term contribution to docking_score.
@@ -109,6 +112,7 @@ class MoleculeDockBlock(MoleculeBlock):
         self,
         score_components: bool = True,
         constraint_weight: float = 0.0,
+        score_strain: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize the molecular docking block.
@@ -119,6 +123,11 @@ class MoleculeDockBlock(MoleculeBlock):
             constraint_weight: Penalty weight in kcal/mol/Å² applied to atoms
                 matched by ``constraint_smarts``. 0 = disabled. Weight 100
                 confines atoms to ~0.1 Å RMSD from their input pose.
+            score_strain: If True, add the ligand strain penalty (intramolecular
+                energy added vs the input conformer, >=0) into ``docking_score``
+                and into multistart selection. Default False keeps
+                ``docking_score`` purely intermolecular (smina-comparable). The
+                strain value is always written as ``docking_strain`` regardless.
             **kwargs: Passed to ``set_inputs``. Accepts ``receptor`` (file path),
                 ``constraint_smarts`` (SMARTS string selecting constrained atoms),
                 and any mutable parameter by name (``n_starts``, ``max_iterations``,
@@ -135,6 +144,7 @@ class MoleculeDockBlock(MoleculeBlock):
         )
         self._score_components = score_components
         self._constraint_weight = constraint_weight
+        self._score_strain = score_strain
         self._constraint_smarts_mol: Chem.Mol | None = None  # compiled lazily
 
         # Register mutable parameters
@@ -359,6 +369,12 @@ class MoleculeDockBlock(MoleculeBlock):
             constrained_atom_indices=constrained_atoms,
             constraint_weight=self._constraint_weight,
         )
+
+        # Selection objective: intermolecular score, plus strain when the strain
+        # toggle is on (so multistart picks the pose we will actually report).
+        def _effective(r: OptimizationResult) -> float:
+            return r.score + (r.strain if self._score_strain else 0.0)
+
         result: OptimizationResult | None = None
         for _, start_mol in starts:
             candidate = optimize_pose_cached(
@@ -373,16 +389,19 @@ class MoleculeDockBlock(MoleculeBlock):
                 w_ec=w_ec,
                 protein_tree=self._protein_tree,
             )
-            if result is None or candidate.score < result.score:
+            if result is None or _effective(candidate) < _effective(result):
                 result = candidate
 
         assert result is not None
         result = dataclasses.replace(result, initial_score=starts[0][0])
 
-        # Set properties
+        # Set properties. docking_score optionally includes the ligand strain
+        # penalty; docking_empirical stays pure intermolecular (smina-comparable).
+        docking_score = result.score + (result.strain if self._score_strain else 0.0)
         result.mol.SetDoubleProp("docking_initial_pose_score", result.initial_score)
-        result.mol.SetDoubleProp("docking_score", result.score)
+        result.mol.SetDoubleProp("docking_score", docking_score)
         result.mol.SetDoubleProp("docking_empirical", result.score + w_ec * result.ec)
+        result.mol.SetDoubleProp("docking_strain", result.strain)
         result.mol.SetDoubleProp("docking_ec", result.ec)
         result.mol.SetBoolProp("docking_converged", result.converged)
 

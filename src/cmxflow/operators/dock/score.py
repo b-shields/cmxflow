@@ -521,6 +521,83 @@ def _pair_term_sums_and_grad(
 
 
 # =============================================================================
+# Intramolecular Ligand Energy
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class IntramolecularPairs:
+    """Precomputed conformer-dependent intramolecular ligand atom pairs.
+
+    Built once per ligand (topology is fixed). Should contain only pairs that
+    change with the pose — i.e. 1-4-and-beyond pairs that cross a rotatable bond.
+    Within-rigid-fragment pairs are constant during pose optimization and add
+    nothing to the gradient or argmin, so they are excluded.
+
+    Attributes:
+        i_idx: First heavy-atom index of each pair.
+        j_idx: Second heavy-atom index of each pair.
+        radii_sum: Sum of the two atomic radii per pair (surface-distance offset).
+        hydro_pair: Hydrophobic-pair mask per pair.
+        hbond_pair: H-bond donor/acceptor-pair mask per pair.
+    """
+
+    i_idx: NDArray[np.intp]
+    j_idx: NDArray[np.intp]
+    radii_sum: NDArray[np.floating]
+    hydro_pair: NDArray[np.bool_]
+    hbond_pair: NDArray[np.bool_]
+
+
+def intramolecular_score_and_grad(
+    ligand_coords: NDArray[np.floating],
+    pairs: IntramolecularPairs,
+    params: EmpiricalParams,
+    torsion_divisor: float = 1.0,
+) -> tuple[float, NDArray]:
+    """Intramolecular ligand energy and per-atom gradient (same Vinardo terms).
+
+    Uses the same terms/weights as the intermolecular score. Both atoms of each
+    pair are mobile, so the gradient scatters to atom i (+) and atom j (-).
+
+    Args:
+        ligand_coords: Heavy-atom coordinates (n_heavy, 3).
+        pairs: Precomputed intramolecular pairs from the optimizer.
+        params: Scoring parameters.
+        torsion_divisor: ``1 + w_rot * n_rot``, matching intermolecular scaling.
+
+    Returns:
+        (score, atom_grad) where atom_grad has shape (n_heavy, 3).
+    """
+    n = ligand_coords.shape[0]
+    if pairs.i_idx.size == 0:
+        return 0.0, np.zeros((n, 3))
+
+    diff = ligand_coords[pairs.i_idx] - ligand_coords[pairs.j_idx]
+    eucl = np.linalg.norm(diff, axis=-1)
+    d = eucl - pairs.radii_sum
+    (g1_raw, rep_raw, hydro_raw, hb_raw), df_dd = _pair_term_sums_and_grad(
+        d, pairs.hydro_pair, pairs.hbond_pair, params, torsion_divisor
+    )
+    score = (
+        params.w_gauss1 * g1_raw
+        + params.w_repulsion * rep_raw
+        + params.w_hydrophobic * hydro_raw
+        + params.w_hbond * hb_raw
+    ) / torsion_divisor
+
+    safe_eucl = np.where(eucl > 1e-8, eucl, 1.0)
+    unit = np.where(eucl[:, None] > 1e-8, diff / safe_eucl[:, None], 0.0)
+    contrib = df_dd[:, None] * unit  # (n_pairs, 3)
+    atom_grad = np.zeros((n, 3))
+    for axis in range(3):
+        atom_grad[:, axis] = np.bincount(
+            pairs.i_idx, weights=contrib[:, axis], minlength=n
+        ) - np.bincount(pairs.j_idx, weights=contrib[:, axis], minlength=n)
+    return float(score), atom_grad
+
+
+# =============================================================================
 # Main Scoring Functions
 # =============================================================================
 

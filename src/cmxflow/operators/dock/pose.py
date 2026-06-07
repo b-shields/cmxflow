@@ -12,7 +12,7 @@ from typing import TypeAlias
 import numpy as np
 from numpy.typing import NDArray
 from rdkit import Chem
-from rdkit.Chem import rdMolTransforms
+from rdkit.Chem import rdMolDescriptors, rdMolTransforms
 from scipy.optimize import minimize
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
@@ -21,9 +21,11 @@ from scipy.stats import qmc
 from cmxflow.operators.dock.score import (
     AtomTyping,
     EmpiricalParams,
+    IntramolecularPairs,
     empirical_score_and_grad_cached,
     empirical_score_cached,
     get_atom_typing,
+    intramolecular_score_and_grad,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,6 +67,13 @@ class PoseParams:
             initial positions. Resolved from SMARTS in MoleculeDockBlock.
         constraint_weight: Penalty weight in kcal/mol/Å². 0 = disabled.
             Weight 100 confines atoms to ~0.1 Å RMSD from initial positions.
+        w_intra: Weight on the intramolecular ligand energy added to the search
+            objective (same Vinardo terms/weights as the intermolecular score,
+            over 1-4-and-beyond pairs that cross a rotatable bond). Keeps the
+            conformer physical during torsion optimization and penalizes
+            self-clash. 0 disables (exact pre-Phase-2 behavior). Vina uses 1.0.
+            Intramolecular energy affects the search only — it is not included
+            in the reported score.
     """
 
     max_iterations: int = 100
@@ -76,6 +85,7 @@ class PoseParams:
     use_analytical_grad: bool = True
     constrained_atom_indices: tuple[int, ...] = field(default_factory=tuple)
     constraint_weight: float = 0.0
+    w_intra: float = 1.0
 
 
 @dataclass
@@ -92,6 +102,8 @@ class OptimizationResult:
         converged: Whether optimization converged (best restart only).
         n_iterations: Number of L-BFGS-B iterations for the best restart.
         ec: Final electrostatic complementarity value (0.0 when w_ec=0).
+        strain: Intramolecular energy added vs the input conformer (>=0).
+            Reported for diagnostics; not included in ``score``.
     """
 
     mol: Chem.Mol
@@ -103,6 +115,7 @@ class OptimizationResult:
     converged: bool = False
     n_iterations: int = 0
     ec: float = 0.0
+    strain: float = 0.0
 
 
 # =============================================================================
@@ -287,6 +300,83 @@ def _get_downstream_atoms(mol: Chem.Mol, j: int, k: int) -> tuple[int, ...]:
             if nb.GetIdx() not in visited:
                 queue.append(nb.GetIdx())
     return tuple(downstream)
+
+
+def _rigid_fragments(
+    mol: Chem.Mol, rotatable_dihedrals: list[tuple[int, int, int, int]]
+) -> NDArray[np.intp]:
+    """Label each atom by its rigid fragment (components after cutting rot bonds).
+
+    Atoms in different fragments can move relative to each other; atoms in the
+    same fragment cannot.
+
+    Args:
+        mol: Heavy-atom RDKit Mol.
+        rotatable_dihedrals: (i, j, k, l) tuples; the rotatable bond is j-k.
+
+    Returns:
+        Array of fragment labels, one per atom (union-find roots).
+    """
+    n = mol.GetNumAtoms()
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    rot_bonds = {frozenset((d[1], d[2])) for d in rotatable_dihedrals}
+    for bond in mol.GetBonds():
+        a, b = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        if frozenset((a, b)) in rot_bonds:
+            continue
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+    return np.array([find(i) for i in range(n)], dtype=np.intp)
+
+
+def _build_intramolecular_pairs(
+    ligand_heavy: Chem.Mol,
+    ligand_typing: AtomTyping,
+    rotatable_dihedrals: list[tuple[int, int, int, int]],
+) -> IntramolecularPairs:
+    """Build the conformer-dependent intramolecular nonbonded pair list.
+
+    Includes atom pairs that (1) are separated by >=3 bonds (1-4 and beyond,
+    excluding 1-2 and 1-3) and (2) lie in different rigid fragments (so they
+    move relative to each other under some torsion). Matches Vina's
+    intramolecular pair selection.
+
+    Args:
+        ligand_heavy: Heavy-atom RDKit Mol.
+        ligand_typing: Ligand atom typing (radii, hydrophobic, donor, acceptor).
+        rotatable_dihedrals: (i, j, k, l) tuples; the rotatable bond is j-k.
+
+    Returns:
+        IntramolecularPairs for ``intramolecular_score_and_grad``.
+    """
+    n = ligand_heavy.GetNumAtoms()
+    frag = _rigid_fragments(ligand_heavy, rotatable_dihedrals)
+    topo = Chem.GetDistanceMatrix(ligand_heavy)  # bond counts (n, n)
+
+    iu, ju = np.triu_indices(n, k=1)
+    mask = (frag[iu] != frag[ju]) & (topo[iu, ju] >= 3)
+    i_idx = iu[mask].astype(np.intp)
+    j_idx = ju[mask].astype(np.intp)
+
+    radii = ligand_typing.radii
+    hydro = ligand_typing.is_hydrophobic
+    donor = ligand_typing.is_hbond_donor
+    acceptor = ligand_typing.is_hbond_acceptor
+    return IntramolecularPairs(
+        i_idx=i_idx,
+        j_idx=j_idx,
+        radii_sum=radii[i_idx] + radii[j_idx],
+        hydro_pair=hydro[i_idx] & hydro[j_idx],
+        hbond_pair=(donor[i_idx] & acceptor[j_idx]) | (acceptor[i_idx] & donor[j_idx]),
+    )
 
 
 # =============================================================================
@@ -687,6 +777,21 @@ def optimize_pose_cached(
 
     n_torsions = len(rotatable_dihedrals)
 
+    # Intramolecular setup: conf-dependent pair list + matching torsion divisor.
+    # Built whenever torsions move (needed for both the search term and strain
+    # reporting); only non-trivial when rotatable bonds exist.
+    n_rot = rdMolDescriptors.CalcNumRotatableBonds(ligand_heavy, strict=False)
+    torsion_divisor = 1.0 + score_params.w_rot * n_rot
+    intra_pairs: IntramolecularPairs | None = None
+    initial_intra = 0.0
+    if rotatable_dihedrals:
+        intra_pairs = _build_intramolecular_pairs(
+            ligand_heavy, ligand_typing, rotatable_dihedrals
+        )
+        initial_intra = intramolecular_score_and_grad(
+            p0_heavy, intra_pairs, score_params, torsion_divisor
+        )[0]
+
     # Index map: heavy_to_full[heavy_idx] = full_mol_idx (for output mol)
     heavy_to_full = [
         i
@@ -770,6 +875,15 @@ def optimize_pose_cached(
                 protein_tree=protein_tree,
                 ligand_typing=ligand_typing,
             )
+            # Intramolecular ligand energy (search objective only). Both atoms of
+            # each pair move, so its gradient adds to atom_grad and propagates
+            # through the DOF chain rule below.
+            if intra_pairs is not None and params.w_intra > 0.0:
+                intra_s, intra_g = intramolecular_score_and_grad(
+                    pos, intra_pairs, score_params, torsion_divisor
+                )
+                score += params.w_intra * intra_s
+                atom_grad = atom_grad + params.w_intra * intra_g
             score, atom_grad = _apply_constraint_penalty(
                 score, atom_grad, pos, p0_heavy, params
             )
@@ -795,6 +909,13 @@ def optimize_pose_cached(
                 ligand_typing=ligand_typing,
             ).total
             penalty = _constraint_penalty_value(pos, p0_heavy, params)
+            if intra_pairs is not None and params.w_intra > 0.0:
+                penalty += (
+                    params.w_intra
+                    * intramolecular_score_and_grad(
+                        pos, intra_pairs, score_params, torsion_divisor
+                    )[0]
+                )
             if (
                 w_ec > 0
                 and protein_ec_coords is not None
@@ -855,6 +976,30 @@ def optimize_pose_cached(
             for d, delta in zip(rotatable_dihedrals, torsion_deltas)
         }
 
+    # Reported score is intermolecular-only (+ EC), excluding the intramolecular
+    # search term and constraint penalty — keeps docking_score comparable to
+    # smina. Re-evaluate on the optimized pose.
+    optimized_heavy = Chem.RemoveAllHs(optimized_mol)
+    final_pos = np.array(optimized_heavy.GetConformer(ligand_conf_id).GetPositions())
+    final_score = empirical_score_cached(
+        optimized_heavy,
+        protein_coords,
+        protein_typing,
+        ligand_conf_id,
+        score_params,
+        protein_tree=protein_tree,
+        ligand_typing=ligand_typing,
+    ).total
+
+    # Strain: intramolecular energy added vs the input conformer (>=0; a penalty
+    # for docking-induced distortion, reported but not added to score here).
+    strain = 0.0
+    if intra_pairs is not None:
+        final_intra = intramolecular_score_and_grad(
+            final_pos, intra_pairs, score_params, torsion_divisor
+        )[0]
+        strain = max(0.0, final_intra - initial_intra)
+
     # Final EC on optimized pose
     final_ec = 0.0
     if w_ec > 0 and protein_ec_coords is not None and protein_ec_charges is not None:
@@ -863,10 +1008,11 @@ def optimize_pose_cached(
         final_ec = ec_score_cached(
             optimized_mol, protein_ec_coords, protein_ec_charges, ligand_conf_id
         )
+        final_score -= w_ec * final_ec
 
     return OptimizationResult(
         mol=optimized_mol,
-        score=float(best_res.fun),
+        score=final_score,
         initial_score=initial_score,
         translation=T,
         rotation=rot,
@@ -874,6 +1020,7 @@ def optimize_pose_cached(
         converged=best_res.success,
         n_iterations=best_res.nit,
         ec=final_ec,
+        strain=strain,
     )
 
 

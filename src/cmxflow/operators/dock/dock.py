@@ -160,9 +160,18 @@ class MoleculeDockBlock(MoleculeBlock):
             # Pose search
             Integer("n_starts", 17, 1, 33),
             Integer("basin_hops", 0, 0, 64),
-            Integer("max_iterations", 200, 0, 300),
-            Continuous("box_size", 10.0, 0.5, 20.0),
+            Integer("max_iterations", 100, 50, 300),
+            Continuous("box_size", 10.0, 2.0, 20.0),
             Categorical("rigid", False, [True, False]),
+            # Sobol initialization screening (rejection sampling of starts)
+            Integer("sobol_max_tries", 1024, 512, 8192),
+            Continuous("max_score_per_heavy_atom", 3.0, 0.5, 10.0),
+            Continuous("diversity_rmsd", 0.0, 0.0, 5.0),
+            # Iterated local search (basin-hopping) proposal scale
+            Continuous("step_translation", 2.0, 0.1, 5.0),
+            Continuous("step_rotation", 0.5, 0.05, 1.5),
+            Continuous("step_torsion", 60.0, 5.0, 180.0),
+            Continuous("basin_temperature", 1.0, 0.1, 5.0),
         )
         self.set_inputs(**kwargs)
 
@@ -358,6 +367,9 @@ class MoleculeDockBlock(MoleculeBlock):
             score_params=score_params,
             site_center=site_center,
             rigid=rigid_only,
+            max_tries=self.get_param("sobol_max_tries"),
+            max_score_per_heavy_atom=self.get_param("max_score_per_heavy_atom"),
+            diversity_rmsd=self.get_param("diversity_rmsd"),
             protein_tree=self._protein_tree,
         )
 
@@ -368,6 +380,10 @@ class MoleculeDockBlock(MoleculeBlock):
             optimize_torsions=not rigid_only,
             n_starts=1,
             basin_hops=self.get_param("basin_hops"),
+            basin_temperature=self.get_param("basin_temperature"),
+            step_translation=self.get_param("step_translation"),
+            step_rotation=self.get_param("step_rotation"),
+            step_torsion=self.get_param("step_torsion"),
             constrained_atom_indices=constrained_atoms,
             constraint_weight=self._constraint_weight,
         )
@@ -401,6 +417,7 @@ class MoleculeDockBlock(MoleculeBlock):
         # Set properties. docking_score optionally includes the ligand strain
         # penalty; docking_empirical stays pure intermolecular (smina-comparable).
         docking_score = result.score + (result.strain if self._score_strain else 0.0)
+        result.mol.SetIntProp("docking_n_starts_used", len(starts))
         result.mol.SetDoubleProp("docking_initial_pose_score", result.initial_score)
         result.mol.SetDoubleProp("docking_score", docking_score)
         result.mol.SetDoubleProp("docking_empirical", result.score + w_ec * result.ec)

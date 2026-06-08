@@ -16,7 +16,10 @@ from rdkit.Chem import AllChem
 from scipy.spatial import cKDTree
 
 from cmxflow.operators.base import MoleculeBlock
-from cmxflow.operators.dock.ec import compute_gasteiger_charges
+from cmxflow.operators.dock.ec import (
+    compute_gasteiger_charges,
+    electrostatic_complementarity,
+)
 from cmxflow.operators.dock.pose import (
     OptimizationResult,
     PoseParams,
@@ -45,8 +48,9 @@ class MoleculeDockBlock(MoleculeBlock):
 
     Performs pose optimization using the empirical (Vinardo) scoring function
     with configurable parameters. Supports both rigid-body and flexible
-    (torsional) docking. An optional electrostatic complementarity (EC) term
-    can be enabled via the ``w_ec`` parameter to reward charge complementarity.
+    (torsional) docking. Electrostatic complementarity (EC) is evaluated once on
+    the final pose and reported as ``docking_ec`` — a standalone score, never
+    part of the search.
 
     Supports multi-start optimization (``n_starts``) and scaffold constraints
     (``constraint_smarts``, ``constraint_weight``) for use with the
@@ -66,7 +70,8 @@ class MoleculeDockBlock(MoleculeBlock):
         - docking_score: Final optimized score (empirical + EC adjustment, plus
           ligand strain when ``score_strain=True``).
         - docking_empirical: Pure empirical score (without EC term).
-        - docking_ec: Electrostatic complementarity value (0.0 when w_ec=0).
+        - docking_ec: Electrostatic complementarity of the final pose, in
+          [-1, 1] (0.0 only when EC protein data is unavailable).
         - docking_strain: Ligand strain penalty — intramolecular energy added vs
           the input conformer (>=0). Reported regardless of ``score_strain``.
         - docking_converged: Whether optimization converged.
@@ -96,7 +101,6 @@ class MoleculeDockBlock(MoleculeBlock):
         - w_hydrophobic: Vinardo hydrophobic term weight.
         - w_hbond: Vinardo hydrogen bond term weight.
         - w_rot: Torsional entropy divisor weight (0=pure Vinardo, 0.02=smina default).
-        - w_ec: Weight for electrostatic complementarity term (0 = disabled).
         - n_starts: Number of L-BFGS-B restarts. 1 = local minimize from the
             input pose only. For blind docking (with site_reference), use
             1+2^k for ideal Sobol balance: 3, 5, 9, 17, 33, 65. Row 0 always
@@ -131,7 +135,7 @@ class MoleculeDockBlock(MoleculeBlock):
             **kwargs: Passed to ``set_inputs``. Accepts ``receptor`` (file path),
                 ``constraint_smarts`` (SMARTS string selecting constrained atoms),
                 and any mutable parameter by name (``n_starts``, ``max_iterations``,
-                ``box_size``, ``rigid``, score weights, ``w_ec``).
+                ``box_size``, ``rigid``, score weights).
 
         Raises:
             ValueError: If constraint_smarts is invalid or contains explicit H
@@ -155,10 +159,10 @@ class MoleculeDockBlock(MoleculeBlock):
             Continuous("w_hydrophobic", -0.035, -0.065, -0.015),
             Continuous("w_hbond", -0.6, -0.8, -0.4),
             Continuous("w_rot", 0.02, 0.0, 0.04),
-            # Electrostatic complementarity
-            Continuous("w_ec", 0.0, 0.0, 5.0),
             # Pose search
-            Integer("n_starts", 17, 1, 33),
+            # hi=65: Stage A2 showed median gap still collapsing 16->32 starts
+            # (+1.84->+0.93 at h15); 65 admits 64 to test where it saturates.
+            Integer("n_starts", 17, 1, 65),
             Integer("basin_hops", 0, 0, 64),
             Integer("max_iterations", 100, 50, 300),
             Continuous("box_size", 10.0, 2.0, 20.0),
@@ -357,7 +361,6 @@ class MoleculeDockBlock(MoleculeBlock):
         box_size = self.get_param("box_size")
         rigid_only = self.get_param("rigid")
         site_center = self._load_site_reference()
-        w_ec = self.get_param("w_ec")
 
         # When constraints are active, Sobol starts don't respect them — keep
         # n_starts=1 so only the aligned pose (row 0) enters refinement.
@@ -412,9 +415,6 @@ class MoleculeDockBlock(MoleculeBlock):
                 params=dataclasses.replace(refine_params, seed=idx),
                 score_params=score_params,
                 site_center=None,
-                protein_ec_coords=self._protein_ec_coords,
-                protein_ec_charges=self._protein_ec_charges,
-                w_ec=w_ec,
                 protein_tree=self._protein_tree,
             )
             if result is None or _effective(candidate) < _effective(result):
@@ -423,15 +423,24 @@ class MoleculeDockBlock(MoleculeBlock):
         assert result is not None
         result = dataclasses.replace(result, initial_score=starts[0][0])
 
+        # Electrostatic complementarity: a reporting-only score evaluated once on
+        # the final pose (never part of the search). Protein charges were computed
+        # once at receptor load. Reported so it can be selected as a ranking score.
+        docking_ec = 0.0
+        if self._protein_ec_coords is not None and self._protein_ec_charges is not None:
+            docking_ec = electrostatic_complementarity(
+                result.mol, self._protein_ec_coords, self._protein_ec_charges
+            )
+
         # Set properties. docking_score optionally includes the ligand strain
         # penalty; docking_empirical stays pure intermolecular (smina-comparable).
         docking_score = result.score + (result.strain if self._score_strain else 0.0)
         result.mol.SetIntProp("docking_n_starts_used", len(starts))
         result.mol.SetDoubleProp("docking_initial_pose_score", result.initial_score)
         result.mol.SetDoubleProp("docking_score", docking_score)
-        result.mol.SetDoubleProp("docking_empirical", result.score + w_ec * result.ec)
+        result.mol.SetDoubleProp("docking_empirical", result.score)
         result.mol.SetDoubleProp("docking_strain", result.strain)
-        result.mol.SetDoubleProp("docking_ec", result.ec)
+        result.mol.SetDoubleProp("docking_ec", docking_ec)
         result.mol.SetBoolProp("docking_converged", result.converged)
 
         # Per-term score components (reporting path)
@@ -457,8 +466,7 @@ class MoleculeDockBlock(MoleculeBlock):
                 f"(repulsion) {score_params.w_repulsion:.3f} "
                 f"(hydrophobic) {score_params.w_hydrophobic:.3f} "
                 f"(hbond) {score_params.w_hbond:.3f} "
-                f"(w_rot) {score_params.w_rot:.3f} "
-                f"(w_ec) {w_ec:.3f}",
+                f"(w_rot) {score_params.w_rot:.3f}",
             )
 
         return result.mol

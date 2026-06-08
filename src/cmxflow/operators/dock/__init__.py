@@ -71,7 +71,6 @@ from cmxflow.operators.dock.pose import (
 from cmxflow.operators.dock.score import (
     AtomTyping,
     EmpiricalParams,
-    ec_score_cached,
     empirical_score,
     empirical_score_and_grad_cached,
     empirical_score_cached,
@@ -83,7 +82,6 @@ __all__ = [
     # Score
     "AtomTyping",
     "EmpiricalParams",
-    "ec_score_cached",
     "empirical_score",
     "empirical_score_cached",
     "empirical_score_and_grad_cached",

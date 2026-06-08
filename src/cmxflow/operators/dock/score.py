@@ -899,33 +899,6 @@ def empirical_score_and_grad_cached(
 # =============================================================================
 
 
-def ec_score_cached(
-    ligand_mol: Chem.Mol,
-    protein_ec_coords: np.ndarray,
-    protein_ec_charges: np.ndarray,
-    ligand_conf_id: int = 0,
-) -> float:
-    """Compute electrostatic complementarity with pre-computed protein data.
-
-    Requires the full mol with H (Gasteiger charges). Exempt from the
-    heavy-atom-only contract used by the empirical scoring functions.
-
-    Args:
-        ligand_mol: Ligand RDKit Mol with 3D coordinates (with H).
-        protein_ec_coords: Pre-computed protein atom coordinates (with H) (n_atoms, 3).
-        protein_ec_charges: Pre-computed protein Gasteiger charges (n_atoms,).
-        ligand_conf_id: Ligand conformer ID to use.
-
-    Returns:
-        EC value in [-1, 1], or 0.0 for degenerate cases.
-    """
-    from cmxflow.operators.dock.ec import electrostatic_complementarity
-
-    return electrostatic_complementarity(
-        ligand_mol, protein_ec_coords, protein_ec_charges
-    )
-
-
 # =============================================================================
 # Extensibility
 # =============================================================================

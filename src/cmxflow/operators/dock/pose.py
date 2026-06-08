@@ -60,9 +60,8 @@ class PoseParams:
             Sobol coverage, prefer values where n_starts-1 is a power of 2
             (i.e. n_starts = 2, 3, 5, 9, 17, 33).
         use_analytical_grad: Use analytical gradients (True) or finite
-            differences (False). Analytical is ~20× faster. Automatically
-            falls back to finite differences when w_ec > 0 (EC has no
-            analytical gradient).
+            differences (False). Analytical is ~20× faster; finite differences
+            are retained only as a debug/comparison path.
         constrained_atom_indices: Heavy-atom indices to constrain near their
             initial positions. Resolved from SMARTS in MoleculeDockBlock.
         constraint_weight: Penalty weight in kcal/mol/Å². 0 = disabled.
@@ -123,7 +122,6 @@ class OptimizationResult:
         torsion_changes: Dict mapping (j, k) bond indices to angle changes.
         converged: Whether optimization converged (best restart only).
         n_iterations: Number of L-BFGS-B iterations for the best restart.
-        ec: Final electrostatic complementarity value (0.0 when w_ec=0).
         strain: Intramolecular energy added vs the input conformer (>=0).
             Reported for diagnostics; not included in ``score``.
     """
@@ -136,7 +134,6 @@ class OptimizationResult:
     torsion_changes: dict[tuple[int, int], float] = field(default_factory=dict)
     converged: bool = False
     n_iterations: int = 0
-    ec: float = 0.0
     strain: float = 0.0
 
 
@@ -818,9 +815,6 @@ def optimize_pose_cached(
     score_params: EmpiricalParams | None = None,
     ligand_conf_id: int = 0,
     site_center: np.ndarray | None = None,
-    protein_ec_coords: np.ndarray | None = None,
-    protein_ec_charges: np.ndarray | None = None,
-    w_ec: float = 0.0,
     protein_tree: cKDTree | None = None,
 ) -> OptimizationResult:
     """Optimize ligand pose with pre-computed protein data.
@@ -835,9 +829,9 @@ def optimize_pose_cached(
     restarts are relative to the input conformer, suitable for MCS overlay
     refinement workflows.
 
-    When ``w_ec > 0`` and EC data is provided, the optimizer jointly minimizes
-    ``empirical_score - w_ec * ec_score`` using finite differences (EC lacks
-    analytical gradients).
+    The search objective is the empirical score alone, so the optimization is
+    fully analytical. Reporting-only descriptors such as electrostatic
+    complementarity are computed by the caller on the returned pose.
 
     Args:
         ligand_mol: Ligand RDKit Mol with 3D coordinates.
@@ -850,9 +844,6 @@ def optimize_pose_cached(
             provided, Sobol restarts are distributed within ``±box_size`` of
             the site center. Typically the centroid of a co-crystallized
             ligand or a known active pose.
-        protein_ec_coords: Pre-computed protein coordinates (with H) for EC.
-        protein_ec_charges: Pre-computed protein Gasteiger charges for EC.
-        w_ec: Weight for EC term. When 0, EC is not computed during optimization.
         protein_tree: Precomputed KDTree for sparse scoring.
 
     Returns:
@@ -939,7 +930,7 @@ def optimize_pose_cached(
         + [(-params.max_torsion_change, params.max_torsion_change)] * n_torsions
     )
 
-    # Initial score (combined empirical + EC)
+    # Initial score (empirical only)
     initial_score = empirical_score_cached(
         ligand_heavy,
         protein_coords,
@@ -949,13 +940,6 @@ def optimize_pose_cached(
         protein_tree=protein_tree,
         ligand_typing=ligand_typing,
     ).total
-    if w_ec > 0 and protein_ec_coords is not None and protein_ec_charges is not None:
-        from cmxflow.operators.dock.score import ec_score_cached
-
-        initial_ec = ec_score_cached(
-            ligand_mol, protein_ec_coords, protein_ec_charges, ligand_conf_id
-        )
-        initial_score -= w_ec * initial_ec
 
     # --- Helper: apply pose vector to ligand_heavy ---
     def _apply_pose_heavy(x: NDArray) -> Chem.Mol:
@@ -972,7 +956,7 @@ def optimize_pose_cached(
         return mol
 
     # --- Select objective (analytical grad or finite differences) ---
-    use_grad = params.use_analytical_grad and w_ec == 0.0
+    use_grad = params.use_analytical_grad
 
     if use_grad:
 
@@ -1029,32 +1013,6 @@ def optimize_pose_cached(
                         pos, intra_pairs, score_params, torsion_divisor
                     )[0]
                 )
-            if (
-                w_ec > 0
-                and protein_ec_coords is not None
-                and protein_ec_charges is not None
-            ):
-                from cmxflow.operators.dock.score import ec_score_cached
-
-                T = x[:3]
-                rot = Rotation.from_rotvec(x[3:6])
-                transformed_full = apply_rigid_transform(
-                    ligand_mol, T, rot, ligand_conf_id, center=centroid
-                )
-                if rotatable_dihedrals_full and n_torsions > 0:
-                    new_torsions = initial_torsions + x[6:]
-                    transformed_full = apply_torsion_changes(
-                        transformed_full,
-                        dict(zip(rotatable_dihedrals_full, new_torsions)),
-                        ligand_conf_id,
-                    )
-                ec = ec_score_cached(
-                    transformed_full,
-                    protein_ec_coords,
-                    protein_ec_charges,
-                    ligand_conf_id,
-                )
-                return score - w_ec * ec + penalty
             return score + penalty
 
     # --- Local minimize from x0=zeros, optionally wrapped in basin-hopping ---
@@ -1139,16 +1097,6 @@ def optimize_pose_cached(
         )[0]
         strain = max(0.0, final_intra - initial_intra)
 
-    # Final EC on optimized pose
-    final_ec = 0.0
-    if w_ec > 0 and protein_ec_coords is not None and protein_ec_charges is not None:
-        from cmxflow.operators.dock.score import ec_score_cached
-
-        final_ec = ec_score_cached(
-            optimized_mol, protein_ec_coords, protein_ec_charges, ligand_conf_id
-        )
-        final_score -= w_ec * final_ec
-
     return OptimizationResult(
         mol=optimized_mol,
         score=final_score,
@@ -1158,7 +1106,6 @@ def optimize_pose_cached(
         torsion_changes=torsion_changes,
         converged=converged,
         n_iterations=n_iter,
-        ec=final_ec,
         strain=strain,
     )
 

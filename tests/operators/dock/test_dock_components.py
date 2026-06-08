@@ -51,7 +51,6 @@ def _mock_result(mol: Chem.Mol) -> OptimizationResult:
         translation=np.zeros(3),
         rotation=Rotation.identity(),
         converged=True,
-        ec=0.0,
     )
 
 

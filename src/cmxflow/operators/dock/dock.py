@@ -23,6 +23,7 @@ from cmxflow.operators.dock.ec import (
 from cmxflow.operators.dock.pose import (
     OptimizationResult,
     PoseParams,
+    optimize_dg_restarts,
     optimize_pose_cached,
     optimize_sobol_restarts,
 )
@@ -174,12 +175,23 @@ class MoleculeDockBlock(MoleculeBlock):
             #     filled only ~6/16) and worsened gap; mss=5 (fills all starts)
             #     was best. Useful region is the loose end ~3-8; the low floor
             #     0.5 is counterproductive. Consider raising default->5, floor->3.
-            #   - diversity_rmsd: INERT in [0,3] (random Sobol poses are already
-            #     >3A apart, so the gate never binds). Either drop from HPO and
-            #     pin at 0, or only sweep >~4A (which re-introduces starvation).
+            #   - diversity_rmsd: INERT in [0,3] for SOBOL (random Sobol poses are
+            #     already >3A apart, so the gate never binds). Either drop from HPO
+            #     and pin at 0, or only sweep >~4A (which re-introduces starvation).
+            #     NOTE: this is Sobol-specific. With init_mode="dg" the gate is the
+            #     ONLY thing preventing near-duplicate starts (rank-on-energy
+            #     clusters at low div), so if DG wins, the default must move with
+            #     it: init_mode->"dg" AND diversity_rmsd->~1.0 together.
             Integer("sobol_max_tries", 1024, 512, 8192),
             Continuous("max_score_per_heavy_atom", 3.0, 0.5, 10.0),
             Continuous("diversity_rmsd", 0.0, 0.0, 5.0),
+            # Start initialization: "sobol" diversifies torsions by uniform Sobol
+            # throws; "dg" diversifies them via an ETKDGv3 conformer ensemble
+            # (better coverage for flexible ligands). DG reuses sobol_max_tries as
+            # the total candidate budget = max_distance_geometry_samples conformers
+            # x (sobol_max_tries // that) rigid placements.
+            Categorical("init_mode", "sobol", ["sobol", "dg"]),
+            Integer("max_distance_geometry_samples", 8, 1, 64),
             # Iterated local search (basin-hopping) proposal scale
             Continuous("step_translation", 2.0, 0.1, 5.0),
             Continuous("step_rotation", 0.5, 0.05, 1.5),
@@ -371,8 +383,7 @@ class MoleculeDockBlock(MoleculeBlock):
             translation_bounds=(-box_size, box_size),
             n_starts=n_starts,
         )
-        starts = optimize_sobol_restarts(
-            mol,
+        restart_kwargs: dict = dict(
             protein_coords=self._protein_coords,
             protein_typing=self._protein_typing,
             params=sobol_params,
@@ -384,6 +395,16 @@ class MoleculeDockBlock(MoleculeBlock):
             diversity_rmsd=self.get_param("diversity_rmsd"),
             protein_tree=self._protein_tree,
         )
+        if self.get_param("init_mode") == "dg":
+            starts = optimize_dg_restarts(
+                mol,
+                max_distance_geometry_samples=self.get_param(
+                    "max_distance_geometry_samples"
+                ),
+                **restart_kwargs,
+            )
+        else:
+            starts = optimize_sobol_restarts(mol, **restart_kwargs)
 
         # Phase 2: L-BFGS-B refinement from each Sobol starting pose.
         refine_params = PoseParams(

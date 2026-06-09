@@ -8,6 +8,8 @@ Covers:
 - SMARTS constraint interface (index resolution, H rejection, no-match passthrough)
 """
 
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 from rdkit import Chem
@@ -26,6 +28,7 @@ from cmxflow.operators.dock.pose import (
     apply_rigid_transform,
     apply_torsion_changes,
     get_rotatable_bonds,
+    optimize_dg_restarts,
     optimize_pose_cached,
 )
 from cmxflow.operators.dock.score import (
@@ -765,3 +768,115 @@ class TestSingleDOFStep:
         for _ in range(50):
             x = step(x0)
             assert not np.any(x[6:] != x0[6:])  # no torsion components exist
+
+
+class TestDgRestarts:
+    """optimize_dg_restarts: input-pose start 0, count parity, rigid delegation."""
+
+    def _system(self, smiles: str = "CCOCCOCc1ccccc1"):
+        """Return (ligand_heavy, protein_coords, protein_typing, score_params)."""
+        ligand_heavy = Chem.RemoveAllHs(_make_ligand(smiles))
+        protein_coords = (
+            np.array(ligand_heavy.GetConformer().GetPositions()) + 8.0
+        )  # offset so the protein does not overlap the ligand
+        protein_typing = get_atom_typing(ligand_heavy)
+        return ligand_heavy, protein_coords, protein_typing, EmpiricalParams()
+
+    def test_first_start_is_input_pose(self) -> None:
+        lig, prot, typ, sp = self._system()
+        starts = optimize_dg_restarts(
+            lig,
+            prot,
+            typ,
+            PoseParams(n_starts=5, seed=0),
+            sp,
+            max_tries=64,
+            max_distance_geometry_samples=8,
+        )
+        assert len(starts) >= 1
+        first = np.array(starts[0][1].GetConformer().GetPositions())
+        ref = np.array(lig.GetConformer().GetPositions())
+        assert np.allclose(first, ref)
+
+    def test_count_matches_sobol_parity(self) -> None:
+        """Returns n_starts - 1, exactly like optimize_sobol_restarts."""
+        lig, prot, typ, sp = self._system()
+        params = PoseParams(n_starts=9, seed=0)
+        starts = optimize_dg_restarts(
+            lig, prot, typ, params, sp, max_tries=64, max_distance_geometry_samples=8
+        )
+        assert len(starts) == params.n_starts - 1
+
+    def test_n_starts_one_returns_only_input(self) -> None:
+        lig, prot, typ, sp = self._system()
+        starts = optimize_dg_restarts(
+            lig,
+            prot,
+            typ,
+            PoseParams(n_starts=1, seed=0),
+            sp,
+            max_tries=64,
+            max_distance_geometry_samples=8,
+        )
+        assert len(starts) == 1
+
+    def test_rigid_delegates_to_sobol(self) -> None:
+        """rigid=True forwards to the Sobol path (no conformer diversity)."""
+        lig, prot, typ, sp = self._system()
+        params = PoseParams(n_starts=5, seed=0)
+        sentinel = [(0.0, lig)]
+        with patch(
+            "cmxflow.operators.dock.pose.optimize_sobol_restarts",
+            return_value=sentinel,
+        ) as mock_sobol:
+            out = optimize_dg_restarts(
+                lig, prot, typ, params, sp, rigid=True, max_tries=64
+            )
+        mock_sobol.assert_called_once()
+        assert out is sentinel
+
+    def test_starts_are_diverse_from_input(self) -> None:
+        """Non-input starts explore conformers/placements away from the input."""
+        lig, prot, typ, sp = self._system()
+        starts = optimize_dg_restarts(
+            lig,
+            prot,
+            typ,
+            PoseParams(n_starts=9, seed=0),
+            sp,
+            max_tries=128,
+            max_distance_geometry_samples=8,
+        )
+        ref = np.array(lig.GetConformer().GetPositions())
+        moved = [
+            float(np.abs(np.array(m.GetConformer().GetPositions()) - ref).max())
+            for _, m in starts[1:]
+        ]
+        assert any(d > 0.5 for d in moved)
+
+    def test_starts_have_rigid_placement_diversity(self) -> None:
+        """Non-input starts span multiple rigid placements, not one fixed pose.
+
+        Regression guard: an earlier nested-loop+early-stop selection drained a
+        single Sobol placement (all starts shared one centroid). Ranking the full
+        grid must instead spread starts across distinct placements.
+        """
+        lig, prot, typ, sp = self._system()
+        starts = optimize_dg_restarts(
+            lig,
+            prot,
+            typ,
+            PoseParams(n_starts=9, seed=0),
+            sp,
+            max_tries=256,
+            max_distance_geometry_samples=8,
+        )
+        centroids = np.array(
+            [
+                np.array(m.GetConformer().GetPositions()).mean(axis=0)
+                for _, m in starts[1:]
+            ]
+        )
+        # More than one distinct rigid placement among the non-input starts.
+        spread = float(np.linalg.norm(centroids - centroids.mean(axis=0), axis=1).max())
+        assert spread > 0.5

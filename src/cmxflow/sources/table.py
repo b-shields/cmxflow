@@ -1,6 +1,7 @@
 """Reader functions for tabular files containing SMILES."""
 
 import gzip
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 from typing import IO
@@ -8,6 +9,8 @@ from typing import IO
 import pandas as pd
 import pyarrow.parquet as pq
 from rdkit import Chem
+
+logger = logging.getLogger(__name__)
 
 
 def _read_smi_from_handle(handle: IO[str]) -> Iterator[Chem.Mol]:
@@ -26,12 +29,14 @@ def _read_smi_from_handle(handle: IO[str]) -> Iterator[Chem.Mol]:
         parts = line.split()
         smiles = parts[0]
         mol = Chem.MolFromSmiles(smiles)
-        if mol is not None:
-            if len(parts) > 1:
-                mol.SetProp("_Name", parts[1])
-            for i, value in enumerate(parts[2:], start=2):
-                mol.SetProp(f"Column_{i}", value)
-            yield mol
+        if mol is None:
+            logger.warning("Skipping unreadable SMILES: %s", smiles)
+            continue
+        if len(parts) > 1:
+            mol.SetProp("_Name", parts[1])
+        for i, value in enumerate(parts[2:], start=2):
+            mol.SetProp(f"Column_{i}", value)
+        yield mol
 
 
 def read_smi(path: Path) -> Iterator[Chem.Mol]:
@@ -98,13 +103,15 @@ def read_csv(path: Path, chunksize: int = 1000) -> Iterator[Chem.Mol]:
         for _, row in chunk.iterrows():
             smiles = row["SMILES"]
             mol = Chem.MolFromSmiles(smiles)
-            if mol is not None:
-                for col in chunk.columns:
-                    if col != "SMILES":
-                        value = row[col]
-                        if pd.notna(value):
-                            mol.SetProp(col, str(value))
-                yield mol
+            if mol is None:
+                logger.warning("Skipping unreadable SMILES: %s", smiles)
+                continue
+            for col in chunk.columns:
+                if col != "SMILES":
+                    value = row[col]
+                    if pd.notna(value):
+                        mol.SetProp(col, str(value))
+            yield mol
 
 
 def read_parquet(path: Path, batch_size: int = 1000) -> Iterator[Chem.Mol]:
@@ -133,10 +140,12 @@ def read_parquet(path: Path, batch_size: int = 1000) -> Iterator[Chem.Mol]:
         for _, row in chunk.iterrows():
             smiles = row["SMILES"]
             mol = Chem.MolFromSmiles(smiles)
-            if mol is not None:
-                for col in chunk.columns:
-                    if col != "SMILES":
-                        value = row[col]
-                        if pd.notna(value):
-                            mol.SetProp(col, str(value))
-                yield mol
+            if mol is None:
+                logger.warning("Skipping unreadable SMILES: %s", smiles)
+                continue
+            for col in chunk.columns:
+                if col != "SMILES":
+                    value = row[col]
+                    if pd.notna(value):
+                        mol.SetProp(col, str(value))
+            yield mol

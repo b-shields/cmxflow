@@ -328,4 +328,4 @@ class TestWorkerTimeout:
         from cmxflow.utils.parallel import _default_worker_timeout
 
         monkeypatch.setenv("CMXFLOW_WORKER_TIMEOUT", "not_a_number")
-        assert _default_worker_timeout() == 30.0
+        assert _default_worker_timeout() == 120.0

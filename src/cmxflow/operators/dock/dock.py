@@ -161,11 +161,18 @@ class MoleculeDockBlock(MoleculeBlock):
             Continuous("w_hbond", -0.6, -0.8, -0.4),
             Continuous("w_rot", 0.02, 0.0, 0.04),
             # Pose search
-            # hi=65: Stage A2 showed median gap still collapsing 16->32 starts
-            # (+1.84->+0.93 at h15); 65 admits 64 to test where it saturates.
-            Integer("n_starts", 17, 1, 65),
-            Integer("basin_hops", 0, 0, 64),
-            Integer("max_iterations", 100, 50, 300),
+            # Per-mol runtime ~ len(starts) x (1 + basin_hops) local minima, each
+            # ~max_iterations L-BFGS-B steps. These caps hold the worst-case HPO
+            # config to ~8 min/mol (vs ~85 min at the old 65/64/300 corner) --
+            # see POSE_SEARCH_PLAN Stage A2/DGH.
+            #   hi=33: start diversity saturates at 32 (A2: 32->64 bit-identical
+            #   for Sobol, marginal for DG at 2x cost); 33 keeps Sobol balance.
+            Integer("n_starts", 17, 1, 33),
+            #   hi=16: DGH showed hops add ZERO reached over h0 (cosmetic polish
+            #   only) -- capped low so hopping cannot dominate runtime.
+            Integer("basin_hops", 0, 0, 16),
+            #   hi=200: L-BFGS-B converges well before 300.
+            Integer("max_iterations", 100, 50, 200),
             Continuous("box_size", 10.0, 2.0, 20.0),
             Categorical("rigid", False, [True, False]),
             # Sobol initialization screening (rejection sampling of starts)
@@ -182,7 +189,10 @@ class MoleculeDockBlock(MoleculeBlock):
             #     ONLY thing preventing near-duplicate starts (rank-on-energy
             #     clusters at low div), so if DG wins, the default must move with
             #     it: init_mode->"dg" AND diversity_rmsd->~1.0 together.
-            Integer("sobol_max_tries", 1024, 512, 8192),
+            # hi=4096: Stage DG showed the candidate budget is near-inert above
+            # ~2048 (t1024 == t2048). Survives the Sobol->DG rename as the DG grid
+            # budget (= M conformers x tries//M rigid placements).
+            Integer("sobol_max_tries", 1024, 512, 4096),
             Continuous("max_score_per_heavy_atom", 3.0, 0.5, 10.0),
             Continuous("diversity_rmsd", 0.0, 0.0, 5.0),
             # Start initialization: "sobol" diversifies torsions by uniform Sobol

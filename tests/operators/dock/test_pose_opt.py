@@ -423,7 +423,7 @@ class TestConstraintPenalty:
             assert disp < 0.05, f"Constrained atom {i} moved {disp:.3f} Å"
 
     def test_unconstrained_atoms_free_to_move(self) -> None:
-        """With a tight constraint on subset, unconstrained atoms can move."""
+        """A tight subset constraint holds those atoms while the rest move freely."""
         ligand_mol = _make_ligand("c1ccccc1CCO")
         ligand_heavy = Chem.RemoveAllHs(ligand_mol)
         p0_heavy = np.array(ligand_heavy.GetConformer(0).GetPositions())
@@ -432,32 +432,26 @@ class TestConstraintPenalty:
 
         n_heavy = p0_heavy.shape[0]
         constrained = tuple(range(min(3, n_heavy)))
-        pose_params = PoseParams(
-            n_starts=1,
-            constrained_atom_indices=constrained,
-            constraint_weight=1000.0,
-            optimize_torsions=True,
-        )
-        result_no_constraint = optimize_pose_cached(
+        result = optimize_pose_cached(
             ligand_mol,
             protein_coords,
             protein_typing,
-            params=PoseParams(n_starts=1, optimize_torsions=True),
+            params=PoseParams(
+                n_starts=1,
+                constrained_atom_indices=constrained,
+                constraint_weight=1000.0,
+                optimize_torsions=True,
+            ),
         )
-        result_constrained = optimize_pose_cached(
-            ligand_mol,
-            protein_coords,
-            protein_typing,
-            params=pose_params,
+        final_pos = np.array(
+            Chem.RemoveAllHs(result.mol).GetConformer(0).GetPositions()
         )
-        # The constrained result must differ from unconstrained for some atom
-        h_no = Chem.RemoveAllHs(result_no_constraint.mol)
-        h_con = Chem.RemoveAllHs(result_constrained.mol)
-        pos_no = np.array(h_no.GetConformer(0).GetPositions())
-        pos_con = np.array(h_con.GetConformer(0).GetPositions())
-        max_diff = np.max(np.linalg.norm(pos_no - pos_con, axis=1))
-        # Results differ because constraints pull pose differently
-        assert max_diff >= 0.0  # trivially true; main test is no crash
+        disp = np.linalg.norm(final_pos - p0_heavy, axis=1)
+
+        # Constrained atoms stay on their input position ...
+        assert disp[list(constrained)].max() < 0.05
+        # ... while at least one unconstrained atom moves substantially.
+        assert disp[len(constrained) :].max() > 0.5
 
 
 # =============================================================================

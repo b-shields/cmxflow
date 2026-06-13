@@ -78,12 +78,19 @@ def _dock(config: dict) -> Chem.Mol:
 
 
 def _assert_golden(out: Chem.Mol, golden_score: float, pose_file: str) -> None:
-    """Assert the docked result matches the pinned golden score and pose."""
-    assert float(out.GetProp("docking_score")) == pytest.approx(golden_score, abs=1e-6)
+    """Assert the docked result matches the pinned golden score and pose.
+
+    Tolerances catch any behaviour change (which shifts scores by tenths of a
+    kcal/mol and poses by tenths of an angstrom) while tolerating last-ULP
+    BLAS/libm differences across CI machines, which the optimizer can amplify
+    within a flat basin. The pose gets an extra order of slack over the score
+    because atoms can drift further than the score within an equienergetic well.
+    """
+    assert float(out.GetProp("docking_score")) == pytest.approx(golden_score, abs=1e-3)
     golden_pose = np.load(DATA / pose_file)
     pose = np.array(Chem.RemoveAllHs(out).GetConformer().GetPositions())
     rmsd = float(np.sqrt(np.mean(np.sum((pose - golden_pose) ** 2, axis=1))))
-    assert rmsd < 1e-4
+    assert rmsd < 1e-2
 
 
 @pytest.mark.parametrize("case", list(GOLDEN_CASES))
@@ -97,3 +104,74 @@ def test_defaults_reach_golden_minimum() -> None:
     """A default-constructed block reproduces the production (flex) golden."""
     _, golden_score, pose_file = GOLDEN_CASES["flex"]
     _assert_golden(_dock({}), golden_score, pose_file)
+
+
+# Scaffold-constraint path. Docks the co-crystallized ligand with its fused
+# bicyclic core pinned by a SMARTS constraint. The constrained core must stay on
+# its input position while the same search *without* the constraint both relocates
+# that core and reaches a lower score -- proving the constraint actively holds the
+# scaffold rather than the search simply never leaving it.
+CONSTRAINT_SMARTS = "c1ncc2cccnc2n1"  # fused bicyclic scaffold of the crystal ligand
+# Light, exploratory search shared by the constrained and free runs.
+CONSTRAINT_SEARCH = dict(
+    n_starts=8, max_distance_geometry_samples=8, sobol_max_tries=512, basin_hops=0
+)
+CONSTRAINED_GOLDEN_SCORE = -12.2233718177
+CONSTRAINED_GOLDEN_POSE = "golden_pose_constrained.npy"
+
+
+def _dock_crystal(config: dict) -> Chem.Mol:
+    """Dock the frozen abl1 crystal ligand with ``config`` and return the result."""
+    block = MoleculeDockBlock(
+        receptor=str(DATA / "receptor.pdb"),
+        site_reference=str(DATA / "crystal_ligand.mol2"),
+        **config,
+    )
+    mol = next(read_molecules(DATA / "crystal_ligand.mol2", wrap=False))
+    with threadpool_limits(limits=1):
+        out = block._forward(mol)
+    assert out is not None
+    return out
+
+
+def _crystal_core() -> tuple[list[int], np.ndarray]:
+    """Return (core heavy-atom indices, input positions) for the crystal ligand."""
+    mol = next(read_molecules(DATA / "crystal_ligand.mol2", wrap=False))
+    heavy = Chem.RemoveAllHs(mol)
+    matches = heavy.GetSubstructMatches(Chem.MolFromSmarts(CONSTRAINT_SMARTS))
+    idx = sorted({i for match in matches for i in match})
+    return idx, np.array(heavy.GetConformer().GetPositions())[idx]
+
+
+def _core_displacement(out: Chem.Mol) -> float:
+    """Max distance any constrained core atom moved from its input position."""
+    idx, in_core = _crystal_core()
+    out_core = np.array(Chem.RemoveAllHs(out).GetConformer().GetPositions())[idx]
+    return float(np.linalg.norm(out_core - in_core, axis=1).max())
+
+
+def test_constraint_holds_core_at_golden_minimum() -> None:
+    """A scaffold-constrained dock pins the core and reaches its golden pose.
+
+    Also covers the ``n_starts -> 1`` forcing in ``_forward``: with a constraint
+    matched, only the aligned input pose is refined regardless of configured starts.
+    """
+    out = _dock_crystal(
+        dict(
+            constraint_smarts=CONSTRAINT_SMARTS,
+            constraint_weight=1000.0,
+            **CONSTRAINT_SEARCH,
+        )
+    )
+    _assert_golden(out, CONSTRAINED_GOLDEN_SCORE, CONSTRAINED_GOLDEN_POSE)
+    assert _core_displacement(out) < 0.05  # core held on its input position
+    assert out.GetIntProp("docking_n_starts_used") == 1  # constraint forces 1 start
+
+
+def test_free_docking_moves_core_and_scores_lower() -> None:
+    """Guard: the same search without the constraint leaves the input core and
+    reaches a lower score, so the constrained test above is not vacuous."""
+    free = _dock_crystal(dict(CONSTRAINT_SEARCH))
+    assert _core_displacement(free) > 0.15  # free search relocates the core
+    free_score = float(free.GetProp("docking_score"))
+    assert free_score < CONSTRAINED_GOLDEN_SCORE - 0.1  # and finds a better pose

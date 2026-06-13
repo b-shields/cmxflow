@@ -58,6 +58,11 @@ from cmxflow.operators.dock.pose import (
     get_rotatable_bonds,
     optimize_pose_cached,
 )
+from cmxflow.operators.dock.scaffold_index import (
+    ScaffoldPoseStore,
+    scaffold_key,
+    scaffold_pose,
+)
 from cmxflow.operators.dock.score import (
     AtomTyping,
     EmpiricalParams,
@@ -67,6 +72,7 @@ from cmxflow.operators.dock.score import (
     get_atom_typing,
     get_scoring_function,
 )
+from cmxflow.operators.dock.template import template_dock, transfer_template_pose
 
 __all__ = [
     # Score
@@ -91,4 +97,10 @@ __all__ = [
     "optimize_pose_cached",
     # Dock
     "MoleculeDockBlock",
+    # Template / scaffold-indexed docking
+    "template_dock",
+    "transfer_template_pose",
+    "scaffold_key",
+    "scaffold_pose",
+    "ScaffoldPoseStore",
 ]

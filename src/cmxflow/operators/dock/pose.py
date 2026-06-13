@@ -66,6 +66,12 @@ class PoseParams:
             initial positions. Resolved from SMARTS in MoleculeDockBlock.
         constraint_weight: Penalty weight in kcal/mol/Å². 0 = disabled.
             Weight 100 confines atoms to ~0.1 Å RMSD from initial positions.
+        constraint_tol: Flat-bottom radius in Å. Constrained atoms move freely
+            within ``constraint_tol`` of their target, and are penalized only by
+            the displacement *beyond* it: ``weight · Σ max(0, ‖d‖ − tol)²``. 0.0
+            (default) recovers the pure quadratic tether. A small tol (~0.5 Å)
+            with a moderate weight lets a constrained core shift to relieve a
+            substituent clash before the restraint resists.
         w_intra: Weight on the intramolecular ligand energy added to the search
             objective (same Vinardo terms/weights as the intermolecular score,
             over 1-4-and-beyond pairs that cross a rotatable bond). Keeps the
@@ -94,6 +100,7 @@ class PoseParams:
     use_analytical_grad: bool = True
     constrained_atom_indices: tuple[int, ...] = field(default_factory=tuple)
     constraint_weight: float = 0.0
+    constraint_tol: float = 0.0
     w_intra: float = 1.0
     basin_hops: int = 0
     basin_temperature: float = 1.0
@@ -496,13 +503,18 @@ def _constraint_penalty_value(
         params: Pose params with constrained_atom_indices and constraint_weight.
 
     Returns:
-        Penalty value λ * Σ ||pos_i - target_i||².
+        Flat-bottom penalty value λ * Σ max(0, ||pos_i - target_i|| - tol)².
+        With tol=0 this is the pure quadratic tether λ * Σ ||pos_i - target_i||².
     """
     if not params.constrained_atom_indices or params.constraint_weight == 0.0:
         return 0.0
     idx = list(params.constrained_atom_indices)
     delta = pos[idx] - p0_heavy[idx]
-    return params.constraint_weight * float(np.sum(delta**2))
+    if params.constraint_tol <= 0.0:
+        return params.constraint_weight * float(np.sum(delta**2))
+    r = np.linalg.norm(delta, axis=1)
+    excess = np.maximum(0.0, r - params.constraint_tol)
+    return params.constraint_weight * float(np.sum(excess**2))
 
 
 def _apply_constraint_penalty(
@@ -532,8 +544,20 @@ def _apply_constraint_penalty(
     atom_grad = atom_grad.copy()
     idx = list(params.constrained_atom_indices)
     delta = pos[idx] - p0_heavy[idx]
-    score += params.constraint_weight * float(np.sum(delta**2))
-    atom_grad[idx] += 2.0 * params.constraint_weight * delta
+    if params.constraint_tol <= 0.0:
+        # Pure quadratic tether (bit-identical to the pre-flat-bottom behavior).
+        score += params.constraint_weight * float(np.sum(delta**2))
+        atom_grad[idx] += 2.0 * params.constraint_weight * delta
+        return score, atom_grad
+    # Flat-bottom: free within tol, quadratic in the excess displacement beyond.
+    r = np.linalg.norm(delta, axis=1)
+    excess = np.maximum(0.0, r - params.constraint_tol)
+    score += params.constraint_weight * float(np.sum(excess**2))
+    # grad_i = 2·weight·excess_i·(delta_i / r_i), zero where r_i <= tol.
+    active = excess > 0.0
+    scale = np.zeros_like(r)
+    scale[active] = 2.0 * params.constraint_weight * excess[active] / r[active]
+    atom_grad[idx] += scale[:, None] * delta
     return score, atom_grad
 
 

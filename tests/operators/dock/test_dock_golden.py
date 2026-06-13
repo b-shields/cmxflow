@@ -10,6 +10,7 @@ reduction-order drift.
 """
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -175,3 +176,74 @@ def test_free_docking_moves_core_and_scores_lower() -> None:
     assert _core_displacement(free) > 0.15  # free search relocates the core
     free_score = float(free.GetProp("docking_score"))
     assert free_score < CONSTRAINED_GOLDEN_SCORE - 0.1  # and finds a better pose
+
+
+# Scaffold-indexed (template) docking. Docking the active is a cache miss (full
+# dock, caches its scaffold pose); a congener sharing that scaffold then hits the
+# cache and is docked with a single constrained local search. Tests run in a tmp
+# cwd so the conventional ./.cmxflow/scaffold_index.db is created/discovered there.
+INDEX_SEARCH: dict[str, Any] = dict(
+    n_starts=8, max_distance_geometry_samples=8, sobol_max_tries=512, basin_hops=0
+)
+INDEXED_GOLDEN_SCORE = -8.5587969796
+INDEXED_GOLDEN_POSE = "golden_pose_indexed.npy"
+
+
+def _index_block(**extra: Any) -> MoleculeDockBlock:
+    return MoleculeDockBlock(
+        receptor=str(DATA / "receptor.pdb"),
+        site_reference=str(DATA / "crystal_ligand.mol2"),
+        **INDEX_SEARCH,
+        **extra,
+    )
+
+
+def test_indexed_dock_miss_then_hit(monkeypatch, tmp_path) -> None:
+    """Miss caches the scaffold; a congener hits it and reaches its golden pose."""
+    monkeypatch.chdir(tmp_path)
+    block = _index_block(index_poses=True)
+    active = next(read_molecules(DATA / "active_ligand.sdf", wrap=False))
+    congener = next(read_molecules(DATA / "congener_ligand.sdf", wrap=False))
+    with threadpool_limits(limits=1):
+        miss = block._forward(active)
+        hit = block._forward(congener)
+        hit_again = block._forward(
+            next(read_molecules(DATA / "congener_ligand.sdf", wrap=False))
+        )
+
+    assert miss is not None and hit is not None and hit_again is not None
+    assert (tmp_path / ".cmxflow" / "scaffold_index.db").exists()
+    assert miss.GetBoolProp("docking_indexed") is False  # active scaffold is novel
+    assert hit.GetBoolProp("docking_indexed") is True  # congener shares it -> hit
+    assert hit.GetIntProp("docking_n_starts_used") == 1  # single constrained search
+    _assert_golden(hit, INDEXED_GOLDEN_SCORE, INDEXED_GOLDEN_POSE)
+    # Deterministic on the warm cache.
+    assert hit_again.GetProp("docking_score") == hit.GetProp("docking_score")
+
+
+def test_reference_scaffold_is_seeded(monkeypatch, tmp_path) -> None:
+    """The site_reference scaffold is seeded, so a molecule sharing it hits first."""
+    monkeypatch.chdir(tmp_path)
+    block = _index_block(index_poses=True)
+    crystal = next(read_molecules(DATA / "crystal_ligand.mol2", wrap=False))
+    with threadpool_limits(limits=1):
+        out = block._forward(crystal)
+    # No prior dock, but the reference seed means the crystal scaffold is a hit.
+    assert out is not None
+    assert out.GetBoolProp("docking_indexed") is True
+    assert out.GetIntProp("docking_n_starts_used") == 1
+
+
+def test_auto_discovery_enables_when_db_present(monkeypatch, tmp_path) -> None:
+    """index_poses=None auto-enables when a cache already exists in the cwd."""
+    monkeypatch.chdir(tmp_path)
+    active = next(read_molecules(DATA / "active_ligand.sdf", wrap=False))
+    with threadpool_limits(limits=1):
+        _index_block(index_poses=True)._forward(active)  # creates the DB
+    # A fresh auto-mode block in the same cwd discovers and enables indexing.
+    assert _index_block(index_poses=None)._indexing_enabled() is True
+    # ... and stays off in a clean directory with no cache.
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    monkeypatch.chdir(clean)
+    assert _index_block(index_poses=None)._indexing_enabled() is False

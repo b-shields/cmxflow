@@ -60,5 +60,7 @@ module = [
     "cmxflow.operators.dock.ec",
     "cmxflow.operators.dock.dock",
     "cmxflow.operators.dock.pose",
+    "cmxflow.operators.dock.template",
+    "cmxflow.operators.dock.scaffold_index",
 ]
 disable_error_code = ["override", "assignment", "no-any-return", "attr-defined"]

@@ -6,6 +6,7 @@ function and rigid-body + torsional pose optimization.
 """
 
 import dataclasses
+import hashlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,11 @@ from cmxflow.operators.dock.pose import (
     optimize_dg_restarts,
     optimize_pose_cached,
 )
+from cmxflow.operators.dock.scaffold_index import (
+    ScaffoldPoseStore,
+    scaffold_key,
+    scaffold_pose,
+)
 from cmxflow.operators.dock.score import (
     AtomTyping,
     EmpiricalParams,
@@ -33,6 +39,7 @@ from cmxflow.operators.dock.score import (
     empirical_score_cached,
     get_atom_typing,
 )
+from cmxflow.operators.dock.template import template_dock
 from cmxflow.parameter import (
     Categorical,
     Continuous,
@@ -41,6 +48,17 @@ from cmxflow.parameter import (
 from cmxflow.sources.reader import read_molecules
 
 logger = logging.getLogger(__name__)
+
+# Scaffold pose index (template docking). The cache lives at a fixed, conventional
+# location in the execution directory so it is auto-discovered and reused across
+# runs; only the on/off flag is propagated to workers (the path is derived from cwd).
+_INDEX_DIR = Path(".cmxflow")
+_INDEX_DB_NAME = "scaffold_index.db"
+# Default flat-bottom core restraint for template docking: the scaffold may shift
+# freely within _INDEX_CONSTRAINT_TOL Å (to relieve a substituent clash), then is
+# resisted by a moderate spring. Tunable; deliberately far softer than a hard pin.
+_INDEX_CONSTRAINT_WEIGHT = 25.0
+_INDEX_CONSTRAINT_TOL = 0.5
 
 
 class MoleculeDockBlock(MoleculeBlock):
@@ -117,6 +135,7 @@ class MoleculeDockBlock(MoleculeBlock):
         score_components: bool = True,
         constraint_weight: float = 0.0,
         score_strain: bool = False,
+        index_poses: bool | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the molecular docking block.
@@ -132,24 +151,47 @@ class MoleculeDockBlock(MoleculeBlock):
                 and into multistart selection. Default False keeps
                 ``docking_score`` purely intermolecular (smina-comparable). The
                 strain value is always written as ``docking_strain`` regardless.
+            index_poses: Scaffold-indexed (template) docking. ``True`` enables it,
+                ``False`` disables it, ``None`` (default) auto-enables it only if a
+                scaffold cache already exists at ``./.cmxflow/scaffold_index.db``.
+                When active, the first molecule of each Bemis-Murcko scaffold is
+                docked fully and its scaffold pose cached; later molecules sharing
+                that scaffold transfer the cached pose and run a single constrained
+                local search -- much faster for congeneric series, and series-
+                consistent. The cache persists across runs and is reused. Cache
+                keys are namespaced by the docking parameters, so changing score
+                weights or search settings (e.g. during parameter optimization)
+                does not reuse stale poses. Mutually exclusive with
+                ``constraint_smarts``. This is a mode toggle, not a tunable
+                parameter -- it is never part of the optimization search space.
             **kwargs: Passed to ``set_inputs``. Accepts ``receptor`` (file path),
                 ``constraint_smarts`` (SMARTS string selecting constrained atoms),
-                and any mutable parameter by name (``n_starts``, ``max_iterations``,
-                ``box_size``, ``rigid``, score weights).
+                ``index_poses`` (``"true"``/``"false"``/``"auto"``), and any mutable
+                parameter by name (``n_starts``, ``max_iterations``, ``box_size``,
+                ``rigid``, score weights).
 
         Raises:
-            ValueError: If constraint_smarts is invalid or contains explicit H
-                (validated on first docking call).
+            ValueError: If constraint_smarts is invalid or contains explicit H,
+                or if index_poses and constraint_smarts are both active (validated
+                on first docking call).
         """
         super().__init__(
             name="MoleculeDock",
             input_files=["receptor", "site_reference"],
-            input_text=["constraint_smarts"],
+            input_text=["constraint_smarts", "index_poses"],
         )
         self._score_components = score_components
         self._constraint_weight = constraint_weight
         self._score_strain = score_strain
         self._constraint_smarts_mol: Chem.Mol | None = None  # compiled lazily
+        # Index toggle lives in input_text (agent-settable, propagates to workers),
+        # never in self.mutable(...) so the optimizer can't flip it. Resolved lazily.
+        self.input_text["index_poses"] = (
+            "auto" if index_poses is None else ("true" if index_poses else "false")
+        )
+        self._scaffold_store: ScaffoldPoseStore | None = None
+        self._indexing_active: bool | None = None  # resolved on first _forward
+        self._reference_seeded = False
 
         # Register mutable parameters
         self.mutable(
@@ -238,6 +280,75 @@ class MoleculeDockBlock(MoleculeBlock):
         raise ValueError(
             f"No molecule with 3D coordinates found in site_reference file: {site_path}"
         )
+
+    def _index_namespace(self) -> str:
+        """Hash of the docking params that affect a cached pose.
+
+        Namespaces the scaffold cache so changing score weights or search settings
+        (e.g. across parameter-optimization trials) never reuses a stale template.
+        """
+        items = sorted((name, p.get()) for name, p in self.params.items())
+        payload = f"{items}|score_strain={self._score_strain}"
+        return hashlib.sha1(payload.encode()).hexdigest()[:16]
+
+    def _indexing_enabled(self) -> bool:
+        """Resolve the ``index_poses`` flag once per process.
+
+        ``"true"``/``"false"`` are explicit; ``"auto"`` enables indexing only if the
+        cache file already exists. Raises if indexing and ``constraint_smarts`` are
+        both active.
+        """
+        if self._indexing_active is None:
+            flag = self.input_text.get("index_poses", "auto").strip().lower()
+            db = _INDEX_DIR / _INDEX_DB_NAME
+            if flag == "true":
+                active = True
+            elif flag == "false":
+                active = False
+            else:
+                active = db.exists()
+                if active:
+                    logger.warning(
+                        "Scaffold index discovered at %s; pose indexing active.", db
+                    )
+            if active and self.input_text.get("constraint_smarts", "").strip():
+                raise ValueError(
+                    "index_poses and constraint_smarts are mutually exclusive; "
+                    "the scaffold is the constraint in index mode."
+                )
+            self._indexing_active = active
+        return self._indexing_active
+
+    def _ensure_index_ready(self) -> ScaffoldPoseStore:
+        """Open the per-process store and seed the reference scaffold once."""
+        if self._scaffold_store is None:
+            self._scaffold_store = ScaffoldPoseStore(_INDEX_DIR / _INDEX_DB_NAME)
+        if not self._reference_seeded:
+            self._reference_seeded = True
+            self._seed_reference_scaffold()
+        return self._scaffold_store
+
+    def _seed_reference_scaffold(self) -> None:
+        """Seed the ``site_reference`` ligand's scaffold pose (idempotent).
+
+        The reference is the experimentally grounded pose, so it becomes the
+        preferred template for the series core and is seeded deterministically.
+        """
+        assert self._scaffold_store is not None
+        site_path = self.input_files.get("site_reference")
+        if site_path is None or str(site_path) == ".":
+            return
+        site_path = Path(site_path)
+        if not site_path.exists():
+            return
+        for ref in read_molecules(site_path, wrap=False):
+            if ref is None or ref.GetNumConformers() == 0:
+                continue
+            key = scaffold_key(ref)
+            posed = scaffold_pose(ref)
+            if key is not None and posed is not None:
+                self._scaffold_store.put(f"{self._index_namespace()}:{key}", posed)
+            return
 
     def _load_receptor(self) -> None:
         """Load and validate receptor from a PDB file.
@@ -354,65 +465,107 @@ class MoleculeDockBlock(MoleculeBlock):
         rigid_only = self.get_param("rigid")
         site_center = self._load_site_reference()
 
-        # When constraints are active, sampled starts don't respect them — keep
-        # n_starts=1 so only the aligned pose (row 0) enters refinement.
-        n_starts = 1 if constrained_atoms else self.get_param("n_starts")
-
-        # Phase 1: distance-geometry initialization — score sampled poses (a DG
-        # conformer ensemble crossed with a Sobol rigid grid) to find good basins.
-        init_params = PoseParams(
-            translation_bounds=(-box_size, box_size),
-            n_starts=n_starts,
-        )
-        starts = optimize_dg_restarts(
-            mol,
-            protein_coords=self._protein_coords,
-            protein_typing=self._protein_typing,
-            params=init_params,
-            score_params=score_params,
-            site_center=site_center,
-            rigid=rigid_only,
-            max_tries=self.get_param("sobol_max_tries"),
-            max_distance_geometry_samples=self.get_param(
-                "max_distance_geometry_samples"
-            ),
-            diversity_rmsd=self.get_param("diversity_rmsd"),
-            protein_tree=self._protein_tree,
-        )
-
-        # Phase 2: L-BFGS-B refinement from each starting pose.
-        refine_params = PoseParams(
-            max_iterations=self.get_param("max_iterations"),
-            translation_bounds=(-box_size, box_size),
-            optimize_torsions=not rigid_only,
-            n_starts=1,
-            basin_hops=self.get_param("basin_hops"),
-            constrained_atom_indices=constrained_atoms,
-            constraint_weight=self._constraint_weight,
-        )
-
-        # Selection objective: intermolecular score, plus strain when the strain
-        # toggle is on (so multistart picks the pose we will actually report).
-        def _effective(r: OptimizationResult) -> float:
-            return r.score + (r.strain if self._score_strain else 0.0)
+        # Scaffold-indexed (template) docking: on a cache hit, transfer the stored
+        # scaffold pose and run a single constrained local search instead of a full
+        # multistart search. Cache keys are namespaced by the docking parameters.
+        index_key: str | None = None
+        store: ScaffoldPoseStore | None = None
+        if self._indexing_enabled():
+            store = self._ensure_index_ready()
+            key = scaffold_key(mol)
+            if key is not None:
+                index_key = f"{self._index_namespace()}:{key}"
 
         result: OptimizationResult | None = None
-        for idx, (_, start_mol) in enumerate(starts):
-            candidate = optimize_pose_cached(
-                start_mol,
+        indexed = False
+        n_starts_used = 0
+
+        if index_key is not None and store is not None:
+            core = store.get(index_key)
+            if core is not None:
+                result = template_dock(
+                    mol,
+                    core,
+                    self._protein_coords,
+                    self._protein_typing,
+                    constraint_weight=_INDEX_CONSTRAINT_WEIGHT,
+                    constraint_tol=_INDEX_CONSTRAINT_TOL,
+                    score_params=score_params,
+                    max_iterations=self.get_param("max_iterations"),
+                    basin_hops=self.get_param("basin_hops"),
+                    optimize_torsions=not rigid_only,
+                    translation_bounds=(-box_size, box_size),
+                    protein_tree=self._protein_tree,
+                )
+                if result is not None:
+                    indexed = True
+                    n_starts_used = 1
+
+        if result is None:
+            # Full search. Phase 1: distance-geometry initialization — score sampled
+            # poses (a DG conformer ensemble crossed with a Sobol rigid grid) to find
+            # good basins. When constraints are active, sampled starts don't respect
+            # them — keep n_starts=1 so only the aligned pose (row 0) is refined.
+            n_starts = 1 if constrained_atoms else self.get_param("n_starts")
+            init_params = PoseParams(
+                translation_bounds=(-box_size, box_size),
+                n_starts=n_starts,
+            )
+            starts = optimize_dg_restarts(
+                mol,
                 protein_coords=self._protein_coords,
                 protein_typing=self._protein_typing,
-                # Distinct seed per chain so basin-hopping walks decorrelate.
-                params=dataclasses.replace(refine_params, seed=idx),
+                params=init_params,
                 score_params=score_params,
-                site_center=None,
+                site_center=site_center,
+                rigid=rigid_only,
+                max_tries=self.get_param("sobol_max_tries"),
+                max_distance_geometry_samples=self.get_param(
+                    "max_distance_geometry_samples"
+                ),
+                diversity_rmsd=self.get_param("diversity_rmsd"),
                 protein_tree=self._protein_tree,
             )
-            if result is None or _effective(candidate) < _effective(result):
-                result = candidate
 
-        assert result is not None
-        result = dataclasses.replace(result, initial_score=starts[0][0])
+            # Phase 2: L-BFGS-B refinement from each starting pose.
+            refine_params = PoseParams(
+                max_iterations=self.get_param("max_iterations"),
+                translation_bounds=(-box_size, box_size),
+                optimize_torsions=not rigid_only,
+                n_starts=1,
+                basin_hops=self.get_param("basin_hops"),
+                constrained_atom_indices=constrained_atoms,
+                constraint_weight=self._constraint_weight,
+            )
+
+            # Selection objective: intermolecular score, plus strain when the strain
+            # toggle is on (so multistart picks the pose we will actually report).
+            def _effective(r: OptimizationResult) -> float:
+                return r.score + (r.strain if self._score_strain else 0.0)
+
+            for idx, (_, start_mol) in enumerate(starts):
+                candidate = optimize_pose_cached(
+                    start_mol,
+                    protein_coords=self._protein_coords,
+                    protein_typing=self._protein_typing,
+                    # Distinct seed per chain so basin-hopping walks decorrelate.
+                    params=dataclasses.replace(refine_params, seed=idx),
+                    score_params=score_params,
+                    site_center=None,
+                    protein_tree=self._protein_tree,
+                )
+                if result is None or _effective(candidate) < _effective(result):
+                    result = candidate
+
+            assert result is not None
+            result = dataclasses.replace(result, initial_score=starts[0][0])
+            n_starts_used = len(starts)
+
+            # Cache this scaffold's pose for later siblings (first-writer-wins).
+            if index_key is not None and store is not None:
+                posed = scaffold_pose(result.mol)
+                if posed is not None:
+                    store.put(index_key, posed)
 
         # Electrostatic complementarity: a reporting-only score evaluated once on
         # the final pose (never part of the search). Protein charges were computed
@@ -426,7 +579,8 @@ class MoleculeDockBlock(MoleculeBlock):
         # Set properties. docking_score optionally includes the ligand strain
         # penalty; docking_empirical stays pure intermolecular (smina-comparable).
         docking_score = result.score + (result.strain if self._score_strain else 0.0)
-        result.mol.SetIntProp("docking_n_starts_used", len(starts))
+        result.mol.SetIntProp("docking_n_starts_used", n_starts_used)
+        result.mol.SetBoolProp("docking_indexed", indexed)
         result.mol.SetDoubleProp("docking_initial_pose_score", result.initial_score)
         result.mol.SetDoubleProp("docking_score", docking_score)
         result.mol.SetDoubleProp("docking_empirical", result.score)

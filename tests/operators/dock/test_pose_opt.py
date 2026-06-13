@@ -301,6 +301,87 @@ class TestDofGradient:
             score_params,
         )
 
+    def test_dof_grad_with_flatbottom_constraint(self) -> None:
+        """Full DOF gradient with a flat-bottom constraint active (end-to-end).
+
+        Mirrors the real ``optimize_pose_cached`` objective: score + flat-bottom
+        constraint penalty, projected through the DOF chain rule. Verifies the
+        constraint gradient survives that projection (the path index/template
+        docking uses), in the active regime ``r > tol``.
+        """
+        (
+            ligand_mol,
+            ligand_heavy,
+            p0_heavy,
+            centroid,
+            dihedrals,
+            subtrees,
+            protein_coords,
+            protein_typing,
+            score_params,
+        ) = _make_pose_system()
+        n_torsions = len(dihedrals)
+        params = PoseParams(
+            constrained_atom_indices=(0, 1, 2),
+            constraint_weight=8.0,
+            constraint_tol=0.5,
+        )
+        # Constraint target is the aligned start pose (x = 0).
+        _, _, target = _eval_objective(
+            np.zeros(6 + n_torsions),
+            ligand_heavy,
+            p0_heavy,
+            centroid,
+            dihedrals,
+            subtrees,
+            protein_coords,
+            protein_typing,
+            score_params,
+        )
+        # Displace enough that the constrained atoms exceed tol (active regime).
+        x0 = np.zeros(6 + n_torsions)
+        x0[0] = 1.0  # translate 1 Å > tol
+
+        def scalar(x: np.ndarray) -> float:
+            s, _, pos = _eval_objective(
+                x,
+                ligand_heavy,
+                p0_heavy,
+                centroid,
+                dihedrals,
+                subtrees,
+                protein_coords,
+                protein_typing,
+                score_params,
+            )
+            return float(s + _constraint_penalty_value(pos, target, params))
+
+        s0, atom_grad0, pos0 = _eval_objective(
+            x0,
+            ligand_heavy,
+            p0_heavy,
+            centroid,
+            dihedrals,
+            subtrees,
+            protein_coords,
+            protein_typing,
+            score_params,
+        )
+        _, atom_grad0 = _apply_constraint_penalty(s0, atom_grad0, pos0, target, params)
+        analytical = _compute_dof_gradient(
+            x0, pos0, atom_grad0, centroid, dihedrals, subtrees
+        )
+        fd = np.zeros_like(x0)
+        for k in range(len(x0)):
+            xp = x0.copy()
+            xp[k] += EPS
+            xm = x0.copy()
+            xm[k] -= EPS
+            fd[k] = (scalar(xp) - scalar(xm)) / (2 * EPS)
+        # Confirm the regime is actually active (penalty non-zero at x0).
+        assert _constraint_penalty_value(pos0, target, params) > 0.0
+        np.testing.assert_allclose(analytical, fd, atol=ATOL)
+
     def test_dof_grad_at_nonzero_rotation_and_torsions(self) -> None:
         """DOF grad with rotation AND torsions both off zero.
 
@@ -373,6 +454,71 @@ class TestConstraintPenalty:
 
         _, atom_grad = _apply_constraint_penalty(0.0, np.zeros((3, 3)), pos, p0, params)
 
+        for i in range(3):
+            for d in range(3):
+                pos_p = pos.copy()
+                pos_p[i, d] += EPS
+                pos_m = pos.copy()
+                pos_m[i, d] -= EPS
+                fd = (
+                    _constraint_penalty_value(pos_p, p0, params)
+                    - _constraint_penalty_value(pos_m, p0, params)
+                ) / (2 * EPS)
+                assert atom_grad[i, d] == pytest.approx(fd, abs=ATOL)
+
+    def test_flatbottom_zero_tol_matches_quadratic(self) -> None:
+        """tol=0 flat-bottom is bit-identical to the pure quadratic tether."""
+        pos = np.random.default_rng(1).standard_normal((4, 3))
+        p0 = np.zeros((4, 3))
+        idx = [0, 2, 3]
+        quad = PoseParams(constrained_atom_indices=tuple(idx), constraint_weight=7.0)
+        flat = PoseParams(
+            constrained_atom_indices=tuple(idx),
+            constraint_weight=7.0,
+            constraint_tol=0.0,
+        )
+        # Reference quadratic computed directly.
+        delta = pos[idx] - p0[idx]
+        ref_val = 7.0 * float(np.sum(delta**2))
+        ref_grad = np.zeros((4, 3))
+        ref_grad[idx] = 2.0 * 7.0 * delta
+
+        for params in (quad, flat):
+            assert _constraint_penalty_value(pos, p0, params) == ref_val
+            s, g = _apply_constraint_penalty(0.0, np.zeros((4, 3)), pos, p0, params)
+            assert s == ref_val
+            np.testing.assert_array_equal(g, ref_grad)
+
+    def test_flatbottom_free_within_tol(self) -> None:
+        """No penalty (and no gradient) while displacement stays within tol."""
+        pos = np.array([[0.3, 0.0, 0.0], [0.0, 0.2, 0.0]])
+        p0 = np.zeros((2, 3))
+        params = PoseParams(
+            constrained_atom_indices=(0, 1), constraint_weight=10.0, constraint_tol=0.5
+        )
+        assert _constraint_penalty_value(pos, p0, params) == 0.0
+        _, grad = _apply_constraint_penalty(0.0, np.zeros((2, 3)), pos, p0, params)
+        np.testing.assert_array_equal(grad, np.zeros((2, 3)))
+
+    def test_flatbottom_penalizes_excess_only(self) -> None:
+        """Beyond tol, only the excess displacement is penalized."""
+        pos = np.array([[1.5, 0.0, 0.0]])  # r = 1.5, tol = 0.5 -> excess 1.0
+        p0 = np.zeros((1, 3))
+        params = PoseParams(
+            constrained_atom_indices=(0,), constraint_weight=3.0, constraint_tol=0.5
+        )
+        assert _constraint_penalty_value(pos, p0, params) == pytest.approx(3.0 * 1.0**2)
+
+    def test_flatbottom_grad_agrees_with_fd(self) -> None:
+        """Flat-bottom gradient matches finite differences in the active regime."""
+        pos = np.array([[1.2, -0.5, 0.3], [0.1, 0.05, 0.0], [0.9, 0.9, 0.0]])
+        p0 = np.zeros((3, 3))
+        params = PoseParams(
+            constrained_atom_indices=(0, 1, 2),
+            constraint_weight=5.0,
+            constraint_tol=0.5,
+        )
+        _, atom_grad = _apply_constraint_penalty(0.0, np.zeros((3, 3)), pos, p0, params)
         for i in range(3):
             for d in range(3):
                 pos_p = pos.copy()

@@ -73,7 +73,7 @@ class TestMoleculeDockBlockScoreComponents:
             "cmxflow.operators.dock.dock.optimize_pose_cached",
             return_value=_mock_result(mol),
         ), patch(
-            "cmxflow.operators.dock.dock.optimize_sobol_restarts",
+            "cmxflow.operators.dock.dock.optimize_dg_restarts",
             return_value=[(-5.0, mol)],
         ):
             result = block._forward(mol)
@@ -88,7 +88,7 @@ class TestMoleculeDockBlockScoreComponents:
             "cmxflow.operators.dock.dock.optimize_pose_cached",
             return_value=_mock_result(mol),
         ), patch(
-            "cmxflow.operators.dock.dock.optimize_sobol_restarts",
+            "cmxflow.operators.dock.dock.optimize_dg_restarts",
             return_value=[(-5.0, mol)],
         ):
             result = block._forward(mol)
@@ -106,7 +106,7 @@ class TestMoleculeDockBlockScoreComponents:
             "cmxflow.operators.dock.dock.optimize_pose_cached",
             return_value=_mock_result(mol),
         ), patch(
-            "cmxflow.operators.dock.dock.optimize_sobol_restarts",
+            "cmxflow.operators.dock.dock.optimize_dg_restarts",
             return_value=[(-5.0, mol)],
         ):
             result = block._forward(mol)
@@ -137,16 +137,16 @@ class TestMoleculeDockBlockScoreComponents:
 
 
 class TestPoseSearchParams:
-    """Sobol-screening and ILS-proposal params are exposed and threaded through."""
+    """Pose-search params are exposed with their defaults and threaded through."""
 
     DEFAULTS = {
-        "sobol_max_tries": 1024,
-        "max_score_per_heavy_atom": 3.0,
-        "diversity_rmsd": 0.0,
-        "step_translation": 2.0,
-        "step_rotation": 0.5,
-        "step_torsion": 60.0,
-        "basin_temperature": 1.0,
+        "n_starts": 32,
+        "basin_hops": 0,
+        "max_iterations": 100,
+        "box_size": 10.0,
+        "sobol_max_tries": 2048,
+        "max_distance_geometry_samples": 32,
+        "diversity_rmsd": 1.0,
     }
 
     def test_defaults_registered(self) -> None:
@@ -160,40 +160,34 @@ class TestPoseSearchParams:
         from cmxflow.operators.dock import MoleculeDockBlock
 
         overrides: dict[str, Any] = {
-            "sobol_max_tries": 2048,
-            "max_score_per_heavy_atom": 1.0,
+            "n_starts": 16,
+            "sobol_max_tries": 1024,
+            "max_distance_geometry_samples": 8,
             "diversity_rmsd": 1.5,
-            "step_translation": 1.0,
-            "step_rotation": 0.25,
-            "step_torsion": 30.0,
-            "basin_temperature": 0.5,
+            "basin_hops": 5,
         }
         block = MoleculeDockBlock()
         block.set_inputs(**overrides)
         for name, value in overrides.items():
             assert block.get_param(name) == pytest.approx(value), name
 
-    def test_threaded_into_sobol_and_refine(self) -> None:
-        """Screening params reach optimize_sobol_restarts; proposal scale reaches
-        the refine PoseParams; n_starts_used records the actual start count."""
+    def test_threaded_into_init_and_refine(self) -> None:
+        """Init params reach the DG call; basin_hops reaches the refine
+        PoseParams; n_starts_used records the actual start count."""
         block = _make_block()
         block.set_inputs(
-            sobol_max_tries=2048,
-            max_score_per_heavy_atom=1.0,
+            sobol_max_tries=1024,
+            max_distance_geometry_samples=8,
             diversity_rmsd=1.5,
-            step_translation=1.0,
-            step_rotation=0.25,
-            step_torsion=30.0,
-            basin_temperature=0.5,
             basin_hops=7,
         )
 
         mol = _make_mol()
-        sobol_kwargs: dict = {}
+        init_kwargs: dict = {}
         refine_params: list = []
 
-        def _fake_sobol(*_args, **kwargs):
-            sobol_kwargs.update(kwargs)
+        def _fake_init(*_args, **kwargs):
+            init_kwargs.update(kwargs)
             return [(-5.0, mol), (-4.0, mol)]
 
         def _fake_refine(*_args, **kwargs):
@@ -201,8 +195,8 @@ class TestPoseSearchParams:
             return _mock_result(mol)
 
         with patch(
-            "cmxflow.operators.dock.dock.optimize_sobol_restarts",
-            side_effect=_fake_sobol,
+            "cmxflow.operators.dock.dock.optimize_dg_restarts",
+            side_effect=_fake_init,
         ), patch(
             "cmxflow.operators.dock.dock.optimize_pose_cached",
             side_effect=_fake_refine,
@@ -210,16 +204,11 @@ class TestPoseSearchParams:
             result = block._forward(mol)
 
         assert result is not None
-        # Screening params threaded into the Sobol call.
-        assert sobol_kwargs["max_tries"] == 2048
-        assert sobol_kwargs["max_score_per_heavy_atom"] == pytest.approx(1.0)
-        assert sobol_kwargs["diversity_rmsd"] == pytest.approx(1.5)
-        # Proposal scale + temperature threaded into refine PoseParams.
-        p = refine_params[0]
-        assert p.step_translation == pytest.approx(1.0)
-        assert p.step_rotation == pytest.approx(0.25)
-        assert p.step_torsion == pytest.approx(30.0)
-        assert p.basin_temperature == pytest.approx(0.5)
-        assert p.basin_hops == 7
+        # Init params threaded into the DG call.
+        assert init_kwargs["max_tries"] == 1024
+        assert init_kwargs["max_distance_geometry_samples"] == 8
+        assert init_kwargs["diversity_rmsd"] == pytest.approx(1.5)
+        # basin_hops threaded into refine PoseParams.
+        assert refine_params[0].basin_hops == 7
         # Actual start count recorded for true-compute / starvation tracking.
         assert result.GetIntProp("docking_n_starts_used") == 2

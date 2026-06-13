@@ -4,7 +4,7 @@ This module provides scoring functions and pose optimization for
 protein-ligand docking.
 
 Scoring Functions:
-    empirical_score: Empirical (Vinardo) scoring function
+    empirical_score: Empirical (default Vinardo) scoring functions
     empirical_score_cached: Empirical scoring function (cached protein data)
     empirical_score_and_grad_cached: Empirical score + analytical gradient
     EmpiricalParams: Parameters for empirical scoring
@@ -20,17 +20,14 @@ Electrostatic Complementarity:
     generate_sas_points: Solvent-accessible surface points
 
 Pose Optimization:
-    optimize_pose: General pose optimization
-    optimize_pose_rigid: Rigid-body only optimization
-    optimize_pose_flexible: Rigid + torsion optimization
-    optimize_pose_cached: General pose optimization (cached input)
+    optimize_pose_cached: Pose optimization against cached protein data
     PoseParams: Optimization parameters
     OptimizationResult: Optimization results
 
 Example:
     >>> from rdkit import Chem
     >>> from rdkit.Chem import AllChem
-    >>> from cmxflow.operators.dock import empirical_score, optimize_pose_rigid
+    >>> from cmxflow.operators.dock import empirical_score
     >>>
     >>> # Create ligand with 3D coords
     >>> ligand = Chem.MolFromSmiles("CCO")
@@ -44,10 +41,6 @@ Example:
     >>>
     >>> # Score the pose
     >>> score = empirical_score(ligand, protein)
-    >>>
-    >>> # Optimize pose
-    >>> result = optimize_pose_rigid(ligand, protein)
-    >>> print(f"Score improved: {result.initial_score} -> {result.score}")
 """
 
 from cmxflow.operators.dock.dock import MoleculeDockBlock
@@ -63,10 +56,7 @@ from cmxflow.operators.dock.pose import (
     PoseParams,
     apply_rigid_transform,
     get_rotatable_bonds,
-    optimize_pose,
     optimize_pose_cached,
-    optimize_pose_flexible,
-    optimize_pose_rigid,
 )
 from cmxflow.operators.dock.score import (
     AtomTyping,
@@ -98,9 +88,6 @@ __all__ = [
     "PoseParams",
     "apply_rigid_transform",
     "get_rotatable_bonds",
-    "optimize_pose",
-    "optimize_pose_flexible",
-    "optimize_pose_rigid",
     "optimize_pose_cached",
     # Dock
     "MoleculeDockBlock",

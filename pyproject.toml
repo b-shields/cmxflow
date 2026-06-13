@@ -59,5 +59,6 @@ module = [
     "cmxflow.operators.confgen",
     "cmxflow.operators.dock.ec",
     "cmxflow.operators.dock.dock",
+    "cmxflow.operators.dock.pose",
 ]
 disable_error_code = ["override", "assignment", "no-any-return", "attr-defined"]

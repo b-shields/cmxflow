@@ -82,11 +82,6 @@ class PoseParams:
         step_translation: Std dev (Å) of the per-hop translation perturbation.
         step_rotation: Std dev (rad) of the per-hop rotation-vector perturbation.
         step_torsion: Std dev (deg) of the per-hop torsion perturbation.
-        ils_step_mode: Basin-hopping proposal style. "single" (default) mutates
-            one DOF group per hop (translation, rotation, or a single torsion),
-            Vina-style, so the local minimization refines the current basin and
-            the chain accumulates partial progress. "all" perturbs every DOF at
-            once (legacy; retained for comparison).
         seed: RNG seed for basin-hopping proposals and acceptance.
     """
 
@@ -105,7 +100,6 @@ class PoseParams:
     step_translation: float = 2.0
     step_rotation: float = 0.5
     step_torsion: float = 60.0
-    ils_step_mode: str = "single"
     seed: int = 0
 
 
@@ -566,25 +560,26 @@ def constraint_weight_for_rmsd(target_rmsd_angstrom: float) -> float:
 # then only place the rigid body). Keep in mind that if sobol is kept we need to
 # modify this method to do the full screen and take the n_best under constraints
 # rather than the ready approach
-def optimize_sobol_restarts(
+def _rigid_sobol_restarts(
     ligand_mol: Chem.Mol,
     protein_coords: np.ndarray,
     protein_typing: AtomTyping,
     params: PoseParams,
     score_params: EmpiricalParams,
     site_center: np.ndarray | None = None,
-    rigid: bool = False,
     ligand_conf_id: int = 0,
     max_tries: int = 1024,
     max_score_per_heavy_atom: float = 3.0,
     diversity_rmsd: float = 0.0,
     protein_tree: cKDTree | None = None,
 ) -> list[tuple[float, Chem.Mol]]:
-    """Multi-start sobol pre-screening, returning starting poses for minimization.
+    """Rigid-body Sobol screening, returning starting poses for minimization.
 
-    Row 0 is always the input aligned pose (unconditional). This wastes one slot
-    when the aligned pose is clashing, but preserves MCS/overlay behaviour where
-    the aligned start is intentionally the binding hypothesis.
+    Used for rigid docking, where there are no torsions to diversify. Row 0 is
+    always the input aligned pose (unconditional), preserving MCS/overlay
+    behaviour where the aligned start is the binding hypothesis. Rows 1+ are
+    Sobol translation+rotation samples kept when they clear a clash gate
+    (``max_score_per_heavy_atom``) and a ``diversity_rmsd`` spacing constraint.
 
     Candidates are sampled within ``box_size / 2`` so they land near the pocket;
     L-BFGS-B bounds remain at the full ``box_size``.
@@ -593,101 +588,68 @@ def optimize_sobol_restarts(
         ligand_mol: Ligand with 3D coordinates.
         protein_coords: Pre-computed protein atom coordinates (n_atoms, 3).
         protein_typing: Pre-computed protein atom typing.
-        params: Pose params. ``optimize_torsions`` is ignored; always rigid.
+        params: Pose params; ``n_starts`` sets how many starts are returned.
         score_params: Scoring function parameters.
-        site_center: Optional binding site centroid — anchors Sobol restarts
-            to the pocket (rows 1+). Row 0 always starts from the input pose.
-        rigid: If True only optimize over translation and rotation.
+        site_center: Optional binding site centroid — anchors restarts to the
+            pocket (rows 1+). Row 0 always starts from the input pose.
         ligand_conf_id: Ligand conformer ID.
         max_tries: Maximum number of Sobol candidates to evaluate when
             searching for ``n_starts - 1`` acceptable starts.
-        max_score_per_heavy_atom: Score threshold for accepting a Sobol candidate
-            where ``max_score`` is computed by multiplying by ``n_heavy``.
-        diversity_rmsd: Minimum heavy-atom RMSD (Å) between selected starting
-            poses. Prevents L-BFGS-B restarts from redundantly exploring the
-            same basin.
+        max_score_per_heavy_atom: Clash-gate score threshold per heavy atom.
+        diversity_rmsd: Minimum heavy-atom RMSD (Å) between selected starts.
+        protein_tree: Optional cached protein KD-tree for sparse scoring.
 
     Returns:
         List of (score, mol) tuples of max length ``n_starts`` (params).
     """
-    # Get heavy atom centroid
     ligand_heavy = Chem.RemoveAllHs(ligand_mol)
     p0_heavy = np.array(ligand_heavy.GetConformer(ligand_conf_id).GetPositions())
     centroid = np.mean(p0_heavy, axis=0)
     ligand_typing = get_atom_typing(ligand_heavy)  # fixed topology; compute once
 
-    # Set max score
     max_score = ligand_heavy.GetNumHeavyAtoms() * max_score_per_heavy_atom
 
-    # Set translational box size
     box_size = max(abs(params.translation_bounds[0]), abs(params.translation_bounds[1]))
     site_offset: NDArray | None = None
     if site_center is not None:
-        # Offset from center if specified
         site_offset = site_center - centroid
 
-    # Set torsional bounds
-    n_tor = 0
-    if not rigid:
-        rotatable_dihedrals = get_rotatable_bonds(ligand_heavy)
-        initial_torsions = np.array(
-            [
-                get_dihedral_angle(ligand_heavy, *d, ligand_conf_id)
-                for d in rotatable_dihedrals
-            ]
-        )
-        n_tor = len(rotatable_dihedrals)
-
-    # Sobol sampling
+    # Sobol translation + rotation sampling.
     n_random = params.n_starts - 1  # row 0 reserved for aligned pose
     sample_box = box_size / 2.0
-    n_total = 6 + n_tor
-    lo = np.array(
-        [-sample_box] * 3 + [-np.pi] * 3 + [-params.max_torsion_change] * n_tor
-    )
-    hi = np.array([sample_box] * 3 + [np.pi] * 3 + [params.max_torsion_change] * n_tor)
-    sampler = qmc.Sobol(d=n_total, scramble=True, seed=0)
+    lo = np.array([-sample_box] * 3 + [-np.pi] * 3)
+    hi = np.array([sample_box] * 3 + [np.pi] * 3)
+    sampler = qmc.Sobol(d=6, scramble=True, seed=0)
 
     # Generate all max_tries points upfront so the Sobol sequence is contiguous.
-    unit_all = sampler.random(max_tries)
-    xs_sobol = qmc.scale(unit_all, lo, hi)
+    xs_sobol = qmc.scale(sampler.random(max_tries), lo, hi)
     if site_offset is not None:
         xs_sobol[:, :3] += site_offset
 
-    # Merge with initial point (always score starting pose)
-    x0 = np.zeros(shape=(1, n_total), dtype=np.float64)
+    # Merge with initial point (always score the starting pose).
+    x0 = np.zeros(shape=(1, 6), dtype=np.float64)
     xs_all = np.vstack([x0, xs_sobol])
 
-    # Rejection sampling loop: max_score and RMSD constraint
-    passed: list[tuple[float, Chem.Mol, NDArray]] = []  # (score, x, positions)
+    # Rejection sampling loop: max_score and RMSD constraint.
+    passed: list[tuple[float, Chem.Mol, NDArray]] = []  # (score, mol, positions)
     n_tried = 0
     for x in xs_all:
         n_tried += 1
-        # Rigid translation + rotation
-        T = x[:3]
-        rot = Rotation.from_rotvec(x[3:6])
         mol_c = apply_rigid_transform(
-            ligand_heavy, T, rot, ligand_conf_id, center=centroid
+            ligand_heavy,
+            x[:3],
+            Rotation.from_rotvec(x[3:6]),
+            ligand_conf_id,
+            center=centroid,
         )
-
-        # Torsions
-        if not rigid and n_tor > 0:
-            new_torsions = initial_torsions + x[6:]
-            mol_c = apply_torsion_changes(
-                mol_c, dict(zip(rotatable_dihedrals, new_torsions)), ligand_conf_id
-            )
-
-        # New positions
         pos = np.array(mol_c.GetConformer(ligand_conf_id).GetPositions())
 
-        # Check RMSD diversity contratin
         if len(passed) > 1 and not all(
             np.sqrt(np.mean(np.sum((pos - p[2]) ** 2, axis=1))) >= diversity_rmsd
             for p in passed
         ):
             continue
 
-        # Check total empirical score constraint
         sc = empirical_score_cached(
             mol_c,
             protein_coords,
@@ -701,12 +663,11 @@ def optimize_sobol_restarts(
         if len(passed) == 0 or sc < max_score:
             passed.append((sc, mol_c, pos))
 
-        # Early stopping
         if len(passed) >= n_random:
             break
 
     logger.info(
-        "sobol_restarts: %d/%d candidates passed score < %.1f after %d tries.",
+        "rigid_sobol_restarts: %d/%d candidates passed score < %.1f after %d tries.",
         len(passed),
         n_random,
         max_score,
@@ -714,7 +675,7 @@ def optimize_sobol_restarts(
     )
     if len(passed) < n_random:
         logger.warning(
-            "sobol_restarts: only %d of %d non-clashing starts found.",
+            "rigid_sobol_restarts: only %d of %d non-clashing starts found.",
             len(passed),
             n_random,
         )
@@ -732,17 +693,16 @@ def optimize_dg_restarts(
     rigid: bool = False,
     ligand_conf_id: int = 0,
     max_tries: int = 1024,
-    max_score_per_heavy_atom: float = 3.0,
     diversity_rmsd: float = 0.0,
     max_distance_geometry_samples: int = 8,
     protein_tree: cKDTree | None = None,
 ) -> list[tuple[float, Chem.Mol]]:
     """Distance-geometry multi-start screening, returning starts for minimization.
 
-    A drop-in alternative to :func:`optimize_sobol_restarts` that diversifies
-    *torsions* via an ETKDGv3 conformer ensemble instead of uniform Sobol throws
-    over torsion space. Uniform torsion sampling scales badly with rotatable-bond
-    count and spends most candidates on self-clashing, high-strain geometries; a
+    Diversifies *torsions* via an ETKDGv3 conformer ensemble instead of uniform
+    Sobol throws over torsion space. Uniform torsion sampling scales badly with
+    rotatable-bond count and spends most candidates on self-clashing, high-strain
+    geometries; a
     distance-geometry ensemble samples the physical low-energy conformer manifold,
     giving far better coverage per start for flexible ligands.
 
@@ -759,7 +719,7 @@ def optimize_dg_restarts(
     and rigid-placement diversity, so neither axis is starved.
 
     When ``rigid`` is True there are no torsions to diversify, so this delegates
-    to :func:`optimize_sobol_restarts` for identical rigid-docking behaviour.
+    to :func:`_rigid_sobol_restarts`.
 
     Args:
         ligand_mol: Ligand with 3D coordinates.
@@ -775,8 +735,6 @@ def optimize_dg_restarts(
         ligand_conf_id: Conformer ID of the input pose (start 0).
         max_tries: Total candidate budget; the per-conformer Sobol placement
             count is ``max_tries // max_distance_geometry_samples``.
-        max_score_per_heavy_atom: Unused; accepted only for signature parity with
-            optimize_sobol_restarts (DG ranks on score, no clash gate).
         diversity_rmsd: Minimum heavy-atom RMSD (Å) between selected starts.
         max_distance_geometry_samples: Max ETKDGv3 conformers to embed (grid M).
         protein_tree: Optional cached protein KD-tree for sparse scoring.
@@ -786,18 +744,16 @@ def optimize_dg_restarts(
         first being the input pose.
     """
     if rigid:
-        # No torsions to diversify — identical rigid behaviour as the Sobol path.
-        return optimize_sobol_restarts(
+        # No torsions to diversify — rigid translation/rotation screening only.
+        return _rigid_sobol_restarts(
             ligand_mol,
             protein_coords,
             protein_typing,
             params,
             score_params,
             site_center=site_center,
-            rigid=True,
             ligand_conf_id=ligand_conf_id,
             max_tries=max_tries,
-            max_score_per_heavy_atom=max_score_per_heavy_atom,
             diversity_rmsd=diversity_rmsd,
             protein_tree=protein_tree,
         )
@@ -833,7 +789,7 @@ def optimize_dg_restarts(
     passed: list[tuple[float, Chem.Mol, NDArray]] = [
         (_score(start0), start0, _positions(start0))
     ]
-    n_keep = params.n_starts - 1  # parity with optimize_sobol_restarts
+    n_keep = params.n_starts - 1  # start 0 is the input pose
     if n_keep <= 0:
         return [(s, m) for s, m, _ in passed]
 
@@ -908,41 +864,6 @@ def optimize_dg_restarts(
 # =============================================================================
 
 
-class _DOFStep:
-    """Per-DOF Gaussian proposal for basin-hopping, clipped to box bounds.
-
-    Perturbs translation, rotation-vector, and torsion DOFs with separate
-    amplitudes so each takes a controlled step (unlike a single isotropic
-    displacement), then clips back into the L-BFGS-B bounds.
-    """
-
-    def __init__(
-        self,
-        n_torsions: int,
-        lo: NDArray[np.floating],
-        hi: NDArray[np.floating],
-        t_sigma: float,
-        r_sigma: float,
-        tor_sigma: float,
-        rng: np.random.Generator,
-    ) -> None:
-        self.n_torsions = n_torsions
-        self.lo = lo
-        self.hi = hi
-        self.t_sigma = t_sigma
-        self.r_sigma = r_sigma
-        self.tor_sigma = tor_sigma
-        self.rng = rng
-
-    def __call__(self, x: NDArray) -> NDArray:
-        x = x.copy()
-        x[:3] += self.rng.normal(0.0, self.t_sigma, 3)
-        x[3:6] += self.rng.normal(0.0, self.r_sigma, 3)
-        if self.n_torsions:
-            x[6:] += self.rng.normal(0.0, self.tor_sigma, self.n_torsions)
-        return np.clip(x, self.lo, self.hi)
-
-
 class _SingleDOFStep:
     """Vina-style single-group proposal for iterated local search.
 
@@ -953,9 +874,6 @@ class _SingleDOFStep:
     subsequent local minimization refines that basin rather than restarting,
     which is what lets the Metropolis chain accumulate partial progress across
     hops (the mechanism independent restarts lack).
-
-    Shares the constructor signature of ``_DOFStep`` so the two are
-    interchangeable at the call site.
     """
 
     def __init__(
@@ -1213,8 +1131,7 @@ def optimize_pose_cached(
     if params.basin_hops > 0:
         lo = np.array([b[0] for b in bounds])
         hi = np.array([b[1] for b in bounds])
-        step_cls = _DOFStep if params.ils_step_mode == "all" else _SingleDOFStep
-        take_step = step_cls(
+        take_step = _SingleDOFStep(
             n_torsions,
             lo,
             hi,
@@ -1294,108 +1211,4 @@ def optimize_pose_cached(
         converged=converged,
         n_iterations=n_iter,
         strain=strain,
-    )
-
-
-# =============================================================================
-# Convenience Wrappers (non-cached, use empirical_score directly)
-# =============================================================================
-
-
-def optimize_pose(
-    ligand_mol: Chem.Mol,
-    protein_mol: Chem.Mol,
-    params: PoseParams | None = None,
-    ligand_conf_id: int = 0,
-    protein_conf_id: int = 0,
-) -> OptimizationResult:
-    """Optimize ligand pose in protein binding site.
-
-    Convenience wrapper using full RDKit mol objects. For performance,
-    prefer ``optimize_pose_cached`` when scoring multiple ligands against
-    the same protein.
-
-    Args:
-        ligand_mol: Ligand RDKit Mol with 3D coordinates.
-        protein_mol: Protein RDKit Mol with 3D coordinates.
-        params: Optimization parameters. If None, uses defaults.
-        ligand_conf_id: Ligand conformer ID to optimize.
-        protein_conf_id: Protein conformer ID (fixed).
-
-    Returns:
-        OptimizationResult with optimized molecule and metadata.
-    """
-    if params is None:
-        params = PoseParams()
-
-    protein_heavy = Chem.RemoveAllHs(protein_mol)
-
-    protein_conf = protein_heavy.GetConformer(protein_conf_id)
-    protein_coords = np.array(protein_conf.GetPositions())
-    from cmxflow.operators.dock.score import get_atom_typing
-
-    protein_typing = get_atom_typing(protein_heavy)
-
-    return optimize_pose_cached(
-        ligand_mol,
-        protein_coords,
-        protein_typing,
-        params=params,
-        ligand_conf_id=ligand_conf_id,
-    )
-
-
-def optimize_pose_rigid(
-    ligand_mol: Chem.Mol,
-    protein_mol: Chem.Mol,
-    max_iterations: int = 100,
-    ligand_conf_id: int = 0,
-    protein_conf_id: int = 0,
-) -> OptimizationResult:
-    """Optimize ligand pose with rigid-body transformation only.
-
-    Args:
-        ligand_mol: Ligand molecule.
-        protein_mol: Protein molecule.
-        max_iterations: Maximum iterations.
-        ligand_conf_id: Ligand conformer ID.
-        protein_conf_id: Protein conformer ID.
-
-    Returns:
-        OptimizationResult with optimized rigid pose.
-    """
-    params = PoseParams(max_iterations=max_iterations, optimize_torsions=False)
-    return optimize_pose(
-        ligand_mol, protein_mol, params, ligand_conf_id, protein_conf_id
-    )
-
-
-def optimize_pose_flexible(
-    ligand_mol: Chem.Mol,
-    protein_mol: Chem.Mol,
-    max_iterations: int = 200,
-    max_torsion_change: float = 30.0,
-    ligand_conf_id: int = 0,
-    protein_conf_id: int = 0,
-) -> OptimizationResult:
-    """Optimize ligand pose with rigid-body and torsion flexibility.
-
-    Args:
-        ligand_mol: Ligand molecule.
-        protein_mol: Protein molecule.
-        max_iterations: Maximum iterations.
-        max_torsion_change: Maximum torsion change per bond in degrees.
-        ligand_conf_id: Ligand conformer ID.
-        protein_conf_id: Protein conformer ID.
-
-    Returns:
-        OptimizationResult with optimized flexible pose.
-    """
-    params = PoseParams(
-        max_iterations=max_iterations,
-        optimize_torsions=True,
-        max_torsion_change=max_torsion_change,
-    )
-    return optimize_pose(
-        ligand_mol, protein_mol, params, ligand_conf_id, protein_conf_id
     )

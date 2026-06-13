@@ -1,8 +1,8 @@
 """Molecular docking block for cmxflow workflows.
 
 This module provides a MoleculeBlock implementation for docking ligands
-into protein binding sites using the empirical (Vinardo) scoring function and
-rigid-body/torsional pose optimization.
+into protein binding sites using the empirical (default Vinardo) scoring
+function and rigid-body + torsional pose optimization.
 """
 
 import dataclasses
@@ -25,7 +25,6 @@ from cmxflow.operators.dock.pose import (
     PoseParams,
     optimize_dg_restarts,
     optimize_pose_cached,
-    optimize_sobol_restarts,
 )
 from cmxflow.operators.dock.score import (
     AtomTyping,
@@ -47,7 +46,7 @@ logger = logging.getLogger(__name__)
 class MoleculeDockBlock(MoleculeBlock):
     """MoleculeBlock for docking ligands into protein binding sites.
 
-    Performs pose optimization using the empirical (Vinardo) scoring function
+    Performs pose optimization using an empirical scoring function
     with configurable parameters. Supports both rigid-body and flexible
     (torsional) docking. Electrostatic complementarity (EC) is evaluated once on
     the final pose and reported as ``docking_ec`` — a standalone score, never
@@ -160,53 +159,24 @@ class MoleculeDockBlock(MoleculeBlock):
             Continuous("w_hydrophobic", -0.035, -0.065, -0.015),
             Continuous("w_hbond", -0.6, -0.8, -0.4),
             Continuous("w_rot", 0.02, 0.0, 0.04),
-            # Pose search
-            # Per-mol runtime ~ len(starts) x (1 + basin_hops) local minima, each
-            # ~max_iterations L-BFGS-B steps. These caps hold the worst-case HPO
-            # config to ~8 min/mol (vs ~85 min at the old 65/64/300 corner) --
-            # see POSE_SEARCH_PLAN Stage A2/DGH.
-            #   hi=33: start diversity saturates at 32 (A2: 32->64 bit-identical
-            #   for Sobol, marginal for DG at 2x cost); 33 keeps Sobol balance.
-            Integer("n_starts", 17, 1, 33),
-            #   hi=16: DGH showed hops add ZERO reached over h0 (cosmetic polish
-            #   only) -- capped low so hopping cannot dominate runtime.
+            # Pose search. Per-mol runtime ~ n_starts x (1 + basin_hops) local
+            # minima, each ~max_iterations L-BFGS-B steps; the bounds keep the
+            # worst-case config tractable.
+            #   n_starts hi=33: start diversity saturates near 32.
+            Integer("n_starts", 32, 1, 33),
+            #   basin_hops: extra iterated-local-search refinement per start.
+            #   Default 0 (init + single minimize); hi=16 caps runtime.
             Integer("basin_hops", 0, 0, 16),
-            #   hi=200: L-BFGS-B converges well before 300.
+            #   max_iterations hi=200: L-BFGS-B converges well before then.
             Integer("max_iterations", 100, 50, 200),
             Continuous("box_size", 10.0, 2.0, 20.0),
             Categorical("rigid", False, [True, False]),
-            # Sobol initialization screening (rejection sampling of starts)
-            # TODO(pose-search): tighten these HPO ranges from Stage 0 findings
-            # (abl1 sweep, see POSE_SEARCH_PLAN.md). Stage 0 showed:
-            #   - max_score_per_heavy_atom: a strict gate STARVES starts (mss=1
-            #     filled only ~6/16) and worsened gap; mss=5 (fills all starts)
-            #     was best. Useful region is the loose end ~3-8; the low floor
-            #     0.5 is counterproductive. Consider raising default->5, floor->3.
-            #   - diversity_rmsd: INERT in [0,3] for SOBOL (random Sobol poses are
-            #     already >3A apart, so the gate never binds). Either drop from HPO
-            #     and pin at 0, or only sweep >~4A (which re-introduces starvation).
-            #     NOTE: this is Sobol-specific. With init_mode="dg" the gate is the
-            #     ONLY thing preventing near-duplicate starts (rank-on-energy
-            #     clusters at low div), so if DG wins, the default must move with
-            #     it: init_mode->"dg" AND diversity_rmsd->~1.0 together.
-            # hi=4096: Stage DG showed the candidate budget is near-inert above
-            # ~2048 (t1024 == t2048). Survives the Sobol->DG rename as the DG grid
-            # budget (= M conformers x tries//M rigid placements).
-            Integer("sobol_max_tries", 1024, 512, 4096),
-            Continuous("max_score_per_heavy_atom", 3.0, 0.5, 10.0),
-            Continuous("diversity_rmsd", 0.0, 0.0, 5.0),
-            # Start initialization: "sobol" diversifies torsions by uniform Sobol
-            # throws; "dg" diversifies them via an ETKDGv3 conformer ensemble
-            # (better coverage for flexible ligands). DG reuses sobol_max_tries as
-            # the total candidate budget = max_distance_geometry_samples conformers
-            # x (sobol_max_tries // that) rigid placements.
-            Categorical("init_mode", "sobol", ["sobol", "dg"]),
-            Integer("max_distance_geometry_samples", 8, 1, 64),
-            # Iterated local search (basin-hopping) proposal scale
-            Continuous("step_translation", 2.0, 0.1, 5.0),
-            Continuous("step_rotation", 0.5, 0.05, 1.5),
-            Continuous("step_torsion", 60.0, 5.0, 180.0),
-            Continuous("basin_temperature", 1.0, 0.1, 5.0),
+            # Initialization grid: max_distance_geometry_samples (M) ETKDGv3
+            # conformers crossed with sobol_max_tries // M Sobol rigid placements;
+            # the lowest-scoring starts at least diversity_rmsd apart are kept.
+            Integer("sobol_max_tries", 2048, 512, 4096),
+            Integer("max_distance_geometry_samples", 32, 1, 64),
+            Continuous("diversity_rmsd", 1.0, 0.0, 5.0),
         )
         self.set_inputs(**kwargs)
 
@@ -384,49 +354,39 @@ class MoleculeDockBlock(MoleculeBlock):
         rigid_only = self.get_param("rigid")
         site_center = self._load_site_reference()
 
-        # When constraints are active, Sobol starts don't respect them — keep
+        # When constraints are active, sampled starts don't respect them — keep
         # n_starts=1 so only the aligned pose (row 0) enters refinement.
         n_starts = 1 if constrained_atoms else self.get_param("n_starts")
 
-        # Phase 1: Sobol pre-screening — score sampled poses to find good basins.
-        sobol_params = PoseParams(
+        # Phase 1: distance-geometry initialization — score sampled poses (a DG
+        # conformer ensemble crossed with a Sobol rigid grid) to find good basins.
+        init_params = PoseParams(
             translation_bounds=(-box_size, box_size),
             n_starts=n_starts,
         )
-        restart_kwargs: dict = dict(
+        starts = optimize_dg_restarts(
+            mol,
             protein_coords=self._protein_coords,
             protein_typing=self._protein_typing,
-            params=sobol_params,
+            params=init_params,
             score_params=score_params,
             site_center=site_center,
             rigid=rigid_only,
             max_tries=self.get_param("sobol_max_tries"),
-            max_score_per_heavy_atom=self.get_param("max_score_per_heavy_atom"),
+            max_distance_geometry_samples=self.get_param(
+                "max_distance_geometry_samples"
+            ),
             diversity_rmsd=self.get_param("diversity_rmsd"),
             protein_tree=self._protein_tree,
         )
-        if self.get_param("init_mode") == "dg":
-            starts = optimize_dg_restarts(
-                mol,
-                max_distance_geometry_samples=self.get_param(
-                    "max_distance_geometry_samples"
-                ),
-                **restart_kwargs,
-            )
-        else:
-            starts = optimize_sobol_restarts(mol, **restart_kwargs)
 
-        # Phase 2: L-BFGS-B refinement from each Sobol starting pose.
+        # Phase 2: L-BFGS-B refinement from each starting pose.
         refine_params = PoseParams(
             max_iterations=self.get_param("max_iterations"),
             translation_bounds=(-box_size, box_size),
             optimize_torsions=not rigid_only,
             n_starts=1,
             basin_hops=self.get_param("basin_hops"),
-            basin_temperature=self.get_param("basin_temperature"),
-            step_translation=self.get_param("step_translation"),
-            step_rotation=self.get_param("step_rotation"),
-            step_torsion=self.get_param("step_torsion"),
             constrained_atom_indices=constrained_atoms,
             constraint_weight=self._constraint_weight,
         )

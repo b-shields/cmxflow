@@ -695,26 +695,6 @@ class TestBasinHopping:
         b = optimize_pose_cached(lig, pc, pt, params=params)
         assert a.score == pytest.approx(b.score)
 
-    def test_all_dof_mode_still_runs(self) -> None:
-        """Legacy all-DOF proposal stays selectable for comparison runs."""
-        lig, pc, pt, _ = _make_system("c1ccccc1CCCCO")
-        single = optimize_pose_cached(
-            lig, pc, pt, params=PoseParams(basin_hops=0, w_intra=0.0, max_iterations=50)
-        )
-        ils_all = optimize_pose_cached(
-            lig,
-            pc,
-            pt,
-            params=PoseParams(
-                basin_hops=8,
-                w_intra=0.0,
-                max_iterations=50,
-                seed=0,
-                ils_step_mode="all",
-            ),
-        )
-        assert ils_all.score <= single.score + 1e-6
-
 
 class TestSingleDOFStep:
     """Vina-style proposal: each hop perturbs exactly one DOF group."""
@@ -799,7 +779,7 @@ class TestDgRestarts:
         assert np.allclose(first, ref)
 
     def test_count_matches_sobol_parity(self) -> None:
-        """Returns n_starts - 1, exactly like optimize_sobol_restarts."""
+        """Returns n_starts starts (input pose plus n_starts - 1 sampled)."""
         lig, prot, typ, sp = self._system()
         params = PoseParams(n_starts=9, seed=0)
         starts = optimize_dg_restarts(
@@ -821,12 +801,12 @@ class TestDgRestarts:
         assert len(starts) == 1
 
     def test_rigid_delegates_to_sobol(self) -> None:
-        """rigid=True forwards to the Sobol path (no conformer diversity)."""
+        """rigid=True forwards to the rigid Sobol path (no conformer diversity)."""
         lig, prot, typ, sp = self._system()
         params = PoseParams(n_starts=5, seed=0)
         sentinel = [(0.0, lig)]
         with patch(
-            "cmxflow.operators.dock.pose.optimize_sobol_restarts",
+            "cmxflow.operators.dock.pose._rigid_sobol_restarts",
             return_value=sentinel,
         ) as mock_sobol:
             out = optimize_dg_restarts(

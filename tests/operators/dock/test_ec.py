@@ -290,7 +290,7 @@ class TestMoleculeDockBlockEC:
                 return_value=self._opt_result(mol),
             ) as mock_opt,
             patch(
-                "cmxflow.operators.dock.dock.optimize_sobol_restarts",
+                "cmxflow.operators.dock.dock.optimize_dg_restarts",
                 return_value=[(-5.0, mol)],
             ),
         ):
@@ -314,7 +314,7 @@ class TestMoleculeDockBlockEC:
                 return_value=self._opt_result(mol, score=-6.2),
             ),
             patch(
-                "cmxflow.operators.dock.dock.optimize_sobol_restarts",
+                "cmxflow.operators.dock.dock.optimize_dg_restarts",
                 return_value=[(-6.2, mol)],
             ),
             patch(
@@ -344,7 +344,7 @@ class TestMoleculeDockBlockEC:
                 return_value=self._opt_result(mol),
             ),
             patch(
-                "cmxflow.operators.dock.dock.optimize_sobol_restarts",
+                "cmxflow.operators.dock.dock.optimize_dg_restarts",
                 return_value=[(-5.0, mol)],
             ),
         ):

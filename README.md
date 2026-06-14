@@ -9,7 +9,7 @@
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Build cheminformatics pipelines with composable blocks. Tune end-to-end with Bayesian Optimization. Or ask an LLM agent to do it.**
+Build cheminformatics and computational chemistry pipelines with composable blocks. Tune end-to-end with Bayesian Optimization. Or ask an LLM agent to do it.
 
 ## Quick examples
 

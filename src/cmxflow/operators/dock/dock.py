@@ -164,6 +164,8 @@ class MoleculeDockBlock(MoleculeBlock):
                 does not reuse stale poses. Mutually exclusive with
                 ``constraint_smarts``. This is a mode toggle, not a tunable
                 parameter -- it is never part of the optimization search space.
+            constraint_smarts: SMARTS pattern for atoms in docked molecules to be
+                constrained.
             **kwargs: Passed to ``set_inputs``. Accepts ``receptor`` (file path),
                 ``constraint_smarts`` (SMARTS string selecting constrained atoms),
                 ``index_poses`` (``"true"``/``"false"``/``"auto"``), and any mutable
@@ -439,9 +441,12 @@ class MoleculeDockBlock(MoleculeBlock):
                     )
             self._constraint_smarts_mol = smarts_mol
 
-        # Resolve constraint SMARTS → heavy-atom indices for this molecule
+        # Resolve constraint SMARTS → heavy-atom indices for this molecule.
+        # A match triggers local-only search (n_starts=1) regardless of weight;
+        # weight=0 means no penalty but the aligned pose is still the sole start.
+        # No match → free docking (full n_starts).
         constrained_atoms: tuple[int, ...] = ()
-        if self._constraint_smarts_mol is not None and self._constraint_weight > 0.0:
+        if self._constraint_smarts_mol is not None:
             ligand_heavy_pre = Chem.RemoveAllHs(mol)
             matches = ligand_heavy_pre.GetSubstructMatches(self._constraint_smarts_mol)
             if matches:
@@ -452,6 +457,11 @@ class MoleculeDockBlock(MoleculeBlock):
                     "Constraint matched %d time(s), constraining %d atoms.",
                     len(matches),
                     len(constrained_atoms),
+                )
+            else:
+                logger.warning(
+                    "constraint_smarts did not match molecule %s; falling back to free docking.",
+                    mol.GetProp("_Name") if mol.HasProp("_Name") else Chem.MolToSmiles(mol),
                 )
 
         score_params = EmpiricalParams(

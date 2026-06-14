@@ -25,7 +25,7 @@ All available blocks at a glance. See the [API Reference](api/operators.md) for 
 | `EnumerateStereoBlock` | Enumerate all stereoisomers |  |
 | `ConformerGenerationBlock` | Generate 3D conformers |  |
 | `MoleculeAlignBlock` | Align molecules to 3D reference | `query` (file) |
-| `MoleculeDockBlock` | Dock into protein binding pocket | `receptor` (file) |
+| `MoleculeDockBlock` | Dock into protein binding pocket | `receptor` (file), `site_reference` (file) |
 | `RepresentativeClusterBlock` | Leader clustering |  |
 
 ## Sink Blocks

@@ -32,7 +32,6 @@ from cmxflow.operators.dock.pose import (
     optimize_pose_cached,
 )
 from cmxflow.operators.dock.score import (
-    AtomTyping,
     EmpiricalParams,
     empirical_score_and_grad_cached,
     get_atom_typing,
@@ -598,96 +597,6 @@ class TestConstraintPenalty:
         assert disp[list(constrained)].max() < 0.05
         # ... while at least one unconstrained atom moves substantially.
         assert disp[len(constrained) :].max() > 0.5
-
-
-# =============================================================================
-# SMARTS constraint interface (Step 7)
-# =============================================================================
-
-
-class TestConstraintSmarts:
-
-    def _make_constraint_block(self, smarts: str, weight: float = 10.0):
-        from cmxflow.operators.dock import MoleculeDockBlock
-
-        return MoleculeDockBlock(constraint_smarts=smarts, constraint_weight=weight)
-
-    def test_smarts_resolves_to_heavy_atom_indices(self) -> None:
-        """SMARTS pattern correctly resolves to heavy-atom indices."""
-
-        block = self._make_constraint_block("c1ccccc1", weight=10.0)
-        mol = _make_ligand("c1ccccc1CCO")
-        block._protein_coords = np.zeros((3, 3))
-        block._protein_typing = AtomTyping(
-            radii=np.full(3, 1.7),
-            is_hydrophobic=np.zeros(3, dtype=bool),
-            is_hbond_donor=np.zeros(3, dtype=bool),
-            is_hbond_acceptor=np.zeros(3, dtype=bool),
-        )
-        block._protein_ec_coords = np.zeros((3, 3))
-        block._protein_ec_charges = np.zeros(3)
-
-        # Trigger lazy compile via _forward
-        block._forward(mol)
-        assert block._constraint_smarts_mol is not None
-        ligand_heavy_pre = Chem.RemoveAllHs(mol)
-        matches = ligand_heavy_pre.GetSubstructMatches(block._constraint_smarts_mol)
-        assert len(matches) > 0
-        assert len({idx for match in matches for idx in match}) == 6
-
-    def test_no_match_molecule_proceeds_without_constraint(self) -> None:
-        """Molecule that doesn't match SMARTS docks normally (no constraint)."""
-
-        block = self._make_constraint_block("[#7]", weight=10.0)  # N — not in propane
-        mol = _make_ligand("CCC")
-        block._protein_coords = np.zeros((3, 3))
-        block._protein_typing = AtomTyping(
-            radii=np.full(3, 1.7),
-            is_hydrophobic=np.zeros(3, dtype=bool),
-            is_hbond_donor=np.zeros(3, dtype=bool),
-            is_hbond_acceptor=np.zeros(3, dtype=bool),
-        )
-        block._protein_ec_coords = np.zeros((3, 3))
-        block._protein_ec_charges = np.zeros(3)
-
-        result = block._forward(mol)
-        assert result is not None
-
-    def test_explicit_h_smarts_raises_on_first_forward(self) -> None:
-        """SMARTS with explicit H raises ValueError on first docking call."""
-
-        block = self._make_constraint_block("[#6]-[H]", weight=1.0)
-        mol = _make_ligand("CCO")
-        block._protein_coords = np.zeros((3, 3))
-        block._protein_typing = AtomTyping(
-            radii=np.full(3, 1.7),
-            is_hydrophobic=np.zeros(3, dtype=bool),
-            is_hbond_donor=np.zeros(3, dtype=bool),
-            is_hbond_acceptor=np.zeros(3, dtype=bool),
-        )
-        block._protein_ec_coords = np.zeros((3, 3))
-        block._protein_ec_charges = np.zeros(3)
-
-        with pytest.raises(ValueError, match="hydrogen"):
-            block._forward(mol)
-
-    def test_invalid_smarts_raises_on_first_forward(self) -> None:
-        """Invalid SMARTS string raises ValueError on first docking call."""
-
-        block = self._make_constraint_block("[invalid(smarts", weight=1.0)
-        mol = _make_ligand("CCO")
-        block._protein_coords = np.zeros((3, 3))
-        block._protein_typing = AtomTyping(
-            radii=np.full(3, 1.7),
-            is_hydrophobic=np.zeros(3, dtype=bool),
-            is_hbond_donor=np.zeros(3, dtype=bool),
-            is_hbond_acceptor=np.zeros(3, dtype=bool),
-        )
-        block._protein_ec_coords = np.zeros((3, 3))
-        block._protein_ec_charges = np.zeros(3)
-
-        with pytest.raises(ValueError, match="Invalid constraint_smarts"):
-            block._forward(mol)
 
 
 # =============================================================================

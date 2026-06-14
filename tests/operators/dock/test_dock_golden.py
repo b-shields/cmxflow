@@ -107,77 +107,6 @@ def test_defaults_reach_golden_minimum() -> None:
     _assert_golden(_dock({}), golden_score, pose_file)
 
 
-# Scaffold-constraint path. Docks the co-crystallized ligand with its fused
-# bicyclic core pinned by a SMARTS constraint. The constrained core must stay on
-# its input position while the same search *without* the constraint both relocates
-# that core and reaches a lower score -- proving the constraint actively holds the
-# scaffold rather than the search simply never leaving it.
-CONSTRAINT_SMARTS = "c1ncc2cccnc2n1"  # fused bicyclic scaffold of the crystal ligand
-# Light, exploratory search shared by the constrained and free runs.
-CONSTRAINT_SEARCH = dict(
-    n_starts=8, max_distance_geometry_samples=8, sobol_max_tries=512, basin_hops=0
-)
-CONSTRAINED_GOLDEN_SCORE = -12.2233718177
-CONSTRAINED_GOLDEN_POSE = "golden_pose_constrained.npy"
-
-
-def _dock_crystal(config: dict) -> Chem.Mol:
-    """Dock the frozen abl1 crystal ligand with ``config`` and return the result."""
-    block = MoleculeDockBlock(
-        receptor=str(DATA / "receptor.pdb"),
-        site_reference=str(DATA / "crystal_ligand.mol2"),
-        **config,
-    )
-    mol = next(read_molecules(DATA / "crystal_ligand.mol2", wrap=False))
-    with threadpool_limits(limits=1):
-        out = block._forward(mol)
-    assert out is not None
-    return out
-
-
-def _crystal_core() -> tuple[list[int], np.ndarray]:
-    """Return (core heavy-atom indices, input positions) for the crystal ligand."""
-    mol = next(read_molecules(DATA / "crystal_ligand.mol2", wrap=False))
-    heavy = Chem.RemoveAllHs(mol)
-    matches = heavy.GetSubstructMatches(Chem.MolFromSmarts(CONSTRAINT_SMARTS))
-    idx = sorted({i for match in matches for i in match})
-    return idx, np.array(heavy.GetConformer().GetPositions())[idx]
-
-
-def _core_displacement(out: Chem.Mol) -> float:
-    """Max distance any constrained core atom moved from its input position."""
-    idx, in_core = _crystal_core()
-    out_core = np.array(Chem.RemoveAllHs(out).GetConformer().GetPositions())[idx]
-    return float(np.linalg.norm(out_core - in_core, axis=1).max())
-
-
-def test_constraint_holds_core_at_golden_minimum() -> None:
-    """A scaffold-constrained dock pins the core and reaches its golden pose.
-
-    Also covers the ``n_starts -> 1`` forcing in ``_forward``: with a constraint
-    matched, only the aligned input pose is refined regardless of configured starts.
-    """
-    out = _dock_crystal(
-        dict(
-            constraint_smarts=CONSTRAINT_SMARTS,
-            constraint_weight=1000.0,
-            **CONSTRAINT_SEARCH,
-        )
-    )
-    _assert_golden(out, CONSTRAINED_GOLDEN_SCORE, CONSTRAINED_GOLDEN_POSE)
-    assert _core_displacement(out) < 0.05  # core held on its input position
-    assert out.GetIntProp("docking_n_starts_used") == 1  # constraint forces 1 start
-
-
-def test_free_docking_moves_core_and_scores_lower() -> None:
-    """Guard: the same search without the constraint leaves the input core and
-    reaches a lower score, so the constrained test above is not vacuous."""
-    free = _dock_crystal(dict(CONSTRAINT_SEARCH))
-    assert _core_displacement(free) > 0.15  # free search relocates the core
-    free_score = float(free.GetProp("docking_score"))
-    assert free_score < CONSTRAINED_GOLDEN_SCORE - 0.1  # and finds a better pose
-
-
 # Scaffold-indexed (template) docking. Docking the active is a cache miss (full
 # dock, caches its scaffold pose); a congener sharing that scaffold then hits the
 # cache and is docked with a single constrained local search. Tests run in a tmp
@@ -234,16 +163,16 @@ def test_reference_scaffold_is_seeded(monkeypatch, tmp_path) -> None:
     assert out.GetIntProp("docking_n_starts_used") == 1
 
 
-def test_auto_discovery_enables_when_db_present(monkeypatch, tmp_path) -> None:
-    """index_poses=None auto-enables when a cache already exists in the cwd."""
-    monkeypatch.chdir(tmp_path)
-    active = next(read_molecules(DATA / "active_ligand.sdf", wrap=False))
-    with threadpool_limits(limits=1):
-        _index_block(index_poses=True)._forward(active)  # creates the DB
-    # A fresh auto-mode block in the same cwd discovers and enables indexing.
-    assert _index_block(index_poses=None)._indexing_enabled() is True
-    # ... and stays off in a clean directory with no cache.
-    clean = tmp_path / "clean"
-    clean.mkdir()
-    monkeypatch.chdir(clean)
-    assert _index_block(index_poses=None)._indexing_enabled() is False
+def test_namespace_separates_targets() -> None:
+    """Cache keys are namespaced by receptor/reference so one shared DB can serve
+    multiple targets without pose collisions, but identical inputs share a key."""
+    base = _index_block(index_poses=True)
+    same = _index_block(index_poses=True)
+    other_receptor = MoleculeDockBlock(
+        receptor=str(DATA / "crystal_ligand.mol2"),  # different receptor path
+        site_reference=str(DATA / "crystal_ligand.mol2"),
+        **INDEX_SEARCH,
+        index_poses=True,
+    )
+    assert base._index_namespace() == same._index_namespace()
+    assert base._index_namespace() != other_receptor._index_namespace()

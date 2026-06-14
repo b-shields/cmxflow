@@ -8,6 +8,7 @@ function and rigid-body + torsional pose optimization.
 import dataclasses
 import hashlib
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -70,18 +71,27 @@ class MoleculeDockBlock(MoleculeBlock):
     the final pose and reported as ``docking_ec`` — a standalone score, never
     part of the search.
 
-    Supports multi-start optimization (``n_starts``) and scaffold constraints
-    (``constraint_smarts``, ``constraint_weight``) for use with the
-    MoleculeAlignBlock → MoleculeDockBlock workflow.
+    Two modes, both requiring a ``receptor`` and a ``site_reference``:
+
+    - **Free docking** (``index_poses=False``, default): multi-start search
+      (``n_starts``) anchored on the site-reference centroid.
+    - **Scaffold-indexed docking** (``index_poses=True``): the first molecule of
+      each Bemis-Murcko scaffold is docked fully and its core pose cached; later
+      siblings transfer that pose and run a single constrained local search — much
+      faster for congeneric series, and series-consistent. The ``site_reference``
+      ligand is seeded as the first scaffold entry, so its experimentally grounded
+      pose is the preferred template.
 
     Required Inputs:
         - receptor (file): Path to receptor PDB file.
-        - site_reference (file, optional): Molecule file (.sdf, .mol2, etc.)
-          whose heavy-atom centroid defines the binding site center. When
-          provided, Sobol restart samples are anchored to the pocket rather
-          than the input conformer position — required for blind docking from
-          a fresh conformer. Omit for MCS/overlay refinement workflows where
-          the input pose is already in the binding site.
+        - site_reference (file): Molecule file (.sdf, .mol2, etc.) whose
+          heavy-atom centroid defines the binding site center. Sobol restart
+          samples are anchored to this pocket, so molecules dock from a freshly
+          generated conformer — no preceding alignment step is required. It is
+          the reference template seeded into the scaffold index when
+          ``index_poses=True``. Technically optional: omit only for MCS/overlay
+          refinement workflows where the input pose is already in the binding
+          site (the search then recenters on the input conformer position).
 
     Output Properties:
         - docking_initial_pose_score: Score before optimization.
@@ -103,13 +113,17 @@ class MoleculeDockBlock(MoleculeBlock):
 
     Example:
         ```python
+        # site_reference recenters the search, so a fresh conformer docks
+        # directly — no MoleculeAlignBlock required.
         workflow.add(
             MoleculeSourceBlock(),
             EnumerateStereoBlock(),
             ConformerGenerationBlock(),
-            MoleculeAlignBlock(query="reference.sdf"),
-            MoleculeDockBlock(receptor="protein.pdb"),
-            MoleculeSinkBlock()
+            MoleculeDockBlock(
+                receptor="protein.pdb",
+                site_reference="crystal_ligand.sdf",
+            ),
+            MoleculeSinkBlock(),
         )
         ```
 
@@ -123,19 +137,21 @@ class MoleculeDockBlock(MoleculeBlock):
             input pose only. For blind docking (with site_reference), use
             1+2^k for ideal Sobol balance: 3, 5, 9, 17, 33, 65. Row 0 always
             minimizes from the aligned pose; rows 1+ sample the binding site box.
+        - basin_hops: Iterated-local-search refinement steps per restart
+            (0 = single minimize). Higher finds lower-energy poses at more cost.
         - max_iterations: Maximum L-BFGS-B iterations per restart.
         - box_size: Translation search box half-width in Angstroms (default 5.0).
             Centred on site_reference centroid when provided, otherwise on the
             input conformer position.
         - rigid: If True, only rigid-body optimization (no torsions).
+        - index_poses: If True, scaffold-indexed (template) docking (see above).
+            A mode toggle, not a search dimension — freeze it during optimization.
     """
 
     def __init__(
         self,
         score_components: bool = True,
-        constraint_weight: float = 0.0,
         score_strain: bool = False,
-        index_poses: bool | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the molecular docking block.
@@ -143,56 +159,34 @@ class MoleculeDockBlock(MoleculeBlock):
         Args:
             score_components: If True (default), write per-term weighted score
                 components as SDF properties on each docked molecule.
-            constraint_weight: Penalty weight in kcal/mol/Å² applied to atoms
-                matched by ``constraint_smarts``. 0 = disabled. Weight 100
-                confines atoms to ~0.1 Å RMSD from their input pose.
             score_strain: If True, add the ligand strain penalty (intramolecular
                 energy added vs the input conformer, >=0) into ``docking_score``
                 and into multistart selection. Default False keeps
                 ``docking_score`` purely intermolecular (smina-comparable). The
                 strain value is always written as ``docking_strain`` regardless.
-            index_poses: Scaffold-indexed (template) docking. ``True`` enables it,
-                ``False`` disables it, ``None`` (default) auto-enables it only if a
-                scaffold cache already exists at ``./.cmxflow/scaffold_index.db``.
-                When active, the first molecule of each Bemis-Murcko scaffold is
-                docked fully and its scaffold pose cached; later molecules sharing
+            **kwargs: Passed to ``set_inputs``. Accepts the inputs ``receptor`` and
+                ``site_reference`` (file paths) and any mutable parameter by name
+                (``n_starts``, ``basin_hops``, ``max_iterations``, ``box_size``,
+                ``rigid``, score weights, and ``index_poses``). ``index_poses`` is a
+                bool (default ``False``): when ``True`` the block runs in
+                scaffold-indexed (template) docking mode -- the first molecule of
+                each Bemis-Murcko scaffold is docked fully and its scaffold pose
+                cached at ``./.cmxflow/scaffold_index.db``; later molecules sharing
                 that scaffold transfer the cached pose and run a single constrained
-                local search -- much faster for congeneric series, and series-
-                consistent. The cache persists across runs and is reused. Cache
-                keys are namespaced by the docking parameters, so changing score
-                weights or search settings (e.g. during parameter optimization)
-                does not reuse stale poses. Mutually exclusive with
-                ``constraint_smarts``. This is a mode toggle, not a tunable
-                parameter -- it is never part of the optimization search space.
-            constraint_smarts: SMARTS pattern for atoms in docked molecules to be
-                constrained.
-            **kwargs: Passed to ``set_inputs``. Accepts ``receptor`` (file path),
-                ``constraint_smarts`` (SMARTS string selecting constrained atoms),
-                ``index_poses`` (``"true"``/``"false"``/``"auto"``), and any mutable
-                parameter by name (``n_starts``, ``max_iterations``, ``box_size``,
-                ``rigid``, score weights).
-
-        Raises:
-            ValueError: If constraint_smarts is invalid or contains explicit H,
-                or if index_poses and constraint_smarts are both active (validated
-                on first docking call).
+                local search (faster for congeneric series, and series-consistent).
+                The cache persists across runs and is reused. Cache keys are
+                namespaced by the docking parameters *and* the receptor/reference
+                paths, so changing score weights or search settings, or pointing at
+                a different target/site, never reuses a stale pose. ``index_poses``
+                is a mode toggle: leave it out of the optimized parameter space.
         """
         super().__init__(
             name="MoleculeDock",
             input_files=["receptor", "site_reference"],
-            input_text=["constraint_smarts", "index_poses"],
         )
         self._score_components = score_components
-        self._constraint_weight = constraint_weight
         self._score_strain = score_strain
-        self._constraint_smarts_mol: Chem.Mol | None = None  # compiled lazily
-        # Index toggle lives in input_text (agent-settable, propagates to workers),
-        # never in self.mutable(...) so the optimizer can't flip it. Resolved lazily.
-        self.input_text["index_poses"] = (
-            "auto" if index_poses is None else ("true" if index_poses else "false")
-        )
         self._scaffold_store: ScaffoldPoseStore | None = None
-        self._indexing_active: bool | None = None  # resolved on first _forward
         self._reference_seeded = False
 
         # Register mutable parameters
@@ -213,7 +207,7 @@ class MoleculeDockBlock(MoleculeBlock):
             Integer("basin_hops", 0, 0, 16),
             #   max_iterations hi=200: L-BFGS-B converges well before then.
             Integer("max_iterations", 100, 50, 200),
-            Continuous("box_size", 10.0, 2.0, 20.0),
+            Continuous("box_size", 10.0, 5.0, 20.0),
             Categorical("rigid", False, [True, False]),
             # Initialization grid: max_distance_geometry_samples (M) ETKDGv3
             # conformers crossed with sobol_max_tries // M Sobol rigid placements;
@@ -221,6 +215,8 @@ class MoleculeDockBlock(MoleculeBlock):
             Integer("sobol_max_tries", 2048, 512, 4096),
             Integer("max_distance_geometry_samples", 32, 1, 64),
             Continuous("diversity_rmsd", 1.0, 0.0, 5.0),
+            # Mode toggle: scaffold-indexed (template) docking on/off
+            Categorical("index_poses", False, [True, False]),
         )
         self.set_inputs(**kwargs)
 
@@ -283,43 +279,36 @@ class MoleculeDockBlock(MoleculeBlock):
             f"No molecule with 3D coordinates found in site_reference file: {site_path}"
         )
 
+    def _index_rel_path(self, key: str) -> str:
+        """Resolve an input file path relative to the cache dir (``.cmxflow/``).
+
+        Used to namespace cached poses by target/site so one shared cache can serve
+        several receptors or reference sites without collisions. Returns ``""`` when
+        the input is unset.
+        """
+        path = self.input_files.get(key)
+        if path is None or str(path) == ".":
+            return ""
+        return os.path.relpath(os.path.abspath(str(path)), os.path.abspath(_INDEX_DIR))
+
     def _index_namespace(self) -> str:
-        """Hash of the docking params that affect a cached pose.
+        """Hash of the docking params + target/site that define a cached pose.
 
         Namespaces the scaffold cache so changing score weights or search settings
-        (e.g. across parameter-optimization trials) never reuses a stale template.
+        (e.g. across parameter-optimization trials), or pointing at a different
+        receptor/reference, never reuses a stale template.
         """
         items = sorted((name, p.get()) for name, p in self.params.items())
-        payload = f"{items}|score_strain={self._score_strain}"
+        payload = (
+            f"{items}|score_strain={self._score_strain}"
+            f"|receptor={self._index_rel_path('receptor')}"
+            f"|site_reference={self._index_rel_path('site_reference')}"
+        )
         return hashlib.sha1(payload.encode()).hexdigest()[:16]
 
     def _indexing_enabled(self) -> bool:
-        """Resolve the ``index_poses`` flag once per process.
-
-        ``"true"``/``"false"`` are explicit; ``"auto"`` enables indexing only if the
-        cache file already exists. Raises if indexing and ``constraint_smarts`` are
-        both active.
-        """
-        if self._indexing_active is None:
-            flag = self.input_text.get("index_poses", "auto").strip().lower()
-            db = _INDEX_DIR / _INDEX_DB_NAME
-            if flag == "true":
-                active = True
-            elif flag == "false":
-                active = False
-            else:
-                active = db.exists()
-                if active:
-                    logger.warning(
-                        "Scaffold index discovered at %s; pose indexing active.", db
-                    )
-            if active and self.input_text.get("constraint_smarts", "").strip():
-                raise ValueError(
-                    "index_poses and constraint_smarts are mutually exclusive; "
-                    "the scaffold is the constraint in index mode."
-                )
-            self._indexing_active = active
-        return self._indexing_active
+        """Whether scaffold-indexed (template) docking is active."""
+        return bool(self.get_param("index_poses"))
 
     def _ensure_index_ready(self) -> ScaffoldPoseStore:
         """Open the per-process store and seed the reference scaffold once."""
@@ -427,43 +416,6 @@ class MoleculeDockBlock(MoleculeBlock):
         assert isinstance(self._protein_coords, np.ndarray)
         assert isinstance(self._protein_typing, AtomTyping)
 
-        # Compile constraint SMARTS lazily on first call
-        smarts_str = self.input_text.get("constraint_smarts", "").strip()
-        if smarts_str and self._constraint_smarts_mol is None:
-            smarts_mol = Chem.MolFromSmarts(smarts_str)
-            if smarts_mol is None:
-                raise ValueError(f"Invalid constraint_smarts: {smarts_str!r}")
-            for atom in smarts_mol.GetAtoms():
-                if atom.GetAtomicNum() == 1:
-                    raise ValueError(
-                        f"constraint_smarts {smarts_str!r} contains an explicit "
-                        "hydrogen. Use e.g. [#6H] not [#6]-[H]."
-                    )
-            self._constraint_smarts_mol = smarts_mol
-
-        # Resolve constraint SMARTS → heavy-atom indices for this molecule.
-        # A match triggers local-only search (n_starts=1) regardless of weight;
-        # weight=0 means no penalty but the aligned pose is still the sole start.
-        # No match → free docking (full n_starts).
-        constrained_atoms: tuple[int, ...] = ()
-        if self._constraint_smarts_mol is not None:
-            ligand_heavy_pre = Chem.RemoveAllHs(mol)
-            matches = ligand_heavy_pre.GetSubstructMatches(self._constraint_smarts_mol)
-            if matches:
-                constrained_atoms = tuple(
-                    sorted({idx for match in matches for idx in match})
-                )
-                logger.debug(
-                    "Constraint matched %d time(s), constraining %d atoms.",
-                    len(matches),
-                    len(constrained_atoms),
-                )
-            else:
-                logger.warning(
-                    "constraint_smarts did not match molecule %s; falling back to free docking.",
-                    mol.GetProp("_Name") if mol.HasProp("_Name") else Chem.MolToSmiles(mol),
-                )
-
         score_params = EmpiricalParams(
             w_gauss1=self.get_param("w_gauss1"),
             w_repulsion=self.get_param("w_repulsion"),
@@ -514,12 +466,10 @@ class MoleculeDockBlock(MoleculeBlock):
         if result is None:
             # Full search. Phase 1: distance-geometry initialization — score sampled
             # poses (a DG conformer ensemble crossed with a Sobol rigid grid) to find
-            # good basins. When constraints are active, sampled starts don't respect
-            # them — keep n_starts=1 so only the aligned pose (row 0) is refined.
-            n_starts = 1 if constrained_atoms else self.get_param("n_starts")
+            # good basins.
             init_params = PoseParams(
                 translation_bounds=(-box_size, box_size),
-                n_starts=n_starts,
+                n_starts=self.get_param("n_starts"),
             )
             starts = optimize_dg_restarts(
                 mol,
@@ -544,8 +494,6 @@ class MoleculeDockBlock(MoleculeBlock):
                 optimize_torsions=not rigid_only,
                 n_starts=1,
                 basin_hops=self.get_param("basin_hops"),
-                constrained_atom_indices=constrained_atoms,
-                constraint_weight=self._constraint_weight,
             )
 
             # Selection objective: intermolecular score, plus strain when the strain

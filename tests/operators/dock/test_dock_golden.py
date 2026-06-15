@@ -100,7 +100,9 @@ def _assert_golden(out: Chem.Mol, golden_score: float, pose_file: str) -> None:
 # a different basin, so we skip rather than re-pin per version.
 _needs_313 = pytest.mark.skipif(
     sys.version_info < (3, 13),
-    reason="golden scores pinned on Python 3.13; trajectory diverges on earlier versions",
+    reason=(
+        "golden scores pinned on Python 3.13; trajectory diverges on earlier versions"
+    ),
 )
 
 

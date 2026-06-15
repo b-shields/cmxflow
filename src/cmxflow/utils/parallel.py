@@ -17,12 +17,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, TypeVar
 
+import threadpoolctl
+
 if TYPE_CHECKING:
     from cmxflow.block import Block
 
 from cmxflow.cmxmol import Mol
 
 logger = logging.getLogger(__name__)
+
+# Held for the worker's lifetime so the runtime thread limit is not undone by
+# garbage collection (the limiter restores prior counts when finalized).
+_worker_threadpool_limiter: Any = None
 
 T = TypeVar("T", bound="Block")
 
@@ -47,9 +53,17 @@ def _init_worker(factory: Callable[[], Any], error_handling: str) -> None:
         factory: Callable that creates a configured block instance.
         error_handling: How to handle errors ("raise", "skip", "log").
     """
-    global _worker_block, _worker_error_handling
+    global _worker_block, _worker_error_handling, _worker_threadpool_limiter
     _worker_block = factory()
     _worker_error_handling = error_handling
+    # Pin BLAS/OpenMP to one thread per worker. This block parallelizes at the
+    # process level (one item per worker), so nested numerical threads only
+    # oversubscribe cores -- e.g. 12 workers x 12 BLAS threads = 144 spin-waiting
+    # threads on 12 cores, which erased the parallel speedup (~7.6x slower).
+    # Env vars can't fix this (OpenBLAS latches its pool size at import, before
+    # this runs); threadpoolctl resizes the live pool, so it must run after the
+    # factory has imported the numerical stack.
+    _worker_threadpool_limiter = threadpoolctl.threadpool_limits(limits=1)
 
 
 def _worker_forward(item: Any) -> Any:
@@ -161,14 +175,14 @@ def _default_start_method() -> str | None:
     return "forkserver"
 
 
-_DEFAULT_WORKER_TIMEOUT: float = 30.0
+_DEFAULT_WORKER_TIMEOUT: float = 120.0
 
 
 def _default_worker_timeout() -> float:
     """Return the default worker timeout from env or built-in default.
 
     The ``CMXFLOW_WORKER_TIMEOUT`` environment variable overrides the
-    built-in default of 30 seconds. Set to ``0`` to disable the timeout.
+    built-in default of 120 seconds. Set to ``0`` to disable the timeout.
 
     Returns:
         Timeout in seconds, or 0.0 to disable.
@@ -200,7 +214,7 @@ class ParallelConfig:
         start_method: Multiprocessing start method. Defaults to "forkserver"
             on Unix, None (platform default) on Windows.
         worker_timeout: Seconds to wait for a single worker result before
-            treating it as an error. Defaults to 30s (overridable via
+            treating it as an error. Defaults to 120s (overridable via
             ``CMXFLOW_WORKER_TIMEOUT`` env var). Set to 0 to disable.
     """
 

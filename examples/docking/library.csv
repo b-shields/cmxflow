@@ -1,0 +1,14 @@
+SMILES,ID
+Cc1cc(Nc2ncc3cc(-c4c(Cl)cccc4Cl)c(=O)n(C)c3n2)ccc1F,crystal_3Me_4F
+CC(C)c1cc(Nc2ncc3cc(-c4c(Cl)cccc4Cl)c(=O)n(C)c3n2)ccc1F,aniline_iPr
+Fc1ccc(Nc2ncc3cc(-c4c(Cl)cccc4Cl)c(=O)n(C)c3n2)cc1,aniline_4F
+Clc1ccc(Nc2ncc3cc(-c4c(Cl)cccc4Cl)c(=O)n(C)c3n2)cc1,aniline_4Cl
+COc1ccc(Nc2ncc3cc(-c4c(Cl)cccc4Cl)c(=O)n(C)c3n2)cc1,aniline_4OMe
+FC(F)(F)c1cccc(Nc2ncc3cc(-c4c(Cl)cccc4Cl)c(=O)n(C)c3n2)c1,aniline_3CF3
+Cc1ccc(Nc2ncc3cc(-c4c(Cl)cccc4Cl)c(=O)n(C)c3n2)cc1,aniline_4Me
+Cc1cc(Nc2ncc3cc(-c4c(Cl)cccc4Cl)c(=O)n(CC)c3n2)ccc1F,lactam_NEt
+Cc1cc(Nc2ncc3cc(-c4c(Cl)cccc4Cl)c(=O)[nH]c3n2)ccc1F,lactam_NH
+Cc1cc(Nc2ncc3cc(-c4ccccc4Cl)c(=O)n(C)c3n2)ccc1F,aryl_2Cl
+Cc1cc(Nc2ncc3cc(-c4ccccc4)c(=O)n(C)c3n2)ccc1F,aryl_phenyl
+Cc1cc(Nc2ncc3cc(-c4c(F)cccc4F)c(=O)n(C)c3n2)ccc1F,aryl_26diF
+Fc1ccc(Nc2ncc3cc(-c4c(Cl)cccc4Cl)c(=O)n(C)c3n2)cc1F,aniline_34diF

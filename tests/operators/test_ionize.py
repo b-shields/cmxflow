@@ -225,6 +225,72 @@ class TestIonizeMoleculeBlockIntegration:
         assert len(results) == 2
 
 
+class TestConformerPreservation:
+    """Tests that a 3D input conformer survives ionization."""
+
+    @staticmethod
+    def _embed_3d(smiles: str) -> Chem.Mol:
+        """Build a molecule with a single 3D conformer."""
+        from rdkit.Chem import AllChem
+
+        mol = Chem.AddHs(Chem.MolFromSmiles(smiles))
+        AllChem.EmbedMolecule(mol, randomSeed=1)
+        return mol
+
+    @patch.dict("sys.modules", {"dimorphite_dl": MagicMock()})
+    def test_3d_input_keeps_conformer(self) -> None:
+        """A 3D input yields 3D variants (SMILES input would yield none)."""
+        import sys
+
+        # Echo the (map-labelled) input SMILES back, as dimorphite_dl would.
+        sys.modules["dimorphite_dl"].protonate_smiles.side_effect = (
+            lambda smiles, **_: [smiles]
+        )
+
+        block = IonizeMoleculeBlock()
+        results = list(block.forward(self._embed_3d("NCCC(=O)O")))
+
+        assert len(results) == 1
+        assert results[0].GetNumConformers() == 1
+        assert results[0].GetConformer().Is3D()
+
+    @patch.dict("sys.modules", {"dimorphite_dl": MagicMock()})
+    def test_3d_input_retains_input_coordinates(self) -> None:
+        """Heavy-atom coordinates are unchanged by the protonation transfer."""
+        import sys
+
+        import numpy as np
+
+        sys.modules["dimorphite_dl"].protonate_smiles.side_effect = (
+            lambda smiles, **_: [smiles]
+        )
+
+        mol = self._embed_3d("NCCC(=O)O")
+        before = Chem.RemoveHs(mol).GetConformer().GetPositions()
+
+        block = IonizeMoleculeBlock()
+        result = next(iter(block.forward(mol)))
+        after = Chem.RemoveHs(result).GetConformer().GetPositions()
+
+        assert np.allclose(before, after, atol=1e-9)
+
+    @patch.dict("sys.modules", {"dimorphite_dl": MagicMock()})
+    def test_2d_input_has_no_conformer(self) -> None:
+        """A molecule without a 3D conformer keeps the plain SMILES path."""
+        import sys
+
+        sys.modules["dimorphite_dl"].protonate_smiles.return_value = [
+            "NCCC(=O)O",
+            "[NH3+]CCC(=O)[O-]",
+        ]
+
+        block = IonizeMoleculeBlock()
+        results = list(block.forward(Chem.MolFromSmiles("NCCC(=O)O")))
+
+        assert len(results) == 2
+        assert all(r.GetNumConformers() == 0 for r in results)
+
+
 class TestErrorHandling:
     """Tests for error handling."""
 

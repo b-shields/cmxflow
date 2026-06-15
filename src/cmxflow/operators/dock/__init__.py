@@ -4,9 +4,10 @@ This module provides scoring functions and pose optimization for
 protein-ligand docking.
 
 Scoring Functions:
-    vinardo_score: Vinardo empirical scoring function
-    vinardo_score_cached: Vinardo scoring function (cached protein data)
-    VinardoParams: Parameters for Vinardo scoring
+    empirical_score: Empirical (default Vinardo) scoring functions
+    empirical_score_cached: Empirical scoring function (cached protein data)
+    empirical_score_and_grad_cached: Empirical score + analytical gradient
+    EmpiricalParams: Parameters for empirical scoring
     get_scoring_function: Factory for scoring functions
     get_atom_typing: Get atom classification for a molecule
     AtomTyping: Atom classification data
@@ -19,17 +20,14 @@ Electrostatic Complementarity:
     generate_sas_points: Solvent-accessible surface points
 
 Pose Optimization:
-    optimize_pose: General pose optimization
-    optimize_pose_rigid: Rigid-body only optimization
-    optimize_pose_flexible: Rigid + torsion optimization
-    optimize_pose_cached: General pose optimization (cached input)
+    optimize_pose_cached: Pose optimization against cached protein data
     PoseParams: Optimization parameters
     OptimizationResult: Optimization results
 
 Example:
     >>> from rdkit import Chem
     >>> from rdkit.Chem import AllChem
-    >>> from cmxflow.operators.dock import vinardo_score, optimize_pose_rigid
+    >>> from cmxflow.operators.dock import empirical_score
     >>>
     >>> # Create ligand with 3D coords
     >>> ligand = Chem.MolFromSmiles("CCO")
@@ -42,11 +40,7 @@ Example:
     >>> AllChem.EmbedMolecule(protein)
     >>>
     >>> # Score the pose
-    >>> score = vinardo_score(ligand, protein)
-    >>>
-    >>> # Optimize pose
-    >>> result = optimize_pose_rigid(ligand, protein)
-    >>> print(f"Score improved: {result.initial_score} -> {result.score}")
+    >>> score = empirical_score(ligand, protein)
 """
 
 from cmxflow.operators.dock.dock import MoleculeDockBlock
@@ -62,30 +56,33 @@ from cmxflow.operators.dock.pose import (
     PoseParams,
     apply_rigid_transform,
     get_rotatable_bonds,
-    optimize_pose,
     optimize_pose_cached,
-    optimize_pose_flexible,
-    optimize_pose_rigid,
+)
+from cmxflow.operators.dock.scaffold_index import (
+    ScaffoldPoseStore,
+    scaffold_key,
+    scaffold_pose,
 )
 from cmxflow.operators.dock.score import (
     AtomTyping,
-    VinardoParams,
-    ec_score_cached,
+    EmpiricalParams,
+    empirical_score,
+    empirical_score_and_grad_cached,
+    empirical_score_cached,
     get_atom_typing,
     get_scoring_function,
-    vinardo_score,
-    vinardo_score_cached,
 )
+from cmxflow.operators.dock.template import template_dock, transfer_template_pose
 
 __all__ = [
     # Score
     "AtomTyping",
-    "VinardoParams",
-    "ec_score_cached",
+    "EmpiricalParams",
+    "empirical_score",
+    "empirical_score_cached",
+    "empirical_score_and_grad_cached",
     "get_atom_typing",
     "get_scoring_function",
-    "vinardo_score",
-    "vinardo_score_cached",
     # Electrostatic Complementarity
     "electrostatic_complementarity",
     "compute_esp_at_points",
@@ -97,10 +94,13 @@ __all__ = [
     "PoseParams",
     "apply_rigid_transform",
     "get_rotatable_bonds",
-    "optimize_pose",
-    "optimize_pose_flexible",
-    "optimize_pose_rigid",
     "optimize_pose_cached",
     # Dock
     "MoleculeDockBlock",
+    # Template / scaffold-indexed docking
+    "template_dock",
+    "transfer_template_pose",
+    "scaffold_key",
+    "scaffold_pose",
+    "ScaffoldPoseStore",
 ]

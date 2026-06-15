@@ -10,7 +10,13 @@ Add the cmxflow MCP server to Claude Code:
 claude mcp add cmxflow -- cmxflow-mcp
 ```
 
-This gives Claude access to five tools:
+This gives Claude access to five tools.
+
+**Note:** Claude Code defers MCP tool schemas until needed, so Claude may write RDKit code directly instead of using cmxflow. To prevent this, add a `CLAUDE.md` file to your working directory with the following line:
+
+```
+Always use the cmxflow MCP tools for cheminformatics tasks. Do not write RDKit or other cheminformatics code directly.
+```
 
 | Tool | Description |
 |------|-------------|
@@ -22,118 +28,60 @@ This gives Claude access to five tools:
 
 ## Example Prompts
 
+All examples below were carried out on a MacBook Air M2 with 8GB RAM using `Sonnet 4.6` in Claude Code.
+
 ### Similarity Search
 
-> Read molecules from screen.sdf.gz, compute 2D similarity to queries.sdf using ECFP4 fingerprints, and write the top 100 to similar.csv.
+> Read molecules from screen.sdf.gz, compute 2D similarity to queries.sdf using ECFP4 fingerprints, and write the top 100 to similar.csv
 
 ```
-⏺ Let me check available workflows and blocks first.
+⏺ I'll use the cmxflow MCP tools as instructed. Let me first explore what's available.
 
-⏺ cmxflow - manage_workflows (MCP)(action: "list")
-  ⎿  {
-       "status": "success",
-       "message": "Registered workflows:",
-     … +6 lines (ctrl+o to expand)
+⏺ Let me check for existing workflows and available blocks in parallel.
 
-⏺ cmxflow - build_workflow (MCP)(action: "list_blocks")
-  ⎿  {
-       "status": "success",
-       "blocks": {
-     … +37 lines (ctrl+o to expand)
+  Called cmxflow 2 times (ctrl+o to expand)
 
-⏺ Now let me build the workflow:
+⏺ No existing workflows. I'll build a 4-step pipeline: source → similarity → top 100 → sink. Let me check the similarity block parameters first.
 
-⏺ cmxflow - build_workflow (MCP)(action: "create")
-  ⎿  {
-       "status": "success",
-       "message": "Created new workflow with MoleculeSourceBlock",
-     … +3 lines (ctrl+o to expand)
+  Called cmxflow 3 times (ctrl+o to expand)
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "MoleculeSimilarityBlock", block_config: {"fingerprint":"ECFP4"})
-  ⎿  {
-       "status": "success",
-       "message": "Added Molecule2DSimilarity",
-     … +8 lines (ctrl+o to expand)
+⏺ The block already defaults to Morgan radius=2 (= ECFP4) with Tanimoto. I still need to set the queries input file. Let me add the remaining blocks first.
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "PropertyHeadBlock", block_config:
-                                {"property":"max_similarity","count":100})
-  ⎿  {
-       "status": "success",
-       "message": "Added PropertyHead",
-     … +11 lines (ctrl+o to expand)
+  Called cmxflow 4 times (ctrl+o to expand)
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "MoleculeSinkBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added MoleculeSink",
-     … +12 lines (ctrl+o to expand)
+⏺ Workflow is valid. Now I'll set the required inputs (queries file, and confirm the property/count that are already configured).
 
-⏺ cmxflow - build_workflow (MCP)(action: "validate")
-  ⎿  {
-       "status": "success",
-       "message": "Workflow is valid",
-     … +12 lines (ctrl+o to expand)
+  Called cmxflow 2 times (ctrl+o to expand)
 
-⏺ Workflow is valid. Let me set the query file input, then execute.
-
-  ---
-  🔍 Top-100 ECFP4 Similarity Screener 🧪
+⏺ ---
+  🧪 ECFP4 Similarity Screen 🔬
 
   ┌────────────────┐
   │ MoleculeSource │  ← screen.sdf.gz
-  └────────────────┘
-           ↓
-  ┌──────────────────────┐   ┌─────────────────┐
-  │  Molecule2DSimilarity│ ← │ queries: [FILE] │  ← queries.sdf
-  │  ECFP4 / Tanimoto    │   └─────────────────┘
-  └──────────────────────┘
-           ↓
-  ┌──────────────────────┐
-  │  PropertyHead        │  top 100 by max_similarity
-  └──────────────────────┘
-           ↓
+  └───────┬────────┘
+          ↓
+  ┌─────────────────────────────┐   ┌──────────────────────┐
+  │    Molecule2DSimilarity     │ ← │ queries: queries.sdf │
+  │ fingerprint_type: morgan    │   └──────────────────────┘
+  │ similarity_metric: tanimoto │
+  │ radius: 2 | nbits: 2048     │
+  └───────┬─────────────────────┘
+          ↓
+  ┌──────────────┐
+  │ PropertyHead │  top 100 by max_similarity
+  └───────┬──────┘
+          ↓
   ┌────────────────┐
   │  MoleculeSink  │  → similar.csv
   └────────────────┘
 
-  "The more that you read, the more things you will know." — Not a chemist, but relevant to screening libraries.
+  ▎ "The chemist who knows where to look is more powerful than the one who knows everything." — inspired by Linus Pauling
 
-  (A real one: "No one has yet produced a single example of the conversion of one species into another." — J.B.S. Haldane, though he'd approve of finding similar molecules.)*
+  Called cmxflow (ctrl+o to expand)
 
-⏺ cmxflow - run_workflow (MCP)(action: "set_inputs", inputs: {"1.file@queries":"queries.sdf"})
-  ⎿  {
-       "status": "success",
-       "message": "Inputs set successfully"
-     }
+⏺ Done. The workflow read all molecules from screen.sdf.gz, computed ECFP4 (Morgan radius=2, 2048 bits) Tanimoto similarity against every query in queries.sdf, kept the maximum per screened molecule, and wrote the top 100 by max_similarity to similar.csv.
 
-⏺ cmxflow - run_workflow (MCP)(action: "execute", input_file: "screen.sdf.gz", output_file: "similar.csv")
-  ⎿  {
-       "status": "error",
-       "message": "Execution failed: 'int' object has no attribute 'strip'"
-     }
-
-⏺ The count may need to be set as a text input. Let me fix that.
-
-⏺ cmxflow - run_workflow (MCP)(action: "set_inputs", inputs: {"2.text@property":"max_similarity","2.text@count":"100"})
-  ⎿  {
-       "status": "success",
-       "message": "Inputs set successfully"
-     }
-
-⏺ cmxflow - run_workflow (MCP)(action: "execute", input_file: "screen.sdf.gz", output_file: "similar.csv")
-  ⎿  {
-       "status": "success",
-       "message": "Workflow executed successfully",
-     … +2 lines (ctrl+o to expand)
-
-⏺ Done. The workflow:
-
-  1. Read molecules from screen.sdf.gz
-  2. Computed ECFP4 (Morgan, r=2, 2048 bits) Tanimoto similarity against all queries in queries.sdf, annotating each molecule with max_similarity
-  3. Selected the top 100 by max_similarity
-  4. Wrote results to similar.csv
-
-  Would you like to save this workflow for future use?
+✻ Cooked for 1m 16s
 ```
 
 ### Virtual Screening with Optimization
@@ -141,313 +89,175 @@ This gives Claude access to five tools:
 > I need to build a ligand-based virtual screening workflow. I'm not sure if 2D or 3D is better. Can you optimize two workflows? I want to see the results of 2D first. The benchmark is in "benchmark.parquet" with hits labeled in the "active" column and the query is in "reference.sdf".
 
 ```
-⏺ Let me start by checking available blocks and existing workflows.
+⏺ I'll use the cmxflow MCP tools to build and optimize both workflows. Let me start by exploring what's available and then set up both in parallel.
 
-⏺ cmxflow - build_workflow (MCP)(action: "list_blocks")
-  ⎿  {
-       "status": "success",
-       "blocks": {
-     … +37 lines (ctrl+o to expand)
+⏺ Let me check for existing workflows and available blocks simultaneously.
 
-⏺ cmxflow - manage_workflows (MCP)(action: "list")
-  ⎿  {
-       "status": "success",
-       "message": "Registered workflows:",
-     … +6 lines (ctrl+o to expand)
+  Called cmxflow 2 times (ctrl+o to expand)
 
-⏺ There's an existing prep workflow but not what we need. Let me build the 2D similarity workflow first, then we'll do 3D after.
+⏺ No existing workflows. I'll build both the 2D and 3D screening workflows, save them, then optimize 2D first. Let me start building the 2D workflow.
 
-  For virtual screening benchmarking, we'll use EnrichmentScoreBlock which should be maximized. Does that sound right to you before I proceed?
+  Called cmxflow 4 times (ctrl+o to expand)
 
-  Let me build the 2D workflow now.
+⏺ Good. Now let me validate the 2D workflow and check what inputs need to be set.
 
-⏺ cmxflow - build_workflow (MCP)(action: "create")
-  ⎿  {
-       "status": "success",
-       "message": "Created new workflow with MoleculeSourceBlock",
-     … +3 lines (ctrl+o to expand)
+  Called cmxflow 2 times (ctrl+o to expand)
+  building the 2D workflow.
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "MoleculeStandardizeBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added MoleculeStandardize",
-     … +4 lines (ctrl+o to expand)
+  Called cmxflow 4 times (ctrl+o to expand)
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "MoleculeSimilarityBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added Molecule2DSimilarity",
-     … +10 lines (ctrl+o to expand)
+⏺ Good. Now let me validate the 2D workflow and check what inputs need to be set.
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "EnrichmentScoreBlock", block_config:
-                                {"property":"max_similarity","label_column":"active"})
-  ⎿  {
-       "status": "success",
-       "message": "Added EnrichmentScoreBlock",
-     … +13 lines (ctrl+o to expand)
+  Called cmxflow 2 times (ctrl+o to expand)
 
-⏺ cmxflow - build_workflow (MCP)(action: "validate")
-  ⎿  {
-       "status": "success",
-       "message": "Workflow is valid",
-     … +15 lines (ctrl+o to expand)
+⏺ Now save the 2D workflow before building the 3D one.
 
-⏺ Now let me check the required inputs and set them, then get the optimizable parameters.
+  Called cmxflow (ctrl+o to expand)
 
-⏺ cmxflow - run_workflow (MCP)(action: "set_inputs", inputs: {"2.file@queries":"reference.sdf","3.text@target":"active"})
-  ⎿  {
-       "status": "success",
-       "message": "Inputs set successfully"
-     }
+⏺ Now building the 3D workflow.
 
-⏺ cmxflow - build_workflow (MCP)(action: "get_params")
-  ⎿  {
-       "status": "success",
-       "params": [
-     … +30 lines (ctrl+o to expand)
+  Called cmxflow 10 times (ctrl+o to expand)
 
-⏺ The workflow is validated and ready. Let me confirm the optimization setup with you:
-
-  The optimizer will tune these 2D similarity parameters:
-  - fingerprint_type: morgan, rdkit, maccs, atom_pair, topological_torsion
-  - similarity_metric: tanimoto, dice, cosine, sokal, russel
-  - radius: 1–4
-  - nbits: 512–4096
-
-  The enrichment score will be maximized. 30 trials is typical — does that work for you, or would you prefer more/fewer?
+⏺ Both workflows are saved. Before I start optimization, I need to confirm a couple of things with you:
 
 ⏺ User answered Claude's questions:
-  ⎿  · How many optimization trials for the 2D workflow? → 30 trials (Recommended)
+  ⎿  · How many optimization trials should be run for each workflow? (30 is typical — more trials find better parameters but take longer) → 30 trials (Recommended)
+     · Should any steps in the 2D or 3D workflows run in parallel to speed up optimization? → Yes — parallelize ConformerGeneration (3D only, Recommended)
 
-⏺ Great, 30 trials it is. Let me kick off the 2D optimization.
+⏺ 30 trials, ConformerGeneration parallelized for 3D. Loading the 2D workflow to optimize first.
 
-  ---
-  🔬 2D Fingerprint Virtual Screening Optimization 🔬
+  Called cmxflow (ctrl+o to expand)
 
-  MoleculeSource → MoleculeStandardize → Molecule2DSimilarity → EnrichmentScoreBlock
+⏺ ---
+  🧪 2D Fingerprint Screening Optimizer 🔬
 
-  "The good thing about science is that it's true whether or not you believe in it." — Carl Sagan (close enough to chemistry!)
+  ┌────────────────┐
+  │ MoleculeSource │  benchmark.parquet
+  └───────┬────────┘
+          ↓
+  ┌─────────────────────┐
+  │ MoleculeStandardize │
+  └──────────┬──────────┘
+             ↓
+  ┌─────────────────────────────┐
+  │    Molecule2DSimilarity     │ ← reference.sdf
+  │ fingerprint: morgan r=2     │
+  │ metric: tanimoto            │
+  └──────────────┬──────────────┘
+                 ↓
+         ┌──────────────────────┐
+         │  EnrichmentScore     │ ← active column
+         └──────────────────────┘
 
-  ---
+  ▎ "The properties of a substance are determined by its constitution." — August Kekulé
 
-⏺ cmxflow - optimize_workflow (MCP)(action: "start", n_trials: 30, input_file: "benchmark.parquet", inputs:
-                                   {"2.file@queries":"reference.sdf","3.text@target":"active"}, direction: "maximize")
-  ⎿  {
-       "status": "started",
-       "message": "Optimization started with 30 trials",
-     … +3 lines (ctrl+o to expand)
+  Starting 2D optimization now (30 trials, maximizing enrichment AUC):
 
-⏺ The 2D optimization is running (30 trials, maximizing enrichment AUC). I'll check the status when you're ready — just let me know when you'd like to see results, or I can check progress at any point.
+  Called cmxflow 2 times (ctrl+o to expand)
 
-  While we wait, shall I go ahead and build the 3D workflow so it's ready to optimize next?
+⏺ The 2D optimization is running — 30 trials exploring fingerprint type, radius, bit count, and similarity metric combinations to maximize enrichment AUC against your active labels.
 
-✻ Sautéed for 53s
+  Don't poll — let me know when you'd like a status update or the results. Once 2D is done I'll load and parallelize the 3D workflow, then kick off its optimization. Let me know when you're ready to check progress.
 
-❯ It should have been quick. How did the optimization turn out?
+✻ Brewed for 1m 58s
 
-⏺ cmxflow - optimize_workflow (MCP)(action: "status")
-  ⎿  {
-       "status": "completed",
-       "message": "Optimization completed successfully",
-     … +8 lines (ctrl+o to expand)
+❯ check the status                         
 
-⏺ The 2D optimization is done. Here are the results:
+  Called cmxflow (ctrl+o to expand)
 
-  Best Enrichment AUC: 0.65
+⏺ The 2D optimization is done. Best result:
 
   ┌───────────────────┬─────────────────────┐
-  │     Parameter     │     Best Value      │
+  │     Parameter     │        Value        │
   ├───────────────────┼─────────────────────┤
-  │ fingerprint_type  │ topological_torsion │
+  │ Fingerprint       │ Morgan              │
   ├───────────────────┼─────────────────────┤
-  │ similarity_metric │ cosine              │
+  │ Similarity metric │ Dice (not Tanimoto) │
   ├───────────────────┼─────────────────────┤
-  │ radius            │ 1                   │
+  │ Radius            │ 3                   │
   ├───────────────────┼─────────────────────┤
-  │ nbits             │ 738                 │
+  │ Bits              │ 2582                │
+  ├───────────────────┼─────────────────────┤
+  │ Enrichment AUC    │ 0.75                │
   └───────────────────┴─────────────────────┘
 
-  Interesting — topological torsion fingerprints with cosine similarity came out on top over the more common Morgan/Tanimoto combo. A score of 0.65 is decent but leaves room for improvement.
+  The optimizer swapped Tanimoto for Dice and bumped the radius from 2→3, which picked up more extended neighborhood context.
+  Ready to apply these parameters and kick off the 3D workflow optimization — shall I proceed?
 
-  Want me to set the best parameters and save this workflow, then build and optimize the 3D workflow to see if we can do better?
+✻ Churned for 6s
 
-❯ yes, save it and build the 3D workflow
+❯ yes, go ahead with the 3D workflow                    
 
-⏺ cmxflow - optimize_workflow (MCP)(action: "set_best_params")
-  ⎿  {
-       "status": "success",
-       "message": "Best parameters applied to workflow",
-     … +7 lines (ctrl+o to expand)
+⏺ Applying the best 2D parameters and saving, then loading the 3D workflow.
 
-⏺ User answered Claude's questions:
-  ⎿  · What name would you like for the saved 2D workflow? → 2d-virtual-screen
+  Called cmxflow 3 times (ctrl+o to expand)
 
-⏺ cmxflow - manage_workflows (MCP)(action: "save", name: "2d-virtual-screen")
-  ⎿  {
-       "status": "success",
-       "message": "Workflow registered as '2d-virtual-screen'. List registered workflows with the 'list' action."
-     }
+⏺ Now parallelizing ConformerGeneration (index 3) with max_workers=4.
 
-⏺ Saved. Now let me build the 3D workflow.
+  Called cmxflow (ctrl+o to expand)
 
-⏺ cmxflow - build_workflow (MCP)(action: "create")
-  ⎿  {
-       "status": "success",
-       "message": "Created new workflow with MoleculeSourceBlock",
-     … +3 lines (ctrl+o to expand)
+⏺ ---
+  🧬 3D Shape Screening Optimizer ⚗️ 
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "MoleculeStandardizeBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added MoleculeStandardize",
-     … +4 lines (ctrl+o to expand)
+  ┌────────────────┐
+  │ MoleculeSource │  benchmark.parquet
+  └───────┬────────┘
+          ↓
+  ┌─────────────────────┐
+  │ MoleculeStandardize │
+  └──────────┬──────────┘
+             ↓
+  ┌──────────────────────────┐
+  │ EnumerateStereochemistry │
+  └─────────────┬────────────┘
+                ↓
+  ┌─────────────────────────────┐
+  │ ParallelConformerGeneration │  4 workers
+  └──────────────┬──────────────┘
+                 ↓
+  ┌───────────────────────────────┐
+  │         MoleculeAlign         │ ← reference.sdf
+  │  method: crippen_o3a          │
+  └──────────────┬────────────────┘
+                 ↓
+  ┌─────────────────────────┐
+  │  Molecule3DSimilarity   │ ← reference.sdf
+  │  method: shape_tanimoto │
+  └────────────┬────────────┘
+               ↓
+       ┌──────────────────────┐
+       │   EnrichmentScore    │ ← active column
+       └──────────────────────┘
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "EnumerateStereoBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added EnumerateStereochemistry",
-     … +5 lines (ctrl+o to expand)
+  ▎ "Structural formula is the key to the molecular architecture." — Emil Fischer
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "ConformerGenerationBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added ConformerGeneration",
-     … +7 lines (ctrl+o to expand)
+  Called cmxflow 3 times (ctrl+o to expand)
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "MoleculeAlignBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added MoleculeAlign",
-     … +12 lines (ctrl+o to expand)
+⏺ 3D optimization is running — 30 trials exploring conformer settings, alignment method, and 3D similarity metric (shape Tanimoto, Tversky variants, etc.) with ConformerGeneration on 4 workers. Let me know when you want to check the results.
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "Molecule3DSimilarityBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added Molecule3DSimilarity",
-     … +14 lines (ctrl+o to expand)
+✻ Baked for 34s
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "EnrichmentScoreBlock", block_config:
-                                {"property":"similarity_3d","label_column":"active"})
-  ⎿  {
-       "status": "success",
-       "message": "Added EnrichmentScoreBlock",
-     … +17 lines (ctrl+o to expand)
+※ recap: Building 2D and 3D ligand-based virtual screening workflows using your benchmark.parquet and reference.sdf. The 2D optimization finished with AUC 0.75; the 3D optimization is still running. Check status when ready. (disable recaps in /config)
+  
+❯ check the status                                                    
 
-⏺ Now let me make the conformer generation step parallel (it's the slow step), validate, and set inputs.
+  Called cmxflow (ctrl+o to expand)
 
-⏺ cmxflow - build_workflow (MCP)(action: "make_parallel", index: 3, block_config: {"max_workers":4})
-  ⎿  {
-       "status": "success",
-       "message": "Parallelized ParallelConformerGeneration at index 3",
-     … +17 lines (ctrl+o to expand)
+⏺ 3D optimization is done. Here's the full comparison:
 
-⏺ cmxflow - build_workflow (MCP)(action: "validate")
-  ⎿  {
-       "status": "success",
-       "message": "Workflow is valid",
-     … +18 lines (ctrl+o to expand)
+  ┌────────────────┬────────────────────────────┬────────────────────────────────────────────────┐
+  │                │      2D (Morgan/Dice)      │                   3D (Shape)                   │
+  ├────────────────┼────────────────────────────┼────────────────────────────────────────────────┤
+  │ Enrichment AUC │ 0.75                       │ 0.65                                           │
+  ├────────────────┼────────────────────────────┼────────────────────────────────────────────────┤
+  │ Key params     │ radius=3, nbits=2582, Dice │ numConfs=9, MMFF-O3A alignment, shape_tanimoto │
+  └────────────────┴────────────────────────────┴────────────────────────────────────────────────┘
 
-⏺ cmxflow - run_workflow (MCP)(action: "set_inputs", inputs:
-                              {"4.file@query":"reference.sdf","5.file@query":"reference.sdf","6.text@target":"active"})
-  ⎿  {
-       "status": "success",
-       "message": "Inputs set successfully"
-     }
+  2D wins by 0.10 AUC on this benchmark. The 3D workflow found better conformer settings (9 conformers, MMFF-O3A alignment over Crippen), but the extra structural information didn't translate to better enrichment here — which is common when the active series shares a clear 2D pharmacophore.
 
-⏺ Workflow is validated and inputs are set. Ready to optimize. The 3D workflow will be slower due to conformer generation, so 30 trials will take longer. Shall I start with 30 trials again?
+  Would you like me to apply the best 3D parameters and save both workflows, or explore a combined 2D+3D scoring approach?
 
-  ---
-  🧬 3D Shape-Based Virtual Screening Optimization 🧬
-
-  MoleculeSource → MoleculeStandardize → EnumerateStereochemistry → ParallelConformerGeneration → MoleculeAlign → Molecule3DSimilarity →
-  EnrichmentScoreBlock
-
-  "The structure of a molecule is the key to understanding its properties." — Linus Pauling
-
-  ---
-
-⏺ cmxflow - optimize_workflow (MCP)(action: "start", n_trials: 30, input_file: "benchmark.parquet", inputs:
-                                   {"4.file@query":"reference.sdf","5.file@query":"reference.sdf","6.text@target":"active"}, direction:
-                                   "maximize")
-  ⎿  {
-       "status": "started",
-       "message": "Optimization started with 30 trials",
-     … +3 lines (ctrl+o to expand)
-
-⏺ The 3D optimization is running. This one will take longer due to conformer generation and 3D alignment at each trial. I'll check results when you ask — just let me know!
-
-✻ Cooked for 57s
-
-❯ check the 3D optimization status
-
-⏺ cmxflow - optimize_workflow (MCP)(action: "status")
-  ⎿  {
-       "status": "running",
-       "message": "Optimization in progress",
-     … +12 lines (ctrl+o to expand)
-
-⏺ Still running — 17/30 trials completed so far.
-
-  Best score so far: 0.65 (same as the 2D result)
-
-  Current best parameters:
-
-  ┌──────────────────┬───────────────┐
-  │    Parameter     │     Value     │
-  ├──────────────────┼───────────────┤
-  │ numConfs         │ 62            │
-  ├──────────────────┼───────────────┤
-  │ pruneRmsThresh   │ 0.017         │
-  ├──────────────────┼───────────────┤
-  │ useRandomCoords  │ false         │
-  ├──────────────────┼───────────────┤
-  │ alignment_method │ crippen_o3a   │
-  ├──────────────────┼───────────────┤
-  │ method           │ shape_tversky │
-  ├──────────────────┼───────────────┤
-  │ tversky_alpha    │ 0.558         │
-  ├──────────────────┼───────────────┤
-  │ tversky_beta     │ 0.229         │
-  └──────────────────┴───────────────┘
-
-  Interesting that it's gravitating toward Tversky similarity (asymmetric) rather than standard shape Tanimoto. 13 trials left — it may still improve. Let me know when you'd like to check again.
-
-❯ check again
-  ⎿  ⧉ Selected 1 lines from ../cmxflow/docs/using-with-claude.md in Visual Studio Code
-
-⏺ cmxflow - optimize_workflow (MCP)(action: "status")
-  ⎿  {
-       "status": "completed",
-       "message": "Optimization completed successfully",
-     … +11 lines (ctrl+o to expand)
-
-⏺ The 3D optimization is done.
-
-  Best Enrichment AUC: 0.65 — same as 2D.
-
-  ┌──────────────────┬───────────────┐
-  │    Parameter     │  Best Value   │
-  ├──────────────────┼───────────────┤
-  │ numConfs         │ 62            │
-  ├──────────────────┼───────────────┤
-  │ pruneRmsThresh   │ 0.017         │
-  ├──────────────────┼───────────────┤
-  │ useRandomCoords  │ false         │
-  ├──────────────────┼───────────────┤
-  │ alignment_method │ crippen_o3a   │
-  ├──────────────────┼───────────────┤
-  │ method           │ shape_tversky │
-  ├──────────────────┼───────────────┤
-  │ tversky_alpha    │ 0.558         │
-  ├──────────────────┼───────────────┤
-  │ tversky_beta     │ 0.229         │
-  └──────────────────┴───────────────┘
-
-  Summary: Both 2D and 3D workflows achieved the same enrichment (0.65). The 2D workflow (topological torsion + cosine) is significantly faster since it skips conformer generation and alignment. For this target, the 2D approach gives you the same performance at a fraction of the computational cost.
-
-  Would you like me to:
-  1. Save the 3D workflow as well?
-  2. Set the best params and run either workflow on the full dataset?
+✻ Cogitated for 9s
 ```
 
 ### Filtering / Library Preparation
@@ -455,341 +265,235 @@ This gives Claude access to five tools:
 > How many of the molecules in library.csv pass Lipinski's rules?
 
 ```
-⏺ Searched for 1 pattern, read 1 file (ctrl+o to expand)
+⏺ Let me check the library.csv file and the available cmxflow tools.
 
-⏺ The file has 1000 molecules (plus header). Let me build a workflow to filter by Lipinski's rules.
+  Read 1 file (ctrl+o to expand)
 
-⏺ cmxflow - build_workflow (MCP)(action: "list_blocks")
-  ⎿  {
-       "status": "success",
-       "blocks": {
-     … +37 lines (ctrl+o to expand)
+⏺ The library has 1000 molecules. Let me check for existing workflows and available blocks for Lipinski filtering.
 
-⏺ I'll build a workflow to compute Lipinski descriptors and filter on them.
+  Called cmxflow 2 times (ctrl+o to expand)
 
-⏺ cmxflow - build_workflow (MCP)(action: "create")
-  ⎿  {
-       "status": "success",
-       "message": "Created new workflow with MoleculeSourceBlock",
-     … +3 lines (ctrl+o to expand)
+⏺ I'll build a workflow to compute Lipinski properties and filter the library. Let me set it up step by step.
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "RDKitBlock", rdkit_method: "rdkit.Chem.Descriptors.MolWt")
-  ⎿  {
-       "status": "success",
-       "message": "Added RDKit:MolWt",
-     … +3 lines (ctrl+o to expand)
+  Called cmxflow 9 times (ctrl+o to expand)
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "RDKitBlock", rdkit_method: "rdkit.Chem.Crippen.MolLogP")
-  ⎿  {
-       "status": "success",
-       "message": "Added RDKit:MolLogP",
-     … +4 lines (ctrl+o to expand)
+⏺ Workflow is valid. Time to run it!
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "RDKitBlock", rdkit_method: "rdkit.Chem.Descriptors.NumHDonors")
-  ⎿  {
-       "status": "success",
-       "message": "Added RDKit:NumHDonors",
-     … +5 lines (ctrl+o to expand)
+⏺ I'll build a workflow to compute Lipinski properties and filter the library. Let me set it up step by step.
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "RDKitBlock", rdkit_method: "rdkit.Chem.Descriptors.NumHAcceptors")
-  ⎿  {
-       "status": "success",
-       "message": "Added RDKit:NumHAcceptors",
-     … +7 lines (ctrl+o to expand)
+  Called cmxflow 9 times (ctrl+o to expand)
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "PropertyFilterBlock", block_config: {"filters":"MolWt<=500, MolLogP<=5,
-                                NumHDonors<=5, NumHAcceptors<=10"})
-  ⎿  {
-       "status": "success",
-       "message": "Added PropertyFilter",
-     … +17 lines (ctrl+o to expand)
+⏺ Workflow is valid. Time to run it!
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "MoleculeSinkBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added MoleculeSink",
-     … +20 lines (ctrl+o to expand)
+  ---
+  💊 Lipinski Rule-of-Five Filter 🧪
 
-⏺ cmxflow - build_workflow (MCP)(action: "validate")
-  ⎿  {
-       "status": "success",
-       "message": "Workflow is valid",
-     … +21 lines (ctrl+o to expand)
+  MoleculeSource → MoleculeStandardize → RDKit:MolWt → RDKit:MolLogP
+    → RDKit:CalcNumHBD → RDKit:CalcNumHBA → PropertyFilter → MoleculeSink
 
-⏺ Now let me execute the workflow:
+  ▎ "A drug is a substance that when injected into a guinea pig, produces a scientific paper."
+  ▎ — attributed to various pharmacologists
 
-  💊 Lipinski Rule-of-Five Filter
+  ---
 
-  MoleculeSource → MolWt → MolLogP → NumHDonors → NumHAcceptors → PropertyFilter → MoleculeSink
+  Read 1 file, called cmxflow (ctrl+o to expand)
 
-  "The most fruitful basis for the discovery of a new drug is to start with an old drug." — Sir James Black
+⏺ 615 out of 1000 molecules pass Lipinski's Rule of Five (MW ≤ 500, LogP ≤ 5, HBD ≤ 5, HBA ≤ 10), meaning 385 fail at least one rule. The passing molecules were written to lipinski_pass.csv.
 
-
-⏺ cmxflow - run_workflow (MCP)(action: "execute", input_file: "/Users/ben/packages/test/library.csv", output_file:
-                              "/Users/ben/packages/test/lipinski_pass.csv")
-  ⎿  {
-       "status": "success",
-       "message": "Workflow executed successfully",
-     … +2 lines (ctrl+o to expand)
-
-⏺ Read 1 file (ctrl+o to expand)
-
-⏺ 659 out of 1000 molecules pass Lipinski's Rule of Five (MW ≤ 500, LogP ≤ 5, HBD ≤ 5, HBA ≤ 10).
-
-  The passing molecules have been saved to lipinski_pass.csv.
+✻ Brewed for 1m 2s
 ```
 
 > Cluster the remainder of the molecules. Make sure to balance intracluster similarity with number of singletons.
 
 ```
-⏺ I'll build a clustering workflow with the ClusterScoreBlock and optimize it to balance intracluster similarity vs. singletons.
+⏺ I'll cluster the 615 Lipinski-passing molecules. To balance intra-cluster similarity against singletons, I'll use the ClusterScoreBlock (maximized) with optimization to find the best similarity threshold. Let me build the workflow first.
 
-⏺ cmxflow - build_workflow (MCP)(action: "create")
-  ⎿  {
-       "status": "success",
-       "message": "Created new workflow with MoleculeSourceBlock",
-     … +3 lines (ctrl+o to expand)
+  Called cmxflow 4 times (ctrl+o to expand)
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "RepresentativeClusterBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added RepresentativeCluster",
-     … +4 lines (ctrl+o to expand)
+⏺ Workflow is valid. Here's what I have in mind:
 
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "ClusterScoreBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added ClusterScore",
-     … +5 lines (ctrl+o to expand)
+  ---
+  🔬 Cluster Quality Optimizer 🧬
 
-⏺ cmxflow - build_workflow (MCP)(action: "validate")
-  ⎿  {
-       "status": "success",
-       "message": "Workflow is valid",
-     … +8 lines (ctrl+o to expand)
+  MoleculeSource → RepresentativeCluster → ClusterScore (maximize)
 
-⏺ cmxflow - build_workflow (MCP)(action: "get_params")
-  ⎿  {
-       "status": "success",
-       "params": [
-     … +16 lines (ctrl+o to expand)
+  ▎ "The most important property of a compound is not its structure but its biological activity."
+  ▎ — Paul Ehrlich
 
-⏺ The optimizer will tune the similarity threshold (0.05–0.95) and whether to use scaffold-based or whole-molecule clustering. The
-  ClusterScoreBlock should be maximized (it rewards high intracluster similarity while penalizing singletons).
+  ---
+  The ClusterScoreBlock computes mean intra-cluster similarity − fraction of singletons, so maximizing it directly optimizes the trade-off you want.
+  
+  Before I start optimization, two quick questions:
 
-  I'll run 30 optimization trials — does that sound good, or would you prefer more/fewer?
+  1. n_trials: 30 is typically sufficient — would you like more or fewer?
+  2. Parallelism: Should the RepresentativeClusterBlock step run in parallel? (Note: its docs say it cannot be parallelized due to shared state, so this would only apply if other blocks are added.)
 
-  🔬 Cluster Quality Optimizer
+✻ Worked for 52s
 
-  MoleculeSource → RepresentativeCluster → ClusterScore
+❯ 30 trials no parallelism                                
 
-  "Chemistry itself knows altogether too well that — given the real fear that the scarcity of resources may someday end experiment — it is the number of hypotheses that is truly vast." — Friedrich August Kekulé
+  Called cmxflow (ctrl+o to expand)
 
+⏺ Optimization is running — 30 trials maximizing mean intra-cluster similarity − singleton fraction over the clustering threshold. I'll let you know when it's done; just ask for status whenever you're ready.
 
-⏺ cmxflow - optimize_workflow (MCP)(action: "start", n_trials: 30, input_file: "/Users/ben/packages/test/lipinski_pass.csv", direction: "maximize")
-  ⎿  {
-       "status": "started",
-       "message": "Optimization started with 30 trials",
-     … +3 lines (ctrl+o to expand)
+✻ Baked for 10s
 
-⏺ Optimization is running (30 trials). I'll wait for you to ask for results or let me know when you'd like me to check on progress.
+❯ What are the results?                                                
 
-❯ How's it looking?
-
-⏺ cmxflow - optimize_workflow (MCP)(action: "status")
-  ⎿  {
-       "status": "completed",
-       "message": "Optimization completed successfully",
-     … +6 lines (ctrl+o to expand)
+  Called cmxflow (ctrl+o to expand)
 
 ⏺ Optimization is complete. Best results:
 
-  - Threshold: 0.28 (Tanimoto similarity)
-  - Scaffold: True (Murcko scaffold-based clustering)
-  - Best score: 0.386
+  ┌─────────────────────┬───────┐
+  │      Parameter      │ Value │
+  ├─────────────────────┼───────┤
+  │ Threshold           │ 0.281 │
+  ├─────────────────────┼───────┤
+  │ Scaffold clustering │ True  │
+  ├─────────────────────┼───────┤
+  │ Best score          │ 0.410 │
+  └─────────────────────┴───────┘
 
-  This means the optimizer found that scaffold-based clustering at a ~0.28 similarity threshold gives the best balance between tight intracluster similarity and minimizing singletons.
+  The optimizer settled on a relatively low similarity threshold (0.28), which keeps intra-cluster cohesion tight while minimizing singletons. Would you like me to apply these best parameters and run the final clustering to produce the annotated output file?
 
-  Would you like me to apply these best parameters and run the clustering to get the output file?
+✻ Worked for 10s
+
+❯ yes                                                            
+
+  Called cmxflow (ctrl+o to expand)
+
+⏺ Now I'll swap the ScoreBlock for a SinkBlock to write the output.
+
+  Read 1 file, called cmxflow 4 times (ctrl+o to expand)
+
+⏺ Done. Results written to clustered.csv with cluster_id, cluster_representative, and cluster_similarity annotations. Summary:
+     
+  ┌────────────────────────┬──────────────────────────────────┐
+  │         Metric         │              Value               │
+  ├────────────────────────┼──────────────────────────────────┤
+  │ Molecules clustered    │ 615                              │
+  ├────────────────────────┼──────────────────────────────────┤
+  │ Total clusters         │ 245                              │
+  ├────────────────────────┼──────────────────────────────────┤
+  │ Singletons             │ 149                              │
+  ├────────────────────────┼──────────────────────────────────┤
+  │ Non-singleton clusters │ 96                               │
+  ├────────────────────────┼──────────────────────────────────┤
+  │ Threshold used         │ 0.281 (Tanimoto, scaffold-based) │
+  └────────────────────────┴──────────────────────────────────┘
+
+  Would you like to save this workflow for future use?
+
+✻ Churned for 28s
 ```
 
 ### Docking
 
-> Dock the molecules in hits.csv against receptor.pdb with crystal_ligand.sdf as a reference. I want to make sure the hits have good overlay with the known reference.
+> Dock the molecules in hits.csv against receptor.pdb with crystal_ligand.sdf as a reference
 
 ```
-⏺ Let me start by checking for existing workflows and available blocks, and verify the input files exist.
+⏺ I'll use the cmxflow MCP tools for this docking task. Let me first check the available files and load the tool schemas.
+                                                                                                            
+  Listed 1 directory (ctrl+o to expand)
 
-⏺ cmxflow - manage_workflows (MCP)(action: "list")
-  ⎿  {
-       "status": "success",
-       "message": "Registered workflows:",
-     … +2 lines (ctrl+o to expand)
+⏺ All three files are present. Let me check for existing workflows before building a new one.
 
-⏺ cmxflow - build_workflow (MCP)(action: "list_blocks")
-  ⎿  {
-       "status": "success",
-       "blocks": {
-     … +37 lines (ctrl+o to expand)
+  Called cmxflow (ctrl+o to expand)
 
-⏺ Read 1 file (ctrl+o to expand)
+⏺ No docking workflow exists yet. Let me check the available blocks to find the right docking block.
+  
+  Called cmxflow (ctrl+o to expand)
 
-⏺ All files are present. I'll build a docking workflow with alignment to the crystal ligand reference so you get good overlay. The pipeline will be:
+⏺ I have everything I need. Let me build a docking workflow: MoleculeSource → Standardize → ConformerGeneration → Dock → Sink.
 
-  1. Source - read hits.csv
-  2. Standardize - clean molecules
-  3. Enumerate Stereo - required before conformer generation
-  4. Conformer Generation - generate 3D coords (parallel)
-  5. Align - align to crystal_ligand.sdf reference
-  6. Dock - dock against receptor.pdb (parallel)
-  7. 3D Similarity - measure overlay with reference
-  8. Sink - write results
+  Called cmxflow 6 times (ctrl+o to expand)
 
-  Let me build it.
-
-⏺ cmxflow - build_workflow (MCP)(action: "create")
-  ⎿  {
-       "status": "success",
-       "message": "Created new workflow with MoleculeSourceBlock",
-     … +3 lines (ctrl+o to expand)
-
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "MoleculeStandardizeBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added MoleculeStandardize",
-     … +4 lines (ctrl+o to expand)
-
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "EnumerateStereoBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added EnumerateStereochemistry",
-     … +5 lines (ctrl+o to expand)
-
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "ConformerGenerationBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added ConformerGeneration",
-     … +7 lines (ctrl+o to expand)
-
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "MoleculeAlignBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added MoleculeAlign",
-     … +12 lines (ctrl+o to expand)
-
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "MoleculeDockBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added MoleculeDock",
-     … +16 lines (ctrl+o to expand)
-
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "Molecule3DSimilarityBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added Molecule3DSimilarity",
-     … +20 lines (ctrl+o to expand)
-
-⏺ cmxflow - build_workflow (MCP)(action: "add_block", block_type: "MoleculeSinkBlock")
-  ⎿  {
-       "status": "success",
-       "message": "Added MoleculeSink",
-     … +23 lines (ctrl+o to expand)
-
-⏺ Now let me make the conformer generation and docking steps parallel for speed, and set the required input files.
-
-⏺ cmxflow - build_workflow (MCP)(action: "make_parallel", index: 3, block_config: {"max_workers":4})
-  ⎿  {
-       "status": "success",
-       "message": "Parallelized ParallelConformerGeneration at index 3",
-     … +23 lines (ctrl+o to expand)
-
-⏺ cmxflow - build_workflow (MCP)(action: "make_parallel", index: 5, block_config: {"max_workers":8})
-  ⎿  {
-       "status": "success",
-       "message": "Parallelized ParallelMoleculeDock at index 5",
-     … +23 lines (ctrl+o to expand)
-
-⏺ Now let me validate, set the required inputs, and check what needs to be configured.
-
-⏺ cmxflow - build_workflow (MCP)(action: "validate")
-  ⎿  {
-       "status": "success",
-       "message": "Workflow is valid",
-     … +24 lines (ctrl+o to expand)
-
-⏺ cmxflow - run_workflow (MCP)(action: "set_inputs", inputs: {"4.file@query":"/Users/ben/packages/test/crystal_ligand.sdf","5.file@receptor" :"/Users/ben/packages/test/receptor.pdb","6.file@query":"/Users/ben/packages/test/crystal_ligand.sdf"})
-  ⎿  {
-       "status": "success",
-       "message": "Inputs set successfully"
-     }
-
-⏺ Everything is set. Let me run the workflow.
+⏺ Workflow is valid. Now let me set the receptor and reference inputs, then execute.
 
   ---
-  :test_tube: Crystal-Guided Docking Pipeline :test_tube:
+  ⚗️  Hits Docking Pipeline 🔬
 
-  Workflow:
-  1. MoleculeSource - Read hits.csv
-  2. MoleculeStandardize - Clean & normalize
-  3. EnumerateStereochemistry - Enumerate stereo centers
-  4. ParallelConformerGeneration (4 workers) - Generate 3D conformers
-  5. MoleculeAlign - Align to crystal_ligand.sdf (Crippen O3A)
-  6. ParallelMoleculeDock (8 workers) - Dock against receptor.pdb
-  7. Molecule3DSimilarity - Measure 3D shape overlay vs crystal_ligand.sdf
-  8. MoleculeSink - Write docked results
+  MoleculeSource → MoleculeStandardize → ConformerGeneration → MoleculeDock → MoleculeSink
 
-  "The good thing about science is that it's true whether or not you believe in it." — Neil deGrasse Tyson
+  "The first step is to measure, the second is to model, the third is to dock." — inspired by Gertrude Elion
 
+  ---
 
-⏺ cmxflow - run_workflow (MCP)(action: "execute", input_file: "/Users/ben/packages/test/hits.csv", output_file:
-                              "/Users/ben/packages/test/docked_hits.sdf")
-  ⎿  {
-       "status": "success",
-       "message": "Workflow executed successfully",
-     … +2 lines (ctrl+o to expand)
+  Called cmxflow 2 times (ctrl+o to expand)
 
-⏺ The docking workflow completed successfully. Results are saved to docked_hits.sdf.
+⏺ Docking complete. Results written to docked_hits.sdf — each molecule has a docking_score property (lower = better) along with component scores (electrostatic complementarity, etc.).
 
-  Each molecule in the output has:
-  - docking_score — binding affinity from docking against receptor.pdb (lower = better)
-  - alignment_shape_similarity — shape overlap from the alignment step
-  - similarity_3d — 3D shape Tanimoto similarity vs the crystal ligand
+  Would you like to visualize the docked poses in PyMOL alongside the receptor and crystal ligand?
 
-  You can use the similarity_3d and alignment_shape_similarity properties to filter for hits with the best overlay against your known reference.
+✻ Cogitated for 1m 2s
 
-  Would you like to:
-  - View the docked poses in PyMOL alongside the receptor and crystal ligand?
-  - Filter/rank results by docking score or 3D similarity?
-  - Save this workflow for reuse?
+❯ yes                                                           
 
-✻ Crunched for 1m 21s
+  Called cmxflow (ctrl+o to expand)
 
-❯ The first one
+⏺ PyMOL is open with the docked poses (docked_hits.sdf), the receptor (receptor.pdb), and the crystal ligand
+  (crystal_ligand.sdf) for reference. You can toggle visibility of individual layers to compare how your hits bind relative to the co-crystal pose.
 
-⏺ Which files would you like to open in PyMOL? I'd suggest all three:
-
-  1. docked_hits.sdf — your docked poses
-  2. receptor.pdb — the protein target
-  3. crystal_ligand.sdf — the reference ligand for comparison
-
-  Should I open all three together?
-
-❯ yes
-
-⏺ cmxflow - view_structures (MCP)(files: ["/Users/ben/packages/test/docked_hits.sdf","/Users/ben/packages/test/receptor.pdb","/Users/ben/packages/test/crystal_ligand.sdf"])
-  ⎿  {
-       "status": "success",
-       "message": "Opened 3 file(s) in PyMOL",
-     … +6 lines (ctrl+o to expand)
-
-⏺ All three structures are now open in PyMOL. You should see:
-
-  - The receptor as the protein surface/cartoon
-  - The crystal ligand as the reference pose
-  - The docked hits overlaid in the binding site
-
-  This will let you visually inspect how well your hits overlay with the known crystal ligand. Would you like to save this workflow for uture use?
+✻ Cooked for 5s
 ```
+
+> Poses could be better. Anything we can do to improve the workflow?
+
+```
+⏺ A few levers worth considering:
+
+  1. More search thoroughness — increase n_starts (currently 32) and enable basin_hops (currently 0) on MoleculeDockBlock. More starts + basin hopping explore the pocket more exhaustively.
+  2. Add alignment before docking — inserting a MoleculeAlignBlock (using crystal_ligand.sdf as reference) before docking gives each molecule a better starting 3D overlay, which can guide the search into the right region of the pocket.
+  3. More conformers — increase numConfs in ConformerGenerationBlock from 1 to e.g. 5–10 so docking has richer starting geometries to work from.
+  4. Bayesian optimization — run optimize_workflow to tune the scoring weights (w_gauss1, w_hydrophobic, w_hbond, etc.) and search parameters automatically against the crystal pose.
+
+  The highest-impact single change is usually more starts + basin hops (option 1) combined with alignment (option 2). Bayesian optimization (option 4) is the most principled approach if you have a benchmark set to score against.
+
+  Which would you like to try — one of these individually, or a combination?
+
+✻ Cogitated for 21s
+
+❯ Try 1 first                                                     
+
+⏺ I'll rebuild the workflow with higher n_starts and basin_hops on the dock block. Since this will be slower, I'll parallelize the docking step too.
+
+  Called cmxflow 5 times (ctrl+o to expand)
+
+⏺ Let me check what values are valid for those parameters.
+
+  Called cmxflow 5 times (ctrl+o to expand)
+
+⏺ n_starts appears fixed at 32, but basin_hops is now set to 10 (up from 0). Let me add the sink, parallelize the dock step for speed, then run.
+
+  Called cmxflow 3 times (ctrl+o to expand)
+
+⏺ ---
+  ⚗️  Hits Docking Pipeline — Enhanced Search 🔍
+
+  MoleculeSource → MoleculeStandardize → ConformerGeneration → ParallelMoleculeDock → MoleculeSink
+  basin_hops: 10 (was 0) | n_starts: 32 | parallelized across all cores
+  
+  "If we knew what it was we were doing, it would not be called research, would it?" — Albert Einstein
+
+  ---
+
+  Called cmxflow 2 times (ctrl+o to expand)
+
+⏺ Done — docked_hits.sdf updated with the enhanced search (basin_hops: 10). Note that n_starts appears to be fixed at 32 by the block and couldn't be increased further.
+
+  Would you like to visualize the new poses in PyMOL to compare, or try one of the other options (alignment pre-step or more conformers)?
+
+✻ Sautéed for 1m 48s
+
+❯ yes                                                                  
+
+  Called cmxflow (ctrl+o to expand)
+
+⏺ PyMOL is open with the updated poses alongside the receptor and crystal ligand. Let me know if the poses look better, or if you'd like to try adding alignment or more conformers next.
+
+✻ Sautéed for 5s
+```
+
 
 ## What Claude Can Do
 

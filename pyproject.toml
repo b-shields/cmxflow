@@ -12,6 +12,7 @@ rdkit = "^2025.4"
 pandas = "^3.0"
 pyarrow = "*"
 scikit-learn = "^1.8"
+threadpoolctl = "^3.0"
 optuna = "^4.0"
 dimorphite-dl = "*"
 fastmcp = "^3.0"
@@ -58,5 +59,8 @@ module = [
     "cmxflow.operators.confgen",
     "cmxflow.operators.dock.ec",
     "cmxflow.operators.dock.dock",
+    "cmxflow.operators.dock.pose",
+    "cmxflow.operators.dock.template",
+    "cmxflow.operators.dock.scaffold_index",
 ]
 disable_error_code = ["override", "assignment", "no-any-return", "attr-defined"]

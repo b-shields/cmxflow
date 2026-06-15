@@ -273,9 +273,12 @@ def get_block_descriptions() -> dict[str, str]:
         ),
         "MoleculeAlignBlock": (
             "Align molecules to a reference structure using 3D coordinates. IMPORTANT: "
-            "This step should always come somewhere BEFORE a Molecule3DSimlarityBlock, "
-            "MoleculeDockBlock, or ShapeOverlayScoreBlock. This block adds the "
-            "'alignment_shape_similarity' property to all input molecules."
+            "This step should always come somewhere BEFORE a Molecule3DSimilarityBlock "
+            "or ShapeOverlayScoreBlock. It is OPTIONAL before a MoleculeDockBlock "
+            "(docking recenters the search on its site_reference, so it docks a fresh "
+            "conformer directly), though it can improve the starting overlay. This "
+            "block adds the 'alignment_shape_similarity' property to all input "
+            "molecules."
         ),
         "Molecule3DSimilarityBlock": (
             "Compute 3D shape similarity between molecules and a reference. IMPORTANT: "
@@ -283,11 +286,20 @@ def get_block_descriptions() -> dict[str, str]:
             "block adds the 'similarity_3d' property to all input molecules."
         ),
         "MoleculeDockBlock": (
-            "Dock an aligned 3D molecule conformer against a protein receptor from a "
-            ".pdb file. IMPORTANT: This step should always come somewhere AFTER a "
-            "MoleculeAlignBlock. It is a slow block and you should offer to make it "
-            "parallel (recommend max_workers=8). This block adds the 'docking_score' "
-            "property to all input molecules."
+            "Dock a 3D molecule conformer against a protein receptor using an "
+            "empirical scoring function. Requires two file inputs: 'receptor' "
+            "(a .pdb file) and 'site_reference' (a ligand/structure file whose "
+            "heavy-atom centroid defines the binding pocket). The site_reference "
+            "recenters the search box, so molecules dock from a freshly generated "
+            "conformer. IMPORTANT: block must come somewhere AFTER a "
+            "ConformerGenerationBlock (it needs a 3D conformer). It is a slow block "
+            "and you should offer to make it parallel (recommend max_workers as "
+            "default; all cores). Set index_poses=True for scaffold-indexed "
+            "(template or MCS) docking -- much faster on congeneric series (docks "
+            "the first molecule of each Bemis-Murcko scaffold fully, then templates "
+            "its siblings). This block adds the 'docking_score' property (lower is "
+            "better) and other score components (e.g., electrostatic "
+            "complementarity) to all input molecules."
         ),
         # Scores
         "AverageScoreBlock": (

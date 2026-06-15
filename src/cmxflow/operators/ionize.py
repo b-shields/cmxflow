@@ -23,6 +23,13 @@ class IonizeMoleculeBlock(MoleculeBlock):
     variants. Includes automatic correction for tertiary amide nitrogens that
     dimorphite_dl incorrectly protonates.
 
+    When the input carries a 3D conformer the conformer is preserved: dimorphite
+    only changes formal charges and hydrogen counts on an unchanged heavy-atom
+    skeleton, so the protonation state is transferred back onto the original 3D
+    heavy atoms (matched exactly by atom-map number, not substructure search) and
+    any hydrogens added during protonation get coordinates from the heavy-atom
+    geometry. Inputs without a 3D conformer take the plain SMILES path.
+
     Example:
         ```python
         workflow.add(
@@ -98,6 +105,95 @@ class IonizeMoleculeBlock(MoleculeBlock):
         """Not used - this block overrides forward() directly."""
         raise NotImplementedError("IonizeMoleculeBlock uses forward() directly")
 
+    def _protonated_variants(self, dimorphite_dl: Any, smiles: str) -> list[Chem.Mol]:
+        """Run dimorphite_dl on a SMILES and return fixed 2D variant mols.
+
+        Args:
+            dimorphite_dl: The imported dimorphite_dl module.
+            smiles: SMILES (optionally atom-map labelled) to protonate.
+
+        Returns:
+            RDKit mols for each protonation variant, with the tertiary-amide
+            correction applied. Invalid SMILES are skipped; on dimorphite_dl
+            failure the input is returned unchanged.
+        """
+        try:
+            protonated = dimorphite_dl.protonate_smiles(
+                smiles,
+                ph_min=self.ph_min,
+                ph_max=self.ph_max,
+                precision=self.params["precision"].get(),
+                max_variants=self.params["max_variants"].get(),
+            )
+        except Exception:
+            logger.warning(
+                "dimorphite_dl failed for %s, falling back to original.",
+                smiles,
+                exc_info=True,
+            )
+            protonated = [smiles]
+
+        variants = []
+        for smi in protonated:
+            variant = Chem.MolFromSmiles(smi)
+            if variant is None:
+                logger.debug("Skipping invalid SMILES from dimorphite_dl: %s", smi)
+                continue
+            variants.append(self._fix_tertiary_amides(variant))
+        return variants
+
+    @staticmethod
+    def _transfer_protonation(heavy: Chem.Mol, variant: Chem.Mol) -> Chem.Mol | None:
+        """Apply a variant's protonation state onto a 3D heavy-atom template.
+
+        ``heavy`` carries the original 3D conformer with every atom labelled by
+        an atom-map number; ``variant`` is the (2D) protonated form whose atoms
+        keep those same map numbers. Formal charge and hydrogen count are copied
+        atom-for-atom by map number, then hydrogens are rebuilt with coordinates
+        so any proton added during protonation gets a 3D position.
+
+        Args:
+            heavy: Map-labelled heavy-atom mol holding the original conformer.
+            variant: Protonated variant mol with matching atom-map numbers.
+
+        Returns:
+            A 3D mol in the variant's protonation state, or None if it fails to
+            sanitize.
+        """
+        by_map = {
+            atom.GetAtomMapNum(): (atom.GetFormalCharge(), atom.GetTotalNumHs())
+            for atom in variant.GetAtoms()
+            if atom.GetAtomMapNum()
+        }
+        out = Chem.RWMol(heavy)
+        for atom in out.GetAtoms():
+            state = by_map.get(atom.GetAtomMapNum())
+            if state is not None:
+                charge, n_hs = state
+                atom.SetFormalCharge(charge)
+                atom.SetNumExplicitHs(n_hs)
+                atom.SetNoImplicit(True)
+            atom.SetAtomMapNum(0)
+        mol = out.GetMol()
+        try:
+            Chem.SanitizeMol(mol)
+        except Exception:
+            logger.warning("Failed to sanitize transferred protonation state.")
+            return None
+        # addCoords places newly added hydrogens from the heavy-atom geometry.
+        return Chem.AddHs(mol, addCoords=True)
+
+    def _attach_props(self, variant: Mol, input_props: dict) -> Mol:
+        """Copy preserved input properties onto an output variant."""
+        for key, value in input_props.items():
+            if isinstance(value, float):
+                variant.SetDoubleProp(key, value)
+            elif isinstance(value, int):
+                variant.SetIntProp(key, value)
+            else:
+                variant.SetProp(key, str(value))
+        return variant
+
     def forward(self, mol: Chem.Mol | Mol) -> Iterator[Mol]:  # type: ignore[override]
         """Generate ionization variants of a molecule.
 
@@ -105,7 +201,8 @@ class IonizeMoleculeBlock(MoleculeBlock):
             mol: Input RDKit Mol object.
 
         Yields:
-            Ionization variants with properties preserved.
+            Ionization variants with properties preserved. A 3D conformer on the
+            input is carried through to every variant.
         """
         try:
             import dimorphite_dl
@@ -122,47 +219,38 @@ class IonizeMoleculeBlock(MoleculeBlock):
         else:
             input_props = mol.GetPropsAsDict(includePrivate=True)
 
-        input_smiles = Chem.MolToSmiles(mol)
-        precision = self.params["precision"].get()
-        max_variants = self.params["max_variants"].get()
-
-        try:
-            protonated = dimorphite_dl.protonate_smiles(
-                input_smiles,
-                ph_min=self.ph_min,
-                ph_max=self.ph_max,
-                precision=precision,
-                max_variants=max_variants,
-            )
-        except Exception:
-            logger.warning(
-                "dimorphite_dl failed for %s, falling back to original.",
-                input_smiles,
-                exc_info=True,
-            )
-            protonated = [input_smiles]
-
+        is_3d = mol.GetNumConformers() > 0 and mol.GetConformer().Is3D()
         seen: set[str] = set()
-        for smi in protonated:
-            variant = Chem.MolFromSmiles(smi)
-            if variant is None:
-                logger.debug("Skipping invalid SMILES from dimorphite_dl: %s", smi)
+
+        if not is_3d:
+            # SMILES path: no conformer to preserve.
+            for variant in self._protonated_variants(
+                dimorphite_dl, Chem.MolToSmiles(mol)
+            ):
+                canonical = Chem.MolToSmiles(variant)
+                if canonical in seen:
+                    continue
+                seen.add(canonical)
+                yield self._attach_props(wrap_mol(variant), input_props)
+            return
+
+        # 3D path: label heavy atoms so the protonation state can be mapped back
+        # exactly onto the original conformer (dimorphite_dl preserves map nums).
+        heavy = Chem.RemoveHs(mol)
+        for atom in heavy.GetAtoms():
+            atom.SetAtomMapNum(atom.GetIdx() + 1)
+
+        for variant in self._protonated_variants(
+            dimorphite_dl, Chem.MolToSmiles(heavy)
+        ):
+            out = self._transfer_protonation(heavy, variant)
+            if out is None:
                 continue
-            variant = self._fix_tertiary_amides(variant)
-            canonical = Chem.MolToSmiles(variant)
+            canonical = Chem.MolToSmiles(Chem.RemoveHs(out))
             if canonical in seen:
                 continue
             seen.add(canonical)
-
-            variant = wrap_mol(variant)
-            for key, value in input_props.items():
-                if isinstance(value, float):
-                    variant.SetDoubleProp(key, value)
-                elif isinstance(value, int):
-                    variant.SetIntProp(key, value)
-                else:
-                    variant.SetProp(key, str(value))
-            yield variant
+            yield self._attach_props(wrap_mol(out), input_props)
 
     def __call__(self, iter: Iterator[Any]) -> Iterator[Mol]:
         """Execute the block on an iterator of molecules.

@@ -2,8 +2,8 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.b-shields/cmxflow",
   "title": "cmxflow",
-  "description": "Composable, tunable cheminformatics workflows: prepare ligands, cluster, virtual screens, and more.",
-  "version": "0.3.1",
+  "description": "Composable, tunable cheminformatics workflows: library preparation, clustering, docking, and more.",
+  "version": "0.4.0",
   "websiteUrl": "https://b-shields.github.io/cmxflow/",
   "repository": {
     "url": "https://github.com/b-shields/cmxflow",
@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "identifier": "cmxflow",
-      "version": "0.3.1",
+      "version": "0.4.0",
       "transport": { "type": "stdio" },
       "runtimeHint": "uvx",
       "runtimeArguments": [

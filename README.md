@@ -143,6 +143,7 @@ conda install -c conda-forge pymol-open-source
 - [Block catalog](https://b-shields.github.io/cmxflow/blocks/)
 - [Using with Claude](https://b-shields.github.io/cmxflow/using-with-claude/) — agent transcripts
 - [`examples/basic_usage.ipynb`](examples/basic_usage.ipynb) — full tutorial
+- [`examples/docking/docking.ipynb`](examples/docking/docking.ipynb) — docking walkthrough (ILS, scaffold-indexed, and template modes)
 
 ## Project
 

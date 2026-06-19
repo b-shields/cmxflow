@@ -152,6 +152,7 @@ class MoleculeDockBlock(MoleculeBlock):
         self,
         score_components: bool = True,
         score_strain: bool = False,
+        score_only: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize the molecular docking block.
@@ -159,6 +160,10 @@ class MoleculeDockBlock(MoleculeBlock):
         Args:
             score_components: If True (default), write per-term weighted score
                 components as SDF properties on each docked molecule.
+            score_only: If True, skip pose optimization entirely and score the
+                input pose as-is. Useful for rescoring pre-docked poses and for
+                isolating scoring-function cost from the search. Not a mutable
+                parameter -- it changes the behavior of the forward pass only.
             score_strain: If True, add the ligand strain penalty (intramolecular
                 energy added vs the input conformer, >=0) into ``docking_score``
                 and into multistart selection. Default False keeps
@@ -186,6 +191,7 @@ class MoleculeDockBlock(MoleculeBlock):
         )
         self._score_components = score_components
         self._score_strain = score_strain
+        self._score_only = score_only
         self._scaffold_store: ScaffoldPoseStore | None = None
         self._reference_seeded = False
 
@@ -393,6 +399,47 @@ class MoleculeDockBlock(MoleculeBlock):
             new_mol.AddConformer(Chem.Conformer(conf), assignId=True)
             return new_mol
 
+    def _score_input_pose(
+        self, mol: Chem.Mol, score_params: EmpiricalParams
+    ) -> Chem.Mol:
+        """Score the input pose as-is (no optimization) and set properties.
+
+        Used by ``score_only`` mode. Writes the same ``docking_*`` properties as
+        the full path so downstream consumers and ``check_output`` see a uniform
+        schema; the optimized-vs-initial scores are identical by construction.
+
+        Args:
+            mol: Ligand RDKit Mol with a 3D conformer (already pruned to one).
+            score_params: Empirical scoring parameters.
+
+        Returns:
+            The input molecule with docking properties set.
+        """
+        assert isinstance(self._protein_coords, np.ndarray)
+        assert isinstance(self._protein_typing, AtomTyping)
+
+        ligand_heavy = Chem.RemoveAllHs(mol)
+        comps = empirical_score_cached(
+            ligand_heavy,
+            self._protein_coords,
+            self._protein_typing,
+            params=score_params,
+            protein_tree=self._protein_tree,
+        )
+        mol.SetDoubleProp("docking_initial_pose_score", comps.total)
+        mol.SetDoubleProp("docking_score", comps.total)
+        mol.SetDoubleProp("docking_empirical", comps.total)
+        mol.SetDoubleProp("docking_strain", 0.0)
+        mol.SetDoubleProp("docking_ec", 0.0)
+        mol.SetBoolProp("docking_converged", True)
+        if self._score_components:
+            mol.SetDoubleProp("docking_gauss1", comps.gauss1)
+            mol.SetDoubleProp("docking_repulsion", comps.repulsion)
+            mol.SetDoubleProp("docking_hydrophobic", comps.hydrophobic)
+            mol.SetDoubleProp("docking_hbond", comps.hbond)
+            mol.SetDoubleProp("docking_n_rot", comps.n_rot * comps.w_rot)
+        return mol
+
     def _forward(self, mol: Chem.Mol) -> Chem.Mol | None:
         """Dock a ligand molecule into the receptor binding site.
 
@@ -423,6 +470,12 @@ class MoleculeDockBlock(MoleculeBlock):
             w_hbond=self.get_param("w_hbond"),
             w_rot=self.get_param("w_rot"),
         )
+
+        # Score-only mode: score the input pose as-is and return. No search, no
+        # EC, no coordinate changes -- isolates the scoring-function cost.
+        if self._score_only:
+            return self._score_input_pose(mol, score_params)
+
         box_size = self.get_param("box_size")
         rigid_only = self.get_param("rigid")
         site_center = self._load_site_reference()

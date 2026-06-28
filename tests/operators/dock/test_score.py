@@ -69,10 +69,17 @@ class TestEmpiricalScoreCachedComponents:
         assert isinstance(comps.total, float)
 
     def test_components_sum_to_total(self) -> None:
-        """comps.total must equal the sum of component terms."""
+        """comps.total is the component sum divided by the torsion divisor.
+
+        Components are raw (pre-divisor) weighted terms; total applies the
+        torsion divisor once to their sum.
+        """
         ligand, pc, pt = _benzene_system()
         comps = empirical_score_cached(ligand, pc, pt)
-        reconstructed = comps.gauss1 + comps.repulsion + comps.hydrophobic + comps.hbond
+        divisor = 1.0 + comps.w_rot * comps.n_rot
+        reconstructed = (
+            comps.gauss1 + comps.repulsion + comps.hydrophobic + comps.hbond
+        ) / divisor
         assert reconstructed == pytest.approx(comps.total)
 
     def test_hydrophobic_raw_zero_when_no_hydrophobic_pairs(self) -> None:

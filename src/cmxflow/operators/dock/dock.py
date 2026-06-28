@@ -103,11 +103,13 @@ class MoleculeDockBlock(MoleculeBlock):
         - docking_strain: Ligand strain penalty — intramolecular energy added vs
           the input conformer (>=0). Reported regardless of ``score_strain``.
         - docking_converged: Whether optimization converged.
-        When ``score_components=True`` (default), also writes:
-        - docking_gauss1: Gaussian term contribution to docking_score.
-        - docking_repulsion: Repulsion term contribution to docking_score.
-        - docking_hydrophobic: Hydrophobic term contribution to docking_score.
-        - docking_hbond: H-bond term contribution to docking_score.
+        When ``score_components=True`` (default), also writes the raw
+        (pre-torsion-divisor) weighted terms, matching smina's term log; the
+        torsion divisor is applied only to docking_score/docking_empirical:
+        - docking_gauss1: Gaussian term (weight * raw sum, no torsion divisor).
+        - docking_repulsion: Repulsion term (weight * raw sum, no torsion divisor).
+        - docking_hydrophobic: Hydrophobic term (weight * raw sum, no divisor).
+        - docking_hbond: H-bond term (weight * raw sum, no torsion divisor).
         - docking_n_rot: Torsional entropy energetic term (w_rot * N_rot).
         - docking_scoring_function: Scoring weights used, for reproducibility.
 
@@ -207,7 +209,7 @@ class MoleculeDockBlock(MoleculeBlock):
             # minima, each ~max_iterations L-BFGS-B steps; the bounds keep the
             # worst-case config tractable.
             #   n_starts hi=33: start diversity saturates near 32.
-            Integer("n_starts", 32, 1, 33),
+            Integer("n_starts", 33, 1, 65),
             #   basin_hops: extra iterated-local-search refinement per start.
             #   Default 0 (init + single minimize); hi=16 caps runtime.
             Integer("basin_hops", 0, 0, 16),
@@ -349,6 +351,16 @@ class MoleculeDockBlock(MoleculeBlock):
 
     def _load_receptor(self) -> None:
         """Load and validate receptor from a PDB file.
+
+        Alternate locations (altLocs): ``Chem.MolFromPDBFile`` keeps a single,
+        highest-occupancy conformer per atom, which is the physically-correct
+        choice (an altLoc atom occupies position A *or* B with fractional
+        occupancy, not both). NOTE this diverges from smina/Vina: their
+        OpenBabel-based PDB parser keeps *every* altLoc conformer, double-counting
+        partial-occupancy atoms. On altLoc-containing structures (~40% of CASF2016)
+        smina therefore reports stronger repulsion/gauss/hydrophobic terms, so
+        cmxflow will not reproduce its score exactly there -- a smina quirk, not a
+        cmxflow defect.
 
         Raises:
             FileNotFoundError: If the receptor PDB file does not exist.

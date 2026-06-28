@@ -11,7 +11,7 @@ Reference:
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, TypeAlias, cast
 
 import numpy as np
@@ -179,12 +179,24 @@ class AtomTyping:
         is_hydrophobic: Boolean mask for hydrophobic atoms.
         is_hbond_donor: Boolean mask for H-bond donors.
         is_hbond_acceptor: Boolean mask for H-bond acceptors.
+        weights: Per-atom occupancy weight applied to every pairwise term this
+            atom contributes (1.0 for ordinary atoms). Used to occupancy-weight
+            crystallographic alternate-location (altLoc) conformers so a residue
+            sampling two states contributes the ensemble-averaged interaction.
+            Defaults to all-ones when not provided.
     """
 
     radii: NDArray[np.floating]
     is_hydrophobic: NDArray[np.bool_]
     is_hbond_donor: NDArray[np.bool_]
     is_hbond_acceptor: NDArray[np.bool_]
+    # Defaults to all-ones in __post_init__; type-ignore the None sentinel so
+    # downstream use sites see a plain (non-Optional) array.
+    weights: NDArray[np.floating] = field(default=None)  # type: ignore[arg-type]
+
+    def __post_init__(self) -> None:
+        if self.weights is None:
+            self.weights = np.ones(len(self.radii), dtype=np.float64)
 
 
 def get_atom_radii(mol: Chem.Mol) -> NDArray[np.floating]:
@@ -474,6 +486,7 @@ def _pair_term_sums_and_grad(
     hbond_pair: NDArray[np.bool_],
     params: EmpiricalParams,
     torsion_divisor: float,
+    weights: NDArray[np.floating] | float,
 ) -> tuple[tuple[float, float, float, float], NDArray[np.floating]]:
     """Per-pair Vinardo term sums and ``d(score)/d(surface_distance)``.
 
@@ -486,6 +499,8 @@ def _pair_term_sums_and_grad(
         hbond_pair: H-bond donor/acceptor-pair mask, broadcastable to ``d``.
         params: Scoring parameters.
         torsion_divisor: ``1 + w_rot * n_rot`` (applied to df_dd only).
+        weights: Per-pair occupancy weight (protein-atom weight broadcast to
+            ``d``); scales each term sum and df_dd. Use ``1.0`` for unweighted.
 
     Returns:
         ((gauss1_raw, repulsion_raw, hydrophobic_raw, hbond_raw), df_dd) where
@@ -511,18 +526,22 @@ def _pair_term_sums_and_grad(
     hb = np.where(hb_inner, 1.0, np.where(hb_trans, -d / (-params.hbond_good), 0.0))
 
     raws = (
-        float(np.sum(g1)),
-        float(np.sum(rep)),
-        float(np.sum(hydro)),
-        float(np.sum(hb)),
+        float(np.sum(g1 * weights)),
+        float(np.sum(rep * weights)),
+        float(np.sum(hydro * weights)),
+        float(np.sum(hb * weights)),
     )
 
     df_dd = (
-        params.w_gauss1 * (-2.0 * z / params.gauss1_width) * g1
-        + params.w_repulsion * np.where(rep_mask, 2.0 * d, 0.0)
-        + params.w_hydrophobic * np.where(hydro_trans, -1.0 / range_hydro, 0.0)
-        + params.w_hbond * np.where(hb_trans, -1.0 / (-params.hbond_good), 0.0)
-    ) / torsion_divisor
+        (
+            params.w_gauss1 * (-2.0 * z / params.gauss1_width) * g1
+            + params.w_repulsion * np.where(rep_mask, 2.0 * d, 0.0)
+            + params.w_hydrophobic * np.where(hydro_trans, -1.0 / range_hydro, 0.0)
+            + params.w_hbond * np.where(hb_trans, -1.0 / (-params.hbond_good), 0.0)
+        )
+        * weights
+        / torsion_divisor
+    )
 
     return raws, df_dd
 
@@ -594,6 +613,7 @@ def _sparse_score_grad(
         params.hydro_good,
         params.hydro_bad,
         params.hbond_good,
+        protein_typing.weights,
         inv_divisor,
     )
     return cast(tuple[float, float, float, float, NDArray], result)
@@ -656,7 +676,7 @@ def intramolecular_score_and_grad(
     eucl = np.linalg.norm(diff, axis=-1)
     d = eucl - pairs.radii_sum
     (g1_raw, rep_raw, hydro_raw, hb_raw), df_dd = _pair_term_sums_and_grad(
-        d, pairs.hydro_pair, pairs.hbond_pair, params, torsion_divisor
+        d, pairs.hydro_pair, pairs.hbond_pair, params, torsion_divisor, 1.0
     )
     score = (
         params.w_gauss1 * g1_raw
@@ -800,10 +820,14 @@ def empirical_score_cached(
             protein_typing.radii,
         )
 
+        # Occupancy weight per protein atom, broadcast across ligand-atom rows.
+        w = protein_typing.weights[None, :]
         g1_raw = float(
-            np.sum(gauss1_term(distances, params.gauss1_offset, params.gauss1_width))
+            np.sum(
+                gauss1_term(distances, params.gauss1_offset, params.gauss1_width) * w
+            )
         )
-        rep_raw = float(np.sum(repulsion_term(distances)))
+        rep_raw = float(np.sum(repulsion_term(distances) * w))
         hydro_raw = float(
             np.sum(
                 hydrophobic_term(
@@ -813,6 +837,7 @@ def empirical_score_cached(
                     params.hydro_good,
                     params.hydro_bad,
                 )
+                * w
             )
         )
         hb_raw = float(
@@ -825,6 +850,7 @@ def empirical_score_cached(
                     protein_typing.is_hbond_acceptor,
                     params.hbond_good,
                 )
+                * w
             )
         )
 
@@ -932,7 +958,12 @@ def empirical_score_and_grad_cached(
         & protein_typing.is_hbond_donor[None, :]
     )
     (g1_raw, rep_raw, hydro_raw, hb_raw), df_dd = _pair_term_sums_and_grad(
-        d, hydro_pair, hbond_pair, params, torsion_divisor
+        d,
+        hydro_pair,
+        hbond_pair,
+        params,
+        torsion_divisor,
+        protein_typing.weights[None, :],
     )
     score = (
         params.w_gauss1 * g1_raw

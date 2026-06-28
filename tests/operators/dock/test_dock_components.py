@@ -140,7 +140,7 @@ class TestPoseSearchParams:
     """Pose-search params are exposed with their defaults and threaded through."""
 
     DEFAULTS = {
-        "n_starts": 32,
+        "n_starts": 33,
         "basin_hops": 0,
         "max_iterations": 100,
         "box_size": 10.0,

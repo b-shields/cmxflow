@@ -35,7 +35,7 @@ GOLDEN_CASES = {
             sobol_max_tries=2048,
             diversity_rmsd=1.0,
         ),
-        -10.1956373547,
+        -9.331039143493218,
         "golden_pose_flex.npy",
     ),
     "rigid": (
@@ -47,7 +47,7 @@ GOLDEN_CASES = {
             diversity_rmsd=1.0,
             basin_hops=0,
         ),
-        -0.3049939334,
+        -0.30499393337990655,
         "golden_pose_rigid.npy",
     ),
     "ils": (
@@ -59,7 +59,7 @@ GOLDEN_CASES = {
             diversity_rmsd=1.0,
             basin_hops=3,
         ),
-        -4.4360881952,
+        -4.443982527322975,
         "golden_pose_ils.npy",
     ),
 }
@@ -132,7 +132,7 @@ def test_defaults_reach_golden_minimum() -> None:
 INDEX_SEARCH: dict[str, Any] = dict(
     n_starts=8, max_distance_geometry_samples=8, sobol_max_tries=512, basin_hops=0
 )
-INDEXED_GOLDEN_SCORE = -8.5587969796
+INDEXED_GOLDEN_SCORE = -8.564884085787382
 INDEXED_GOLDEN_POSE = "golden_pose_indexed.npy"
 
 

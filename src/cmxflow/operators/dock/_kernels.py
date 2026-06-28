@@ -52,6 +52,7 @@ def score_grad_pairs(
     hydro_good: float,
     hydro_bad: float,
     hbond_good: float,
+    prot_weight: np.ndarray,
     inv_divisor: float,
 ) -> tuple[float, float, float, float, np.ndarray]:
     """Vinardo term sums + per-atom gradient over a fixed neighbor-pair list.
@@ -73,6 +74,9 @@ def score_grad_pairs(
         gauss1_offset, gauss1_width: Gaussian center/width.
         hydro_good, hydro_bad: Hydrophobic inner/outer cutoffs.
         hbond_good: H-bond inner cutoff.
+        prot_weight: Per-protein-atom occupancy weight (n_prot,); every term and
+            gradient contribution from protein atom ``b`` is scaled by it (1.0 for
+            ordinary atoms, fractional for altLoc conformers).
         inv_divisor: ``1 / (1 + w_rot * n_rot)``; applied to the gradient only
             (raw sums stay unweighted, matching the numpy path).
 
@@ -92,6 +96,7 @@ def score_grad_pairs(
     for p in range(i_idx.shape[0]):
         a = i_idx[p]
         b = j_idx[p]
+        w = prot_weight[b]
         dx = coords[a, 0] - protein_coords[b, 0]
         dy = coords[a, 1] - protein_coords[b, 1]
         dz = coords[a, 2] - protein_coords[b, 2]
@@ -100,29 +105,29 @@ def score_grad_pairs(
 
         z = (d - gauss1_offset) / gauss1_width
         g1 = np.exp(-z * z)
-        g1_raw += g1
+        g1_raw += g1 * w
         dfdd = w_gauss1 * (-2.0 * z / gauss1_width) * g1
 
         if d < 0.0:
-            rep_raw += d * d
+            rep_raw += d * d * w
             dfdd += w_repulsion * 2.0 * d
 
         if lig_hydro[a] and prot_hydro[b]:
             if d <= hydro_good:
-                hydro_raw += 1.0
+                hydro_raw += w
             elif d < hydro_bad:
-                hydro_raw += (hydro_bad - d) / range_hydro
+                hydro_raw += (hydro_bad - d) / range_hydro * w
                 dfdd += w_hydrophobic * (-1.0 / range_hydro)
 
         if (lig_don[a] and prot_acc[b]) or (lig_acc[a] and prot_don[b]):
             if d <= hbond_good:
-                hb_raw += 1.0
+                hb_raw += w
             elif d < 0.0:
-                hb_raw += -d * inv_hb
+                hb_raw += -d * inv_hb * w
                 dfdd += w_hbond * (-inv_hb)
 
         if eucl > 1e-8:
-            f = dfdd * inv_divisor / eucl
+            f = dfdd * w * inv_divisor / eucl
             grad[a, 0] += f * dx
             grad[a, 1] += f * dy
             grad[a, 2] += f * dz

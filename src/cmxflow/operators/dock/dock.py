@@ -61,6 +61,114 @@ _INDEX_DB_NAME = "scaffold_index.db"
 _INDEX_CONSTRAINT_WEIGHT = 25.0
 _INDEX_CONSTRAINT_TOL = 0.5
 
+# An atom and its altLoc copy are at most ~1.5 Å apart; this matches a parsed
+# record to the RDKit-kept conformer so the others can be flagged as dropped.
+_ALTLOC_MATCH_TOL = 0.05
+
+
+@dataclasses.dataclass
+class _AltLocAtoms:
+    """Recovered altLoc conformer atoms (see ``_recover_dropped_altlocs``)."""
+
+    coords: np.ndarray
+    radii: np.ndarray
+    is_hydrophobic: np.ndarray
+    is_hbond_donor: np.ndarray
+    is_hbond_acceptor: np.ndarray
+    weights: np.ndarray
+
+
+def _recover_dropped_altlocs(
+    mol: Chem.Mol,
+    coords: np.ndarray,
+    typing: AtomTyping,
+    receptor_path: Path,
+) -> _AltLocAtoms:
+    """Recover altLoc conformers RDKit dropped, inheriting their primary typing.
+
+    RDKit keeps one (highest-occupancy) atom per ``(chain, resSeq, iCode, resName,
+    atomName)`` site; the alternates are present in the PDB but absent from ``mol``.
+    This re-reads heavy ``ATOM``/``HETATM`` records carrying an altLoc indicator,
+    skips the one RDKit already kept (nearest primary atom within
+    ``_ALTLOC_MATCH_TOL``), and returns the rest mapped onto their primary atom's
+    radius/masks (same element and connectivity) with occupancy as the weight.
+
+    Args:
+        mol: Heavy-atom receptor Mol (the primary, highest-occupancy structure).
+        coords: Primary atom coordinates (n_primary, 3).
+        typing: Primary atom typing (radii + masks).
+        receptor_path: Source PDB path.
+
+    Returns:
+        ``_AltLocAtoms`` with the recovered atoms (possibly empty).
+    """
+    # key -> primary atom index, for inheriting type/radius onto the alternate.
+    key_to_idx: dict[tuple, int] = {}
+    for idx, atom in enumerate(mol.GetAtoms()):
+        info = atom.GetPDBResidueInfo()
+        if info is None:
+            continue
+        key = (
+            info.GetChainId(),
+            info.GetResidueNumber(),
+            info.GetInsertionCode(),
+            info.GetResidueName().strip(),
+            info.GetName().strip(),
+        )
+        key_to_idx[key] = idx
+
+    primary_tree = cKDTree(coords)
+    coords_out, radii, hydro, don, acc, wts = [], [], [], [], [], []
+    unmapped = 0
+    for line in receptor_path.read_text().splitlines():
+        if not line.startswith(("ATOM", "HETATM")):
+            continue
+        if line[16] == " ":  # no altLoc indicator
+            continue
+        if line[76:78].strip() == "H":  # united-atom: heavy atoms only
+            continue
+        xyz = np.array([float(line[30:38]), float(line[38:46]), float(line[46:54])])
+        if primary_tree.query(xyz)[0] <= _ALTLOC_MATCH_TOL:
+            continue  # this is the conformer RDKit kept
+        key = (
+            line[21],
+            int(line[22:26]),
+            line[26],
+            line[17:20].strip(),
+            line[12:16].strip(),
+        )
+        idx = key_to_idx.get(key)
+        if idx is None:
+            unmapped += 1
+            continue
+        try:
+            occ = float(line[54:60])
+        except ValueError:
+            occ = 1.0
+        coords_out.append(xyz)
+        radii.append(typing.radii[idx])
+        hydro.append(typing.is_hydrophobic[idx])
+        don.append(typing.is_hbond_donor[idx])
+        acc.append(typing.is_hbond_acceptor[idx])
+        wts.append(occ)
+
+    if unmapped:
+        logger.warning(
+            "altLoc recovery: %d dropped record(s) in %s had no matching primary "
+            "atom and were skipped",
+            unmapped,
+            receptor_path,
+        )
+
+    return _AltLocAtoms(
+        coords=np.array(coords_out, dtype=np.float64).reshape(-1, 3),
+        radii=np.array(radii, dtype=np.float64),
+        is_hydrophobic=np.array(hydro, dtype=bool),
+        is_hbond_donor=np.array(don, dtype=bool),
+        is_hbond_acceptor=np.array(acc, dtype=bool),
+        weights=np.array(wts, dtype=np.float64),
+    )
+
 
 class MoleculeDockBlock(MoleculeBlock):
     """MoleculeBlock for docking ligands into protein binding sites.
@@ -353,14 +461,18 @@ class MoleculeDockBlock(MoleculeBlock):
         """Load and validate receptor from a PDB file.
 
         Alternate locations (altLocs): ``Chem.MolFromPDBFile`` keeps a single,
-        highest-occupancy conformer per atom, which is the physically-correct
-        choice (an altLoc atom occupies position A *or* B with fractional
-        occupancy, not both). NOTE this diverges from smina/Vina: their
-        OpenBabel-based PDB parser keeps *every* altLoc conformer, double-counting
-        partial-occupancy atoms. On altLoc-containing structures (~40% of CASF2016)
-        smina therefore reports stronger repulsion/gauss/hydrophobic terms, so
-        cmxflow will not reproduce its score exactly there -- a smina quirk, not a
-        cmxflow defect.
+        highest-occupancy conformer per atom. For empirical scoring we instead
+        keep *all* altLoc conformers and scale each atom's pairwise contribution
+        by its crystallographic occupancy (``AtomTyping.weights``), so a residue
+        sampling two states contributes the ensemble-averaged interaction
+        (reduces to the single-atom result when occupancy == 1). See
+        ``_occupancy_weighted_protein``.
+
+        NOTE this differs from smina/Vina two ways: their OpenBabel parser keeps
+        every altLoc conformer but counts each at full weight (1.0), double-counting
+        partial-occupancy atoms; RDKit alone keeps only the top conformer. Our
+        occupancy weighting sits between the two, so on altLoc-containing structures
+        (~40% of CASF2016) cmxflow reproduces neither exactly by design.
 
         Raises:
             FileNotFoundError: If the receptor PDB file does not exist.
@@ -384,10 +496,81 @@ class MoleculeDockBlock(MoleculeBlock):
         if not self._has_3d_conformer(mol):
             raise ValueError(f"Receptor {receptor_path} does not have a 3D conformer.")
 
-        protein_conf = mol.GetConformer()
-        self._protein_coords = np.array(protein_conf.GetPositions())
-        self._protein_typing = get_atom_typing(mol)
+        self._protein_coords, self._protein_typing = self._occupancy_weighted_protein(
+            mol, receptor_path
+        )
         self._protein_tree = build_protein_tree(self._protein_coords)
+
+    @staticmethod
+    def _occupancy_weighted_protein(
+        mol: Chem.Mol, receptor_path: Path
+    ) -> tuple[np.ndarray, AtomTyping]:
+        """Protein coords + typing with altLoc conformers occupancy-weighted.
+
+        ``mol`` is the heavy-atom RDKit receptor (one highest-occupancy atom per
+        altLoc site). This recovers the altLoc conformers RDKit dropped directly
+        from the PDB text and appends them as extra protein atoms that inherit
+        their primary atom's type/radius (same element and connectivity). Every
+        atom's ``weights`` entry is its crystallographic occupancy (1.0 for
+        ordinary atoms), which the scorer multiplies into each pairwise term.
+
+        RDKit does the fragile work (bond perception, typing); the only added
+        parsing reads fixed-column altLoc/occupancy/coordinate fields, purely
+        additively. On any failure it falls back to the RDKit-only structure with
+        occupancy weights and logs a warning -- worst case equals plain RDKit.
+
+        Args:
+            mol: Heavy-atom receptor Mol from ``Chem.MolFromPDBFile``.
+            receptor_path: Path to the source PDB (re-read for dropped altLocs).
+
+        Returns:
+            ``(coords, typing)`` where ``coords`` is (n_atoms, 3) and ``typing``
+            carries per-atom radii/masks/occupancy weights, both extended with the
+            recovered altLoc atoms.
+        """
+        coords = np.array(mol.GetConformer().GetPositions())
+        typing = get_atom_typing(mol)
+
+        def occupancy(atom: Chem.Atom) -> float:
+            info = atom.GetPDBResidueInfo()
+            return info.GetOccupancy() if info is not None else 1.0
+
+        weights = np.array([occupancy(a) for a in mol.GetAtoms()], dtype=np.float64)
+
+        try:
+            extra = _recover_dropped_altlocs(mol, coords, typing, receptor_path)
+        except Exception:  # noqa: BLE001 - never let altLoc recovery break loading
+            logger.warning(
+                "altLoc recovery failed for %s; using highest-occupancy atoms only",
+                receptor_path,
+                exc_info=True,
+            )
+            extra = None
+
+        if extra is None or not len(extra.coords):
+            typing.weights = weights
+            return coords, typing
+
+        coords = np.vstack([coords, extra.coords])
+        typing = AtomTyping(
+            radii=np.concatenate([typing.radii, extra.radii]),
+            is_hydrophobic=np.concatenate(
+                [typing.is_hydrophobic, extra.is_hydrophobic]
+            ),
+            is_hbond_donor=np.concatenate(
+                [typing.is_hbond_donor, extra.is_hbond_donor]
+            ),
+            is_hbond_acceptor=np.concatenate(
+                [typing.is_hbond_acceptor, extra.is_hbond_acceptor]
+            ),
+            weights=np.concatenate([weights, extra.weights]),
+        )
+        logger.debug(
+            "recovered %d altLoc conformer atoms for %s",
+            len(extra.coords),
+            receptor_path,
+        )
+        return coords, typing
 
     def _prune_to_single_conformer(self, mol: Chem.Mol) -> Chem.Mol:
         """Reduce molecule to single conformer for docking.

@@ -263,6 +263,7 @@ class MoleculeDockBlock(MoleculeBlock):
         score_components: bool = True,
         score_strain: bool = False,
         score_only: bool = False,
+        receptor_most_populated_only: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize the molecular docking block.
@@ -279,6 +280,9 @@ class MoleculeDockBlock(MoleculeBlock):
                 and into multistart selection. Default False keeps
                 ``docking_score`` purely intermolecular (smina-comparable). The
                 strain value is always written as ``docking_strain`` regardless.
+            receptor_most_populated_only: If True, only the most populated altloc
+                is used in loaded PDB file. If False, all altlocs are used for
+                weighted scoring by occupancy.
             **kwargs: Passed to ``set_inputs``. Accepts the inputs ``receptor`` and
                 ``site_reference`` (file paths) and any mutable parameter by name
                 (``n_starts``, ``basin_hops``, ``max_iterations``, ``box_size``,
@@ -302,6 +306,7 @@ class MoleculeDockBlock(MoleculeBlock):
         self._score_components = score_components
         self._score_strain = score_strain
         self._score_only = score_only
+        self._most_populated_only = receptor_most_populated_only
         self._scaffold_store: ScaffoldPoseStore | None = None
         self._reference_seeded = False
 
@@ -457,7 +462,7 @@ class MoleculeDockBlock(MoleculeBlock):
                 self._scaffold_store.put(f"{self._index_namespace()}:{key}", posed)
             return
 
-    def _load_receptor(self) -> None:
+    def _load_receptor(self, most_populated_only: bool = False) -> None:
         """Load and validate receptor from a PDB file.
 
         Alternate locations (altLocs): ``Chem.MolFromPDBFile`` keeps a single,
@@ -473,6 +478,9 @@ class MoleculeDockBlock(MoleculeBlock):
         partial-occupancy atoms; RDKit alone keeps only the top conformer. Our
         occupancy weighting sits between the two, so on altLoc-containing structures
         (~40% of CASF2016) cmxflow reproduces neither exactly by design.
+
+        Args:
+            most_populated_only: Only load the most populated positions (no altlocs).
 
         Raises:
             FileNotFoundError: If the receptor PDB file does not exist.
@@ -497,13 +505,13 @@ class MoleculeDockBlock(MoleculeBlock):
             raise ValueError(f"Receptor {receptor_path} does not have a 3D conformer.")
 
         self._protein_coords, self._protein_typing = self._occupancy_weighted_protein(
-            mol, receptor_path
+            mol, receptor_path, most_populated_only=most_populated_only
         )
         self._protein_tree = build_protein_tree(self._protein_coords)
 
     @staticmethod
     def _occupancy_weighted_protein(
-        mol: Chem.Mol, receptor_path: Path
+        mol: Chem.Mol, receptor_path: Path, most_populated_only: bool = False
     ) -> tuple[np.ndarray, AtomTyping]:
         """Protein coords + typing with altLoc conformers occupancy-weighted.
 
@@ -522,6 +530,7 @@ class MoleculeDockBlock(MoleculeBlock):
         Args:
             mol: Heavy-atom receptor Mol from ``Chem.MolFromPDBFile``.
             receptor_path: Path to the source PDB (re-read for dropped altLocs).
+            most_populated_only: Only load the most populated positions (no altlocs).
 
         Returns:
             ``(coords, typing)`` where ``coords`` is (n_atoms, 3) and ``typing``
@@ -530,6 +539,10 @@ class MoleculeDockBlock(MoleculeBlock):
         """
         coords = np.array(mol.GetConformer().GetPositions())
         typing = get_atom_typing(mol)
+
+        if most_populated_only:
+            typing.weights = np.ones(len(coords))
+            return coords, typing
 
         def occupancy(atom: Chem.Atom) -> float:
             info = atom.GetPDBResidueInfo()
@@ -654,7 +667,7 @@ class MoleculeDockBlock(MoleculeBlock):
         mol = self._prune_to_single_conformer(mol)
 
         if self._protein_coords is None:
-            self._load_receptor()
+            self._load_receptor(most_populated_only=self._most_populated_only)
         assert isinstance(self._protein_coords, np.ndarray)
         assert isinstance(self._protein_typing, AtomTyping)
 

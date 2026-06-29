@@ -22,7 +22,9 @@ from cmxflow.operators.dock.score import (
     AtomTyping,
     EmpiricalParams,
     IntramolecularPairs,
+    NeighborList,
     empirical_score_and_grad_cached,
+    empirical_score_and_grad_fast,
     empirical_score_cached,
     get_atom_typing,
     intramolecular_score_and_grad,
@@ -1087,20 +1089,38 @@ def optimize_pose_cached(
     # --- Select objective (analytical grad or finite differences) ---
     use_grad = params.use_analytical_grad
 
+    # Reused Verlet neighbor list for the sparse hot path: built once here and
+    # shared across every L-BFGS-B eval and basin hop of this start, so the
+    # KD-tree query is paid only on rebuilds (ligand displacement > skin), not
+    # per call. Only when a protein_tree is supplied -- the tree-less callers
+    # (tests) keep the exact dense per-call path below.
+    neighbor_list = (
+        NeighborList(
+            protein_coords, protein_typing, ligand_typing, protein_tree=protein_tree
+        )
+        if protein_tree is not None
+        else None
+    )
+
     if use_grad:
 
         def objective(x: NDArray) -> tuple[float, NDArray]:
             transformed = _apply_pose_heavy(x)
             pos = np.array(transformed.GetConformer(ligand_conf_id).GetPositions())
-            score, atom_grad = empirical_score_and_grad_cached(
-                transformed,
-                protein_coords,
-                protein_typing,
-                ligand_conf_id,
-                score_params,
-                protein_tree=protein_tree,
-                ligand_typing=ligand_typing,
-            )
+            if neighbor_list is not None:
+                score, atom_grad = empirical_score_and_grad_fast(
+                    pos, neighbor_list, score_params, torsion_divisor
+                )
+            else:
+                score, atom_grad = empirical_score_and_grad_cached(
+                    transformed,
+                    protein_coords,
+                    protein_typing,
+                    ligand_conf_id,
+                    score_params,
+                    protein_tree=protein_tree,
+                    ligand_typing=ligand_typing,
+                )
             # Intramolecular ligand energy (search objective only). Both atoms of
             # each pair move, so its gradient adds to atom_grad and propagates
             # through the DOF chain rule below.

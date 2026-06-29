@@ -52,6 +52,7 @@ def score_grad_pairs(
     hydro_good: float,
     hydro_bad: float,
     hbond_good: float,
+    core_cutoff: float,
     prot_weight: np.ndarray,
     inv_divisor: float,
 ) -> tuple[float, float, float, float, np.ndarray]:
@@ -74,6 +75,10 @@ def score_grad_pairs(
         gauss1_offset, gauss1_width: Gaussian center/width.
         hydro_good, hydro_bad: Hydrophobic inner/outer cutoffs.
         hbond_good: H-bond inner cutoff.
+        core_cutoff: Euclidean interaction cutoff (Angstroms). Pairs with
+            ``eucl > core_cutoff`` are skipped, so a Verlet list built with a
+            skin margin scores the exact same set as a fresh ``core_cutoff``
+            query (``query_ball_point`` is inclusive, matched by ``> core_cutoff``).
         prot_weight: Per-protein-atom occupancy weight (n_prot,); every term and
             gradient contribution from protein atom ``b`` is scaled by it (1.0 for
             ordinary atoms, fractional for altLoc conformers).
@@ -101,6 +106,10 @@ def score_grad_pairs(
         dy = coords[a, 1] - protein_coords[b, 1]
         dz = coords[a, 2] - protein_coords[b, 2]
         eucl = np.sqrt(dx * dx + dy * dy + dz * dz)
+        # Verlet gate: skip pairs beyond the core cutoff so a skin-padded list
+        # scores identically to a fresh core-cutoff neighbor query.
+        if eucl > core_cutoff:
+            continue
         d = eucl - lig_radii[a] - prot_radii[b]
 
         z = (d - gauss1_offset) / gauss1_width

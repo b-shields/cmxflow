@@ -3,15 +3,18 @@
 import numpy as np
 import pytest
 from rdkit import Chem
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, rdMolDescriptors
 
 from cmxflow.operators.dock.score import (
     AtomTyping,
     EmpiricalParams,
+    NeighborList,
     ScoreComponents,
     build_protein_tree,
     empirical_score_and_grad_cached,
+    empirical_score_and_grad_fast,
     empirical_score_cached,
+    get_atom_typing,
 )
 
 # =============================================================================
@@ -183,5 +186,99 @@ class TestSparseCutoffPath:
         pt = _make_protein_typing(2, hydrophobic=True, donor=True, acceptor=True)
         tree = build_protein_tree(pc)
         score, grad = empirical_score_and_grad_cached(ligand, pc, pt, protein_tree=tree)
+        assert score == pytest.approx(0.0, abs=1e-12)
+        np.testing.assert_allclose(grad, 0.0, atol=1e-12)
+
+
+# =============================================================================
+# TestNeighborListFastPath
+# =============================================================================
+
+
+def _moved_mol(ligand: Chem.Mol, shift: np.ndarray) -> tuple[Chem.Mol, np.ndarray]:
+    """Copy ``ligand`` translated by ``shift``; return (mol, coords)."""
+    coords = np.array(ligand.GetConformer().GetPositions()) + shift
+    mol = Chem.Mol(ligand)
+    conf = mol.GetConformer()
+    for i, xyz in enumerate(coords):
+        conf.SetAtomPosition(i, xyz.tolist())
+    return mol, coords
+
+
+class TestNeighborListFastPath:
+    """The reused-Verlet fast path must equal a fresh per-call KD-tree query.
+
+    Same scored pair set (kernel gates at ``cutoff``), so results match the
+    cached path to summation order regardless of skin rebuilds. A rotatable
+    ligand is used so the torsion divisor is non-trivial (!= 1).
+    """
+
+    def _setup(self):
+        ligand = Chem.RemoveAllHs(_make_mol_3d("c1ccccc1CCO"))  # 1 rotatable bond
+        pc, pt = _protein_cloud(ligand)
+        lt = get_atom_typing(ligand)
+        n_rot = rdMolDescriptors.CalcNumRotatableBonds(ligand, strict=False)
+        params = EmpiricalParams()
+        divisor = 1.0 + params.w_rot * n_rot
+        assert divisor != 1.0  # guards that the divisor is actually exercised
+        return ligand, pc, pt, lt, params, divisor
+
+    def _cached(self, mol, pc, pt, lt):
+        tree = build_protein_tree(pc)
+        return empirical_score_and_grad_cached(
+            mol, pc, pt, protein_tree=tree, ligand_typing=lt
+        )
+
+    def test_matches_cached_first_eval(self) -> None:
+        """Fresh NeighborList scores identically to the per-call sparse path."""
+        ligand, pc, pt, lt, params, divisor = self._setup()
+        s_ref, g_ref = self._cached(ligand, pc, pt, lt)
+        coords = np.array(ligand.GetConformer().GetPositions())
+        nbr = NeighborList(pc, pt, lt)
+        s_fast, g_fast = empirical_score_and_grad_fast(coords, nbr, params, divisor)
+        assert s_fast == pytest.approx(s_ref, abs=1e-9)
+        np.testing.assert_allclose(g_fast, g_ref, atol=1e-9)
+
+    def test_reuse_within_skin_no_rebuild(self) -> None:
+        """A sub-skin move reuses the list yet still matches a fresh query."""
+        ligand, pc, pt, lt, params, divisor = self._setup()
+        nbr = NeighborList(pc, pt, lt, skin=2.0)
+        coords0 = np.array(ligand.GetConformer().GetPositions())
+        empirical_score_and_grad_fast(coords0, nbr, params, divisor)
+        ref_build = nbr._ref_coords  # noqa: SLF001 - asserting rebuild policy
+
+        mol1, coords1 = _moved_mol(ligand, np.array([0.5, 0.0, 0.0]))  # < skin
+        s_fast, g_fast = empirical_score_and_grad_fast(coords1, nbr, params, divisor)
+        assert nbr._ref_coords is ref_build  # no rebuild  # noqa: SLF001
+        s_ref, g_ref = self._cached(mol1, pc, pt, lt)
+        assert s_fast == pytest.approx(s_ref, abs=1e-9)
+        np.testing.assert_allclose(g_fast, g_ref, atol=1e-9)
+
+    def test_rebuild_past_skin_matches_fresh(self) -> None:
+        """A move beyond the skin rebuilds and still matches a fresh query."""
+        ligand, pc, pt, lt, params, divisor = self._setup()
+        nbr = NeighborList(pc, pt, lt, skin=2.0)
+        coords0 = np.array(ligand.GetConformer().GetPositions())
+        empirical_score_and_grad_fast(coords0, nbr, params, divisor)
+        ref_build = nbr._ref_coords  # noqa: SLF001
+
+        mol1, coords1 = _moved_mol(ligand, np.array([3.0, 0.0, 0.0]))  # > skin
+        s_fast, g_fast = empirical_score_and_grad_fast(coords1, nbr, params, divisor)
+        assert nbr._ref_coords is not ref_build  # rebuilt  # noqa: SLF001
+        s_ref, g_ref = self._cached(mol1, pc, pt, lt)
+        assert s_fast == pytest.approx(s_ref, abs=1e-9)
+        np.testing.assert_allclose(g_fast, g_ref, atol=1e-9)
+
+    def test_empty_list_far_ligand(self) -> None:
+        """Ligand beyond cutoff+skin of every protein atom: zero score/grad."""
+        ligand = Chem.RemoveAllHs(_make_mol_3d("c1ccccc1CCO"))
+        lt = get_atom_typing(ligand)
+        pc = np.array(ligand.GetConformer().GetPositions()).mean(axis=0) + np.array(
+            [[100.0, 0.0, 0.0], [100.0, 2.0, 0.0]]
+        )
+        pt = _make_protein_typing(2, hydrophobic=True, donor=True, acceptor=True)
+        coords = np.array(ligand.GetConformer().GetPositions())
+        nbr = NeighborList(pc, pt, lt)
+        score, grad = empirical_score_and_grad_fast(coords, nbr, EmpiricalParams(), 1.0)
         assert score == pytest.approx(0.0, abs=1e-12)
         np.testing.assert_allclose(grad, 0.0, atol=1e-12)

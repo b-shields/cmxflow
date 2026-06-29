@@ -437,6 +437,12 @@ def hbond_term(
 # >=3.6 Å, where even the Gaussian tail is ~1e-9. So 8 Å is numerically exact.
 INTERACTION_CUTOFF: float = 8.0
 
+# Verlet skin margin (Angstroms). A reused neighbor list is built at
+# ``INTERACTION_CUTOFF + NEIGHBOR_SKIN`` and stays exact until a ligand atom
+# drifts past the skin, so the per-minimize rebuild count trades against pairs
+# scored per call. 2.0 Å is a safe default for local L-BFGS-B trajectories.
+NEIGHBOR_SKIN: float = 2.0
+
 
 def build_protein_tree(protein_coords: np.ndarray) -> cKDTree:
     """Build a KD-tree over protein atoms for neighbor queries.
@@ -570,6 +576,7 @@ def _sparse_score_grad(
     protein_typing: "AtomTyping",
     params: EmpiricalParams,
     inv_divisor: float,
+    cutoff: float = INTERACTION_CUTOFF,
 ) -> tuple[float, float, float, float, NDArray]:
     """Gather per-pair arrays for the neighbor list and run the numba kernel.
 
@@ -586,16 +593,22 @@ def _sparse_score_grad(
         protein_typing: Protein atom typing.
         params: Scoring parameters.
         inv_divisor: ``1 / (1 + w_rot * n_rot)`` (applied to the gradient only).
+        cutoff: Euclidean core cutoff passed to the kernel's Verlet gate. Pairs
+            already within ``cutoff`` (the per-call path) are unaffected; a
+            skin-padded Verlet list is trimmed back to ``cutoff`` here.
 
     Returns:
         ``(gauss1_raw, repulsion_raw, hydrophobic_raw, hbond_raw, atom_grad)``.
     """
     kernel = _get_score_grad_kernel()
+    # ``asarray`` (not ``astype``) avoids a copy when indices are already int64
+    # (intp on 64-bit), which is the common case for both the per-call and
+    # reused-Verlet paths.
     result = kernel(
         np.ascontiguousarray(ligand_coords),
         protein_coords,
-        i_idx.astype(np.int64),
-        j_idx.astype(np.int64),
+        np.asarray(i_idx, dtype=np.int64),
+        np.asarray(j_idx, dtype=np.int64),
         ligand_typing.radii,
         protein_typing.radii,
         ligand_typing.is_hydrophobic,
@@ -613,6 +626,7 @@ def _sparse_score_grad(
         params.hydro_good,
         params.hydro_bad,
         params.hbond_good,
+        cutoff,
         protein_typing.weights,
         inv_divisor,
     )
@@ -811,6 +825,7 @@ def empirical_score_cached(
             protein_typing,
             params,
             1.0,
+            cutoff=cutoff,
         )
     else:
         distances = compute_surface_distances(
@@ -933,6 +948,7 @@ def empirical_score_and_grad_cached(
             protein_typing,
             params,
             1.0 / torsion_divisor,
+            cutoff=cutoff,
         )
         score = (
             params.w_gauss1 * g1_raw
@@ -978,6 +994,107 @@ def empirical_score_and_grad_cached(
     unit = np.where(eucl[:, :, None] > 1e-8, unit, 0.0)
     atom_grad = np.einsum("ij,ijk->ik", df_dd, unit)  # (n_heavy, 3)
 
+    return float(score), atom_grad
+
+
+class NeighborList:
+    """Reusable (Verlet) ligand/protein neighbor-pair list for one local minimize.
+
+    The per-call KD-tree query in ``empirical_score_and_grad_cached`` dominates
+    the optimizer hot path, yet the ligand barely moves between gradient evals.
+    This builds the pair list once at ``cutoff + skin`` and reuses it, rebuilding
+    only when a ligand atom has moved more than ``skin`` since the last build.
+    The kernel gates each pair at ``cutoff`` (see ``score_grad_pairs``), so the
+    scored set is identical to a fresh ``cutoff`` query for as long as no atom has
+    drifted past the skin -- which the rebuild check guarantees. Results therefore
+    match the per-call path to summation order (~1e-13).
+
+    Built once per ``optimize_pose_cached`` start; persists across all L-BFGS-B
+    iterations and basin hops of that start.
+    """
+
+    def __init__(
+        self,
+        protein_coords: np.ndarray,
+        protein_typing: AtomTyping,
+        ligand_typing: AtomTyping,
+        cutoff: float = INTERACTION_CUTOFF,
+        skin: float = NEIGHBOR_SKIN,
+        protein_tree: cKDTree | None = None,
+    ) -> None:
+        self.protein_coords = np.ascontiguousarray(protein_coords)
+        self.protein_typing = protein_typing
+        self.ligand_typing = ligand_typing
+        self.cutoff = cutoff
+        self.skin = skin
+        # Reuse the caller's tree when given (it spans the same atoms); the build
+        # radius (cutoff + skin) is just a query argument, not baked into the tree.
+        self._tree = (
+            protein_tree
+            if protein_tree is not None
+            else build_protein_tree(self.protein_coords)
+        )
+        self._ref_coords: np.ndarray | None = None  # ligand coords at last build
+        self.i_idx: NDArray[np.intp] = np.empty(0, dtype=np.intp)
+        self.j_idx: NDArray[np.intp] = np.empty(0, dtype=np.intp)
+
+    def update(self, ligand_coords: np.ndarray) -> None:
+        """Rebuild the pair list iff a ligand atom moved more than ``skin``."""
+        if self._ref_coords is not None:
+            max_disp = np.sqrt(
+                ((ligand_coords - self._ref_coords) ** 2).sum(axis=1).max()
+            )
+            if max_disp <= self.skin:
+                return  # cached list still covers every within-cutoff pair
+        self.i_idx, self.j_idx = _neighbor_pairs(
+            ligand_coords, self._tree, self.cutoff + self.skin
+        )
+        self._ref_coords = ligand_coords.copy()
+
+
+def empirical_score_and_grad_fast(
+    ligand_coords: np.ndarray,
+    neighbor_list: NeighborList,
+    params: EmpiricalParams,
+    torsion_divisor: float,
+) -> tuple[float, NDArray]:
+    """Score + per-atom gradient over a reused Verlet neighbor list.
+
+    Optimizer hot path. Unlike ``empirical_score_and_grad_cached`` this takes
+    coordinates directly -- no Mol, so no per-call conformer extraction or
+    ``CalcNumRotatableBonds`` -- and reuses ``neighbor_list``'s KD-tree pairs
+    across evals, paying the query only on rebuilds. Numerically equal to the
+    cached path (same pair set, summation-order ~1e-13) at the same ``cutoff``.
+
+    Args:
+        ligand_coords: Ligand heavy-atom coordinates (n_lig, 3).
+        neighbor_list: Verlet list for this minimize; updated in place.
+        params: Scoring parameters.
+        torsion_divisor: ``1 + w_rot * n_rot`` (fixed topology; computed once by
+            the caller). Scales the score and, via ``1/torsion_divisor``, the grad.
+
+    Returns:
+        Tuple of (score, atom_grad) with atom_grad shape (n_lig, 3).
+    """
+    ligand_coords = np.ascontiguousarray(ligand_coords)
+    neighbor_list.update(ligand_coords)
+    g1_raw, rep_raw, hydro_raw, hb_raw, atom_grad = _sparse_score_grad(
+        ligand_coords,
+        neighbor_list.protein_coords,
+        neighbor_list.i_idx,
+        neighbor_list.j_idx,
+        neighbor_list.ligand_typing,
+        neighbor_list.protein_typing,
+        params,
+        1.0 / torsion_divisor,
+        cutoff=neighbor_list.cutoff,
+    )
+    score = (
+        params.w_gauss1 * g1_raw
+        + params.w_repulsion * rep_raw
+        + params.w_hydrophobic * hydro_raw
+        + params.w_hbond * hb_raw
+    ) / torsion_divisor
     return float(score), atom_grad
 
 

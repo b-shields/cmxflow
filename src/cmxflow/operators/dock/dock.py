@@ -341,9 +341,9 @@ class MoleculeDockBlock(MoleculeBlock):
             #   need orientation coverage (rotations), not torsion diversity, so
             #   they get few/no extra conformers; flexible ligands get more, which
             #   is also where the (embedding) cost is actually warranted.
-            Continuous("conf_scale", 2.0, 1.0, 4.0),
+            Continuous("conf_scale", 3.0, 1.0, 4.0),
             Integer("max_confs", 32, 1, 64),
-            Integer("n_center_rotations", 512, 128, 1024),
+            Integer("n_center_rotations", 1024, 128, 2048),
             Integer("n_translation_samples", 128, 64, 256),
             Continuous("center_fraction", 0.5, 0.25, 1.0),
             Continuous("diversity_rmsd", 1.0, 0.5, 2.0),

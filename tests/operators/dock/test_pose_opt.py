@@ -800,7 +800,7 @@ class TestSingleDOFStep:
 
 
 class TestDgRestarts:
-    """optimize_dg_restarts: input-pose start 0, count parity, rigid delegation."""
+    """optimize_dg_restarts: centered start 0, count, n_extra_confs rigid path."""
 
     def _system(self, smiles: str = "CCOCCOCc1ccccc1"):
         """Return (ligand_heavy, protein_coords, protein_typing, score_params)."""
@@ -819,22 +819,19 @@ class TestDgRestarts:
             typ,
             PoseParams(n_starts=5, seed=0),
             sp,
-            max_tries=64,
-            max_distance_geometry_samples=8,
+            n_extra_confs=8,
         )
         assert len(starts) >= 1
         first = np.array(starts[0][1].GetConformer().GetPositions())
         ref = np.array(lig.GetConformer().GetPositions())
         assert np.allclose(first, ref)
 
-    def test_count_matches_sobol_parity(self) -> None:
-        """Returns n_starts starts (input pose plus n_starts - 1 sampled)."""
+    def test_count_matches_n_starts(self) -> None:
+        """Returns n_starts starts (centered input plus n_starts - 1 sampled)."""
         lig, prot, typ, sp = self._system()
         params = PoseParams(n_starts=9, seed=0)
-        starts = optimize_dg_restarts(
-            lig, prot, typ, params, sp, max_tries=64, max_distance_geometry_samples=8
-        )
-        assert len(starts) == params.n_starts - 1
+        starts = optimize_dg_restarts(lig, prot, typ, params, sp, n_extra_confs=8)
+        assert len(starts) == params.n_starts
 
     def test_n_starts_one_returns_only_input(self) -> None:
         lig, prot, typ, sp = self._system()
@@ -844,25 +841,21 @@ class TestDgRestarts:
             typ,
             PoseParams(n_starts=1, seed=0),
             sp,
-            max_tries=64,
-            max_distance_geometry_samples=8,
+            n_extra_confs=8,
         )
         assert len(starts) == 1
 
-    def test_rigid_delegates_to_sobol(self) -> None:
-        """rigid=True forwards to the rigid Sobol path (no conformer diversity)."""
+    def test_rigid_path_skips_conformer_embedding(self) -> None:
+        """n_extra_confs=0 (rigid path) screens the input conformer only -- no DG
+        ensemble is embedded."""
         lig, prot, typ, sp = self._system()
         params = PoseParams(n_starts=5, seed=0)
-        sentinel = [(0.0, lig)]
         with patch(
-            "cmxflow.operators.dock.pose._rigid_sobol_restarts",
-            return_value=sentinel,
-        ) as mock_sobol:
-            out = optimize_dg_restarts(
-                lig, prot, typ, params, sp, rigid=True, max_tries=64
-            )
-        mock_sobol.assert_called_once()
-        assert out is sentinel
+            "cmxflow.operators.dock.pose.rdDistGeom.EmbedMultipleConfs"
+        ) as mock_embed:
+            starts = optimize_dg_restarts(lig, prot, typ, params, sp, n_extra_confs=0)
+        mock_embed.assert_not_called()
+        assert len(starts) >= 1
 
     def test_starts_are_diverse_from_input(self) -> None:
         """Non-input starts explore conformers/placements away from the input."""
@@ -873,8 +866,7 @@ class TestDgRestarts:
             typ,
             PoseParams(n_starts=9, seed=0),
             sp,
-            max_tries=128,
-            max_distance_geometry_samples=8,
+            n_extra_confs=8,
         )
         ref = np.array(lig.GetConformer().GetPositions())
         moved = [
@@ -897,8 +889,7 @@ class TestDgRestarts:
             typ,
             PoseParams(n_starts=9, seed=0),
             sp,
-            max_tries=256,
-            max_distance_geometry_samples=8,
+            n_extra_confs=8,
         )
         centroids = np.array(
             [

@@ -321,8 +321,8 @@ class MoleculeDockBlock(MoleculeBlock):
             # Pose search. Per-mol runtime ~ n_starts x (1 + basin_hops) local
             # minima, each ~max_iterations L-BFGS-B steps; the bounds keep the
             # worst-case config tractable.
-            #   n_starts hi=33: start diversity saturates near 32.
-            Integer("n_starts", 33, 1, 65),
+            #   n_starts: number of L-BFGS-B seeds refined per molecule.
+            Integer("n_starts", 32, 1, 65),
             #   basin_hops: extra iterated-local-search refinement per start.
             #   Default 0 (init + single minimize); hi=16 caps runtime.
             Integer("basin_hops", 0, 0, 16),
@@ -331,10 +331,15 @@ class MoleculeDockBlock(MoleculeBlock):
             Continuous("box_size", 10.0, 5.0, 20.0),
             Categorical("rigid", False, [True, False]),
             # Initialization grid: max_distance_geometry_samples (M) ETKDGv3
-            # conformers crossed with sobol_max_tries // M Sobol rigid placements;
-            # the lowest-scoring starts at least diversity_rmsd apart are kept.
-            Integer("sobol_max_tries", 2048, 512, 4096),
+            # conformers, each placed at the site center over n_center_rotations
+            # orientations plus n_translation_samples nearby Sobol placements. A
+            # center_fraction quota of n_starts is reserved for center placements
+            # (kept even when clashing); the rest are the lowest-scoring, at least
+            # diversity_rmsd apart.
             Integer("max_distance_geometry_samples", 32, 1, 64),
+            Integer("n_center_rotations", 128, 0, 512),
+            Integer("n_translation_samples", 128, 0, 512),
+            Continuous("center_fraction", 0.5, 0.0, 1.0),
             Continuous("diversity_rmsd", 1.0, 0.0, 5.0),
             # Mode toggle: scaffold-indexed (template) docking on/off
             Categorical("index_poses", False, [True, False]),
@@ -732,6 +737,12 @@ class MoleculeDockBlock(MoleculeBlock):
                 translation_bounds=(-box_size, box_size),
                 n_starts=self.get_param("n_starts"),
             )
+            # Rigid docking screens the input conformer only (no torsion search,
+            # so conformer diversity is wasted); flexible docking adds a DG
+            # conformer ensemble. Both run through the same screening method.
+            n_extra_confs = (
+                0 if rigid_only else self.get_param("max_distance_geometry_samples")
+            )
             starts = optimize_dg_restarts(
                 mol,
                 protein_coords=self._protein_coords,
@@ -739,11 +750,10 @@ class MoleculeDockBlock(MoleculeBlock):
                 params=init_params,
                 score_params=score_params,
                 site_center=site_center,
-                rigid=rigid_only,
-                max_tries=self.get_param("sobol_max_tries"),
-                max_distance_geometry_samples=self.get_param(
-                    "max_distance_geometry_samples"
-                ),
+                n_extra_confs=n_extra_confs,
+                n_center_rotations=self.get_param("n_center_rotations"),
+                n_translation_samples=self.get_param("n_translation_samples"),
+                center_fraction=self.get_param("center_fraction"),
                 diversity_rmsd=self.get_param("diversity_rmsd"),
                 protein_tree=self._protein_tree,
             )

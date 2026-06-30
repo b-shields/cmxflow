@@ -140,12 +140,14 @@ class TestPoseSearchParams:
     """Pose-search params are exposed with their defaults and threaded through."""
 
     DEFAULTS = {
-        "n_starts": 33,
+        "n_starts": 32,
         "basin_hops": 0,
         "max_iterations": 100,
         "box_size": 10.0,
-        "sobol_max_tries": 2048,
         "max_distance_geometry_samples": 32,
+        "n_center_rotations": 128,
+        "n_translation_samples": 128,
+        "center_fraction": 0.5,
         "diversity_rmsd": 1.0,
     }
 
@@ -161,7 +163,9 @@ class TestPoseSearchParams:
 
         overrides: dict[str, Any] = {
             "n_starts": 16,
-            "sobol_max_tries": 1024,
+            "n_center_rotations": 64,
+            "n_translation_samples": 96,
+            "center_fraction": 0.25,
             "max_distance_geometry_samples": 8,
             "diversity_rmsd": 1.5,
             "basin_hops": 5,
@@ -176,7 +180,9 @@ class TestPoseSearchParams:
         PoseParams; n_starts_used records the actual start count."""
         block = _make_block()
         block.set_inputs(
-            sobol_max_tries=1024,
+            n_center_rotations=64,
+            n_translation_samples=96,
+            center_fraction=0.25,
             max_distance_geometry_samples=8,
             diversity_rmsd=1.5,
             basin_hops=7,
@@ -205,8 +211,10 @@ class TestPoseSearchParams:
 
         assert result is not None
         # Init params threaded into the DG call.
-        assert init_kwargs["max_tries"] == 1024
-        assert init_kwargs["max_distance_geometry_samples"] == 8
+        assert init_kwargs["n_center_rotations"] == 64
+        assert init_kwargs["n_translation_samples"] == 96
+        assert init_kwargs["center_fraction"] == pytest.approx(0.25)
+        assert init_kwargs["n_extra_confs"] == 8
         assert init_kwargs["diversity_rmsd"] == pytest.approx(1.5)
         # basin_hops threaded into refine PoseParams.
         assert refine_params[0].basin_hops == 7

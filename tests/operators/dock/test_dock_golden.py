@@ -32,7 +32,6 @@ GOLDEN_CASES = {
             n_starts=32,
             basin_hops=0,
             max_distance_geometry_samples=32,
-            sobol_max_tries=2048,
             diversity_rmsd=1.0,
         ),
         -9.331039143493218,
@@ -42,7 +41,6 @@ GOLDEN_CASES = {
         dict(
             rigid=True,
             n_starts=4,
-            sobol_max_tries=512,
             max_distance_geometry_samples=32,
             diversity_rmsd=1.0,
             basin_hops=0,
@@ -55,7 +53,6 @@ GOLDEN_CASES = {
             rigid=False,
             n_starts=2,
             max_distance_geometry_samples=4,
-            sobol_max_tries=512,
             diversity_rmsd=1.0,
             basin_hops=3,
         ),
@@ -130,7 +127,7 @@ def test_defaults_reach_golden_minimum() -> None:
 # cache and is docked with a single constrained local search. Tests run in a tmp
 # cwd so the conventional ./.cmxflow/scaffold_index.db is created/discovered there.
 INDEX_SEARCH: dict[str, Any] = dict(
-    n_starts=8, max_distance_geometry_samples=8, sobol_max_tries=512, basin_hops=0
+    n_starts=8, max_distance_geometry_samples=8, basin_hops=0
 )
 INDEXED_GOLDEN_SCORE = -8.564884085787382
 INDEXED_GOLDEN_POSE = "golden_pose_indexed.npy"

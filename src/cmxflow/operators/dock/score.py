@@ -568,6 +568,7 @@ def _get_score_grad_kernel():
 
 
 _SCORE_POCKET_KERNEL = None
+_SCORE_POCKET_BATCH_KERNEL = None
 
 
 def _get_score_pocket_kernel():
@@ -578,6 +579,16 @@ def _get_score_pocket_kernel():
 
         _SCORE_POCKET_KERNEL = score_pocket
     return _SCORE_POCKET_KERNEL
+
+
+def _get_score_pocket_batch_kernel():
+    """Return the cached numba ``score_pocket_batch`` kernel, import on first use."""
+    global _SCORE_POCKET_BATCH_KERNEL
+    if _SCORE_POCKET_BATCH_KERNEL is None:
+        from cmxflow.operators.dock._kernels import score_pocket_batch
+
+        _SCORE_POCKET_BATCH_KERNEL = score_pocket_batch
+    return _SCORE_POCKET_BATCH_KERNEL
 
 
 def build_pocket_subset(
@@ -676,6 +687,60 @@ def empirical_score_pocket(
         + params.w_hbond * hb
     ) / torsion_divisor
     return float(score)
+
+
+def empirical_score_pocket_batch(
+    coords_batch: np.ndarray,
+    pocket_coords: np.ndarray,
+    pocket_typing: "AtomTyping",
+    ligand_typing: "AtomTyping",
+    params: EmpiricalParams,
+    torsion_divisor: float,
+    cutoff: float = INTERACTION_CUTOFF,
+) -> NDArray[np.floating]:
+    """Empirical score for K candidate poses over a pre-built pocket subset.
+
+    Batched restart-screening hot path: one numba dispatch scores the whole
+    candidate grid (vs one call per candidate), and the caller generates the
+    coordinates with vectorized numpy rather than per-candidate RDKit conformer
+    copies. Per-pose result equals :func:`empirical_score_pocket`.
+
+    Args:
+        coords_batch: Candidate ligand coordinates (K, n_lig, 3).
+        pocket_coords: Pocket protein coordinates (n_pocket, 3).
+        pocket_typing: Pocket atom typing (from ``build_pocket_subset``).
+        ligand_typing: Ligand atom typing.
+        params: Scoring parameters.
+        torsion_divisor: ``1 + w_rot * n_rot`` (fixed topology; computed once).
+        cutoff: Euclidean interaction cutoff.
+
+    Returns:
+        ``(K,)`` array of empirical scores.
+    """
+    kernel = _get_score_pocket_batch_kernel()
+    raws = kernel(
+        np.ascontiguousarray(coords_batch, dtype=np.float64),
+        pocket_coords,
+        ligand_typing.radii,
+        pocket_typing.radii,
+        ligand_typing.is_hydrophobic,
+        pocket_typing.is_hydrophobic,
+        ligand_typing.is_hbond_donor,
+        ligand_typing.is_hbond_acceptor,
+        pocket_typing.is_hbond_donor,
+        pocket_typing.is_hbond_acceptor,
+        pocket_typing.weights,
+        params.gauss1_offset,
+        params.gauss1_width,
+        params.hydro_good,
+        params.hydro_bad,
+        params.hbond_good,
+        cutoff,
+    )
+    weights = np.array(
+        [params.w_gauss1, params.w_repulsion, params.w_hydrophobic, params.w_hbond]
+    )
+    return (raws @ weights) / torsion_divisor
 
 
 def _sparse_score_grad(

@@ -28,7 +28,7 @@ from cmxflow.operators.dock.score import (
     empirical_score_and_grad_cached,
     empirical_score_and_grad_fast,
     empirical_score_cached,
-    empirical_score_pocket,
+    empirical_score_pocket_batch,
     get_atom_typing,
     intramolecular_score_and_grad,
 )
@@ -761,80 +761,107 @@ def optimize_dg_restarts(
         protein_coords, protein_typing, anchor, pocket_radius, protein_tree=protein_tree
     )
 
-    def _score(pos: NDArray) -> float:
-        return empirical_score_pocket(
-            pos,
-            pocket_coords,
-            pocket_typing,
-            ligand_typing,
-            score_params,
-            torsion_divisor,
-        )
+    # --- Step 4: build candidate coordinates (vectorized) and batch-score ---
+    # Geometry is pure numpy -- no per-candidate RDKit Mol -- and the rotation
+    # matrices are shared across conformers, so build them once. Mol objects are
+    # materialized only for the selected starts (Step 5).
+    center_rmats = Rotation.from_rotvec(np.asarray(center_rotvecs)).as_matrix()
+    spread_rmats = (
+        Rotation.from_rotvec(np.asarray(spread_rotvecs)).as_matrix()
+        if spread_rotvecs
+        else np.zeros((0, 3, 3))
+    )
+    spread_t = np.asarray(spread_trans) if spread_trans else np.zeros((0, 3))
 
-    # --- Step 4: score the conformer x placement grid (scoring only, no min) ---
-    # center_grid[0] is conformer 0 at the identity placement = the input pose
-    # translated to the anchor, which becomes the unconditional start 0.
-    Cand = tuple[float, Chem.Mol, NDArray]
-    center_grid: list[Cand] = []
-    spread_grid: list[Cand] = []
-    for conf, centroid in zip(ensemble, centroids):
-        offset = anchor - centroid
-        for rv in center_rotvecs:
-            cand = apply_rigid_transform(
-                conf, offset, Rotation.from_rotvec(rv), 0, centroid
+    # A candidate conformer rotated about its centroid and shifted so the centroid
+    # lands at ``anchor + t`` is ``(coords - centroid) @ R^T + anchor + t``. The
+    # ordering (conformer 0 center group first, identity placement first) makes the
+    # first row the input pose at the anchor -- the unconditional start 0.
+    blocks: list[NDArray] = []
+    conf_idx: list[int] = []
+    is_center: list[bool] = []
+    for ci, (conf, centroid) in enumerate(zip(ensemble, centroids)):
+        centered = _positions(conf) - centroid  # (n_lig, 3)
+        cpos = np.einsum("mij,nj->mni", center_rmats, centered) + anchor
+        blocks.append(cpos)
+        conf_idx += [ci] * cpos.shape[0]
+        is_center += [True] * cpos.shape[0]
+        if spread_rmats.shape[0]:
+            spos = (
+                np.einsum("mij,nj->mni", spread_rmats, centered)
+                + anchor
+                + spread_t[:, None, :]
             )
-            pos = _positions(cand)
-            center_grid.append((_score(pos), cand, pos))
-        for t, rv in zip(spread_trans, spread_rotvecs):
-            cand = apply_rigid_transform(
-                conf, t + offset, Rotation.from_rotvec(rv), 0, centroid
-            )
-            pos = _positions(cand)
-            spread_grid.append((_score(pos), cand, pos))
+            blocks.append(spos)
+            conf_idx += [ci] * spos.shape[0]
+            is_center += [False] * spos.shape[0]
+
+    coords_batch = np.ascontiguousarray(np.concatenate(blocks, axis=0))
+    is_center_arr = np.array(is_center, dtype=bool)
+    scores = empirical_score_pocket_batch(
+        coords_batch,
+        pocket_coords,
+        pocket_typing,
+        ligand_typing,
+        score_params,
+        torsion_divisor,
+    )
 
     # --- Step 5: select start 0 + reserved center seeds + score-ranked fill ---
-    def _diverse(pos: NDArray, kept: list[Cand]) -> bool:
+    def _diverse(pos: NDArray, kept_pos: list[NDArray]) -> bool:
         return all(
-            np.sqrt(np.mean(np.sum((pos - k[2]) ** 2, axis=1))) >= diversity_rmsd
-            for k in kept
+            np.sqrt(np.mean(np.sum((pos - kp) ** 2, axis=1))) >= diversity_rmsd
+            for kp in kept_pos
         )
 
-    passed: list[Cand] = [center_grid[0]]
+    def _build(idx: int) -> tuple[float, Chem.Mol]:
+        """Materialize the RDKit Mol for a selected candidate (heavy-atom)."""
+        mol = Chem.Mol(ensemble[conf_idx[idx]])
+        conf = mol.GetConformer(0)
+        for i, xyz in enumerate(coords_batch[idx]):
+            conf.SetAtomPosition(i, (float(xyz[0]), float(xyz[1]), float(xyz[2])))
+        return float(scores[idx]), mol
+
+    # Candidate 0 is conformer 0 at the identity placement (input pose at anchor).
+    kept: list[int] = [0]
+    kept_pos: list[NDArray] = [coords_batch[0]]
     n_keep = params.n_starts
-    if n_keep <= 1:
-        return [(s, m) for s, m, _ in passed]
+    order = np.argsort(scores, kind="stable")
 
-    kept_ids: set[int] = {id(center_grid[0])}
+    if n_keep > 1:
+        kept_set = {0}
+        # Reserve a center-group quota so well-placed (but clashing) center seeds
+        # are not outranked by low-clash peripheral poses.
+        center_target = max(1, round(center_fraction * n_keep))
+        for i in order:
+            if len(kept) >= center_target or len(kept) >= n_keep:
+                break
+            if i in kept_set or not is_center_arr[i]:
+                continue
+            if _diverse(coords_batch[i], kept_pos):
+                kept.append(int(i))
+                kept_set.add(int(i))
+                kept_pos.append(coords_batch[i])
 
-    # Reserve a center-group quota so well-placed (but clashing) center seeds are
-    # not outranked by low-clash peripheral poses.
-    center_target = max(1, round(center_fraction * n_keep))
-    for cand in sorted(center_grid[1:], key=lambda t: t[0]):
-        if len(passed) >= center_target or len(passed) >= n_keep:
-            break
-        if _diverse(cand[2], passed):
-            passed.append(cand)
-            kept_ids.add(id(cand))
-
-    # Fill the rest from all remaining candidates by ascending score.
-    remaining = [c for c in center_grid + spread_grid if id(c) not in kept_ids]
-    for cand in sorted(remaining, key=lambda t: t[0]):
-        if len(passed) >= n_keep:
-            break
-        if _diverse(cand[2], passed):
-            passed.append(cand)
-            kept_ids.add(id(cand))
+        # Fill the rest from all remaining candidates by ascending score.
+        for i in order:
+            if len(kept) >= n_keep:
+                break
+            if i in kept_set:
+                continue
+            if _diverse(coords_batch[i], kept_pos):
+                kept.append(int(i))
+                kept_set.add(int(i))
+                kept_pos.append(coords_batch[i])
 
     logger.info(
-        "dg_restarts: %d confs x (1 + %d center rot + %d spread) -> %d starts "
-        "(%d center reserved).",
+        "dg_restarts: %d confs x (1 + %d center rot + %d spread) -> %d starts.",
         len(ensemble),
         n_center_rotations,
         n_translation_samples,
-        len(passed),
-        center_target,
+        len(kept),
     )
-    return [(s, m) for s, m, _ in passed]
+    return [_build(i) for i in kept]
 
 
 # =============================================================================

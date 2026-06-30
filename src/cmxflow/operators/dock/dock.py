@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 from rdkit import Chem
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, rdMolDescriptors
 from scipy.spatial import cKDTree
 
 from cmxflow.operators.base import MoleculeBlock
@@ -312,7 +312,7 @@ class MoleculeDockBlock(MoleculeBlock):
 
         # Register mutable parameters
         self.mutable(
-            # Vinardo score weights
+            # Empirical score weights
             Continuous("w_gauss1", -0.045, -0.065, -0.025),
             Continuous("w_repulsion", 0.8, 0.8, 1.2),
             Continuous("w_hydrophobic", -0.035, -0.065, -0.015),
@@ -322,25 +322,31 @@ class MoleculeDockBlock(MoleculeBlock):
             # minima, each ~max_iterations L-BFGS-B steps; the bounds keep the
             # worst-case config tractable.
             #   n_starts: number of L-BFGS-B seeds refined per molecule.
-            Integer("n_starts", 32, 1, 65),
+            Integer("n_starts", 32, 16, 64),
             #   basin_hops: extra iterated-local-search refinement per start.
             #   Default 0 (init + single minimize); hi=16 caps runtime.
-            Integer("basin_hops", 0, 0, 16),
+            Integer("basin_hops", 0, 0, 8),
             #   max_iterations hi=200: L-BFGS-B converges well before then.
             Integer("max_iterations", 100, 50, 200),
             Continuous("box_size", 10.0, 5.0, 20.0),
             Categorical("rigid", False, [True, False]),
-            # Initialization grid: max_distance_geometry_samples (M) ETKDGv3
-            # conformers, each placed at the site center over n_center_rotations
-            # orientations plus n_translation_samples nearby Sobol placements. A
-            # center_fraction quota of n_starts is reserved for center placements
-            # (kept even when clashing); the rest are the lowest-scoring, at least
-            # diversity_rmsd apart.
-            Integer("max_distance_geometry_samples", 32, 1, 64),
-            Integer("n_center_rotations", 128, 0, 512),
-            Integer("n_translation_samples", 128, 0, 512),
-            Continuous("center_fraction", 0.5, 0.0, 1.0),
-            Continuous("diversity_rmsd", 1.0, 0.0, 5.0),
+            # Initialization grid: the DG conformer ensemble (sized by ligand
+            # flexibility, see conf_scale/max_confs) is placed at the site center
+            # over n_center_rotations orientations plus n_translation_samples
+            # nearby Sobol placements. A center_fraction quota of n_starts is
+            # reserved for center placements (kept even when clashing); the rest
+            # are the lowest-scoring, at least diversity_rmsd apart.
+            #   Conformer ensemble size scales with rotatable-bond count:
+            #   n_extra_confs = min(n_rot * conf_scale, max_confs). Rigid ligands
+            #   need orientation coverage (rotations), not torsion diversity, so
+            #   they get few/no extra conformers; flexible ligands get more, which
+            #   is also where the (embedding) cost is actually warranted.
+            Continuous("conf_scale", 2.0, 1.0, 4.0),
+            Integer("max_confs", 32, 1, 64),
+            Integer("n_center_rotations", 512, 128, 1024),
+            Integer("n_translation_samples", 128, 64, 256),
+            Continuous("center_fraction", 0.5, 0.25, 1.0),
+            Continuous("diversity_rmsd", 1.0, 0.5, 2.0),
             # Mode toggle: scaffold-indexed (template) docking on/off
             Categorical("index_poses", False, [True, False]),
         )
@@ -739,10 +745,20 @@ class MoleculeDockBlock(MoleculeBlock):
             )
             # Rigid docking screens the input conformer only (no torsion search,
             # so conformer diversity is wasted); flexible docking adds a DG
-            # conformer ensemble. Both run through the same screening method.
-            n_extra_confs = (
-                0 if rigid_only else self.get_param("max_distance_geometry_samples")
-            )
+            # conformer ensemble sized by the ligand's rotatable-bond count
+            # (n_rot * conf_scale, capped at max_confs) -- rigid ligands need
+            # orientation coverage, not torsion diversity. Both run through the
+            # same screening method.
+            if rigid_only:
+                n_extra_confs = 0
+            else:
+                n_rot = rdMolDescriptors.CalcNumRotatableBonds(
+                    Chem.RemoveAllHs(mol), strict=False
+                )
+                n_extra_confs = min(
+                    round(n_rot * self.get_param("conf_scale")),
+                    self.get_param("max_confs"),
+                )
             starts = optimize_dg_restarts(
                 mol,
                 protein_coords=self._protein_coords,

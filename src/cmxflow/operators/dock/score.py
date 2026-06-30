@@ -567,6 +567,117 @@ def _get_score_grad_kernel():
     return _SCORE_GRAD_KERNEL
 
 
+_SCORE_POCKET_KERNEL = None
+
+
+def _get_score_pocket_kernel():
+    """Return the cached numba ``score_pocket`` kernel, importing on first use."""
+    global _SCORE_POCKET_KERNEL
+    if _SCORE_POCKET_KERNEL is None:
+        from cmxflow.operators.dock._kernels import score_pocket
+
+        _SCORE_POCKET_KERNEL = score_pocket
+    return _SCORE_POCKET_KERNEL
+
+
+def build_pocket_subset(
+    protein_coords: np.ndarray,
+    protein_typing: "AtomTyping",
+    anchor: np.ndarray,
+    radius: float,
+    protein_tree: cKDTree | None = None,
+) -> tuple[np.ndarray, "AtomTyping"]:
+    """Protein atoms within ``radius`` of ``anchor`` (coords + sliced typing).
+
+    Used to pre-screen docking restarts: when every candidate placement of a
+    molecule lies within a bounded distance of the binding-site anchor, the
+    atoms that could contact *any* placement all fall in one ball around the
+    anchor. Scoring against this fixed subset is exact (atoms outside the ball
+    are beyond ``INTERACTION_CUTOFF`` of every placement) and pays the KD-tree
+    query once instead of once per candidate.
+
+    Args:
+        protein_coords: Full protein atom coordinates (n_atoms, 3).
+        protein_typing: Full protein atom typing.
+        anchor: Binding-site anchor point (3,).
+        radius: Inclusion radius (Angstroms).
+        protein_tree: Optional cached KD-tree over ``protein_coords``.
+
+    Returns:
+        ``(pocket_coords, pocket_typing)`` restricted to the in-radius atoms.
+    """
+    tree = (
+        protein_tree if protein_tree is not None else build_protein_tree(protein_coords)
+    )
+    idx = np.asarray(tree.query_ball_point(anchor, r=radius), dtype=np.intp)
+    pocket_coords = np.ascontiguousarray(protein_coords[idx])
+    pocket_typing = AtomTyping(
+        radii=protein_typing.radii[idx],
+        is_hydrophobic=protein_typing.is_hydrophobic[idx],
+        is_hbond_donor=protein_typing.is_hbond_donor[idx],
+        is_hbond_acceptor=protein_typing.is_hbond_acceptor[idx],
+        weights=protein_typing.weights[idx],
+    )
+    return pocket_coords, pocket_typing
+
+
+def empirical_score_pocket(
+    ligand_coords: np.ndarray,
+    pocket_coords: np.ndarray,
+    pocket_typing: "AtomTyping",
+    ligand_typing: "AtomTyping",
+    params: EmpiricalParams,
+    torsion_divisor: float,
+    cutoff: float = INTERACTION_CUTOFF,
+) -> float:
+    """Empirical score over a pre-built pocket subset -- score only, no gradient.
+
+    Restart-screening hot path. Pairs every ligand atom with every pocket atom in
+    the numba ``score_pocket`` kernel (cutoff-gated), so there is no per-call
+    KD-tree query. Numerically equal to ``empirical_score_cached(...).total`` when
+    the pocket subset contains every protein atom within ``cutoff`` of the ligand.
+
+    Args:
+        ligand_coords: Ligand heavy-atom coordinates (n_lig, 3).
+        pocket_coords: Pocket protein coordinates (n_pocket, 3).
+        pocket_typing: Pocket atom typing (from ``build_pocket_subset``).
+        ligand_typing: Ligand atom typing.
+        params: Scoring parameters.
+        torsion_divisor: ``1 + w_rot * n_rot`` (fixed topology; computed once).
+        cutoff: Euclidean interaction cutoff.
+
+    Returns:
+        Scalar empirical score.
+    """
+    kernel = _get_score_pocket_kernel()
+    g1, rep, hydro, hb = kernel(
+        np.ascontiguousarray(ligand_coords),
+        pocket_coords,
+        ligand_typing.radii,
+        pocket_typing.radii,
+        ligand_typing.is_hydrophobic,
+        pocket_typing.is_hydrophobic,
+        ligand_typing.is_hbond_donor,
+        ligand_typing.is_hbond_acceptor,
+        pocket_typing.is_hbond_donor,
+        pocket_typing.is_hbond_acceptor,
+        pocket_typing.weights,
+        params.gauss1_offset,
+        params.gauss1_width,
+        params.hydro_good,
+        params.hydro_bad,
+        params.hbond_good,
+        cutoff,
+    )
+    score = (
+        params.w_gauss1 * g1
+        + params.w_repulsion * rep
+        + params.w_hydrophobic * hydro
+        + params.w_hbond * hb
+    ) / torsion_divisor
+    return float(score)
+
+
 def _sparse_score_grad(
     ligand_coords: NDArray[np.floating],
     protein_coords: np.ndarray,

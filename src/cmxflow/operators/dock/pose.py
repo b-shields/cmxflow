@@ -19,13 +19,16 @@ from scipy.spatial.transform import Rotation
 from scipy.stats import qmc
 
 from cmxflow.operators.dock.score import (
+    INTERACTION_CUTOFF,
     AtomTyping,
     EmpiricalParams,
     IntramolecularPairs,
     NeighborList,
+    build_pocket_subset,
     empirical_score_and_grad_cached,
     empirical_score_and_grad_fast,
     empirical_score_cached,
+    empirical_score_pocket,
     get_atom_typing,
     intramolecular_score_and_grad,
 )
@@ -617,7 +620,7 @@ def optimize_dg_restarts(
       orientations clash -- but a near-native orientation clashes *less*, so
       ranking these by score biases toward native-like orientations.
     * **Spread group** (``translation != 0``): ``n_translation_samples`` Sobol
-      samples over translation (uniform in ``+/- box/4``) and rotation (rotvec
+      samples over translation (uniform in ``+/- box/2``) and rotation (rotvec
       uniform in ``+/- pi``), covering nearby placements.
 
     Algorithm:
@@ -646,7 +649,7 @@ def optimize_dg_restarts(
         protein_typing: Pre-computed protein atom typing.
         params: Pose params. ``n_starts`` sets how many starts are returned,
             ``seed`` seeds conformer embedding, ``translation_bounds`` sets the
-            sampling box (spread translations use ``box/4``).
+            sampling box (spread translations use ``box/2``).
         score_params: Scoring function parameters.
         site_center: Optional binding-site centroid. Anchors the whole grid to the
             pocket; ``None`` anchors it to the input conformer's own position.
@@ -670,20 +673,14 @@ def optimize_dg_restarts(
     """
     ligand_heavy = Chem.RemoveAllHs(ligand_mol)
     ligand_typing = get_atom_typing(ligand_heavy)  # fixed topology; compute once
+    # Torsion divisor is fixed by topology, so it is constant across candidates
+    # (does not affect ranking) but is applied so screen scores stay on the same
+    # scale as the reported empirical score.
+    n_rot = rdMolDescriptors.CalcNumRotatableBonds(ligand_heavy, strict=False)
+    torsion_divisor = 1.0 + score_params.w_rot * n_rot
 
     def _positions(mol: Chem.Mol) -> NDArray[np.floating]:
         return np.array(mol.GetConformer(0).GetPositions())
-
-    def _score(mol: Chem.Mol) -> float:
-        return empirical_score_cached(
-            mol,
-            protein_coords,
-            protein_typing,
-            0,
-            score_params,
-            protein_tree=protein_tree,
-            ligand_typing=ligand_typing,
-        ).total
 
     def _single_conformer(mol: Chem.Mol, conf_id: int) -> Chem.Mol:
         """Copy ``mol`` keeping only ``conf_id``, renumbered to id 0."""
@@ -720,7 +717,7 @@ def optimize_dg_restarts(
 
     # --- Step 3: placement sets (split translation / rotation sampling) ---
     box_size = max(abs(params.translation_bounds[0]), abs(params.translation_bounds[1]))
-    spread_box = box_size / 4.0  # spread translations stay near the pocket
+    spread_box = box_size / 2.0  # spread translations stay near the pocket
     lo_r, hi_r = [-np.pi] * 3, [np.pi] * 3
 
     # Center group rotations: identity first, then Sobol orientations at the anchor.
@@ -749,6 +746,31 @@ def optimize_dg_restarts(
             qmc.scale(r_sampler.random(n_translation_samples), lo_r, hi_r)
         )
 
+    # Pocket subset: every candidate's ligand atoms lie within (extent + max
+    # spread translation) of the anchor, so one ball around the anchor holds every
+    # protein atom that could contact any placement. Scoring against it is exact
+    # (outside atoms are beyond the cutoff for all placements) and pays the KD
+    # query once instead of once per candidate. The +/-spread_box cube reaches
+    # spread_box*sqrt(3) at its corner.
+    extent = max(
+        float(np.max(np.linalg.norm(_positions(c) - cen, axis=1)))
+        for c, cen in zip(ensemble, centroids)
+    )
+    pocket_radius = extent + spread_box * np.sqrt(3.0) + INTERACTION_CUTOFF
+    pocket_coords, pocket_typing = build_pocket_subset(
+        protein_coords, protein_typing, anchor, pocket_radius, protein_tree=protein_tree
+    )
+
+    def _score(pos: NDArray) -> float:
+        return empirical_score_pocket(
+            pos,
+            pocket_coords,
+            pocket_typing,
+            ligand_typing,
+            score_params,
+            torsion_divisor,
+        )
+
     # --- Step 4: score the conformer x placement grid (scoring only, no min) ---
     # center_grid[0] is conformer 0 at the identity placement = the input pose
     # translated to the anchor, which becomes the unconditional start 0.
@@ -761,12 +783,14 @@ def optimize_dg_restarts(
             cand = apply_rigid_transform(
                 conf, offset, Rotation.from_rotvec(rv), 0, centroid
             )
-            center_grid.append((_score(cand), cand, _positions(cand)))
+            pos = _positions(cand)
+            center_grid.append((_score(pos), cand, pos))
         for t, rv in zip(spread_trans, spread_rotvecs):
             cand = apply_rigid_transform(
                 conf, t + offset, Rotation.from_rotvec(rv), 0, centroid
             )
-            spread_grid.append((_score(cand), cand, _positions(cand)))
+            pos = _positions(cand)
+            spread_grid.append((_score(pos), cand, pos))
 
     # --- Step 5: select start 0 + reserved center seeds + score-ranked fill ---
     def _diverse(pos: NDArray, kept: list[Cand]) -> bool:

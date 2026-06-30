@@ -142,3 +142,98 @@ def score_grad_pairs(
             grad[a, 2] += f * dz
 
     return g1_raw, rep_raw, hydro_raw, hb_raw, grad
+
+
+@njit(cache=True, fastmath=True)
+def score_pocket(
+    coords: np.ndarray,
+    pocket_coords: np.ndarray,
+    lig_radii: np.ndarray,
+    pocket_radii: np.ndarray,
+    lig_hydro: np.ndarray,
+    pocket_hydro: np.ndarray,
+    lig_don: np.ndarray,
+    lig_acc: np.ndarray,
+    pocket_don: np.ndarray,
+    pocket_acc: np.ndarray,
+    pocket_weight: np.ndarray,
+    gauss1_offset: float,
+    gauss1_width: float,
+    hydro_good: float,
+    hydro_bad: float,
+    hbond_good: float,
+    core_cutoff: float,
+) -> tuple[float, float, float, float]:
+    """Vinardo term sums over a fixed pocket subset -- score only, no gradient.
+
+    Initialization-screening hot path. Every candidate placement of a molecule
+    sits within a bounded radius of the binding-site anchor, so the caller builds
+    one protein "pocket" subset (atoms that could contact *any* placement) once
+    and scores every candidate against it here with no per-call KD-tree query.
+    A plain double loop over ``n_lig x n_pocket`` with the same ``eucl >
+    core_cutoff`` gate as :func:`score_grad_pairs` -- so the term sums are
+    identical to the per-call path, minus the gradient scatter that screening
+    does not need.
+
+    Args:
+        coords: Ligand heavy-atom coordinates (n_lig, 3).
+        pocket_coords: Pocket protein coordinates (n_pocket, 3).
+        lig_radii, pocket_radii: Per-atom Vinardo radii.
+        lig_hydro, pocket_hydro: Per-atom hydrophobic masks.
+        lig_don, lig_acc, pocket_don, pocket_acc: H-bond donor/acceptor masks.
+        pocket_weight: Per-pocket-atom occupancy weight (n_pocket,).
+        gauss1_offset, gauss1_width: Gaussian center/width.
+        hydro_good, hydro_bad: Hydrophobic inner/outer cutoffs.
+        hbond_good: H-bond inner cutoff.
+        core_cutoff: Euclidean interaction cutoff (Angstroms).
+
+    Returns:
+        ``(gauss1_raw, repulsion_raw, hydrophobic_raw, hbond_raw)`` -- the four
+        *unweighted* term sums (caller applies weights + torsion divisor).
+    """
+    n_lig = coords.shape[0]
+    n_pocket = pocket_coords.shape[0]
+    g1_raw = 0.0
+    rep_raw = 0.0
+    hydro_raw = 0.0
+    hb_raw = 0.0
+    range_hydro = hydro_bad - hydro_good
+    inv_hb = 1.0 / (-hbond_good)
+
+    for a in range(n_lig):
+        ax = coords[a, 0]
+        ay = coords[a, 1]
+        az = coords[a, 2]
+        ra = lig_radii[a]
+        ha = lig_hydro[a]
+        da = lig_don[a]
+        aa = lig_acc[a]
+        for b in range(n_pocket):
+            dx = ax - pocket_coords[b, 0]
+            dy = ay - pocket_coords[b, 1]
+            dz = az - pocket_coords[b, 2]
+            eucl = np.sqrt(dx * dx + dy * dy + dz * dz)
+            if eucl > core_cutoff:
+                continue
+            w = pocket_weight[b]
+            d = eucl - ra - pocket_radii[b]
+
+            z = (d - gauss1_offset) / gauss1_width
+            g1_raw += np.exp(-z * z) * w
+
+            if d < 0.0:
+                rep_raw += d * d * w
+
+            if ha and pocket_hydro[b]:
+                if d <= hydro_good:
+                    hydro_raw += w
+                elif d < hydro_bad:
+                    hydro_raw += (hydro_bad - d) / range_hydro * w
+
+            if (da and pocket_acc[b]) or (aa and pocket_don[b]):
+                if d <= hbond_good:
+                    hb_raw += w
+                elif d < 0.0:
+                    hb_raw += -d * inv_hb * w
+
+    return g1_raw, rep_raw, hydro_raw, hb_raw

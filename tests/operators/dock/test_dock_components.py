@@ -144,11 +144,11 @@ class TestPoseSearchParams:
         "basin_hops": 0,
         "max_iterations": 100,
         "box_size": 10.0,
-        "conf_scale": 2.0,
-        "max_confs": 32,
-        "n_center_rotations": 512,
-        "n_translation_samples": 128,
-        "center_fraction": 0.5,
+        "conf_scale": 6.0,
+        "max_confs": 128,
+        "n_orientation_samples": 1024,
+        "n_translation_samples": 32,
+        "center_fraction": 0.2,
         "diversity_rmsd": 1.0,
     }
 
@@ -164,7 +164,7 @@ class TestPoseSearchParams:
 
         overrides: dict[str, Any] = {
             "n_starts": 16,
-            "n_center_rotations": 256,
+            "n_orientation_samples": 256,
             "n_translation_samples": 96,
             "center_fraction": 0.25,
             "conf_scale": 3.0,
@@ -182,7 +182,7 @@ class TestPoseSearchParams:
         PoseParams; n_starts_used records the actual start count."""
         block = _make_block()
         block.set_inputs(
-            n_center_rotations=256,
+            n_orientation_samples=256,
             n_translation_samples=96,
             center_fraction=0.25,
             conf_scale=2.0,
@@ -214,7 +214,7 @@ class TestPoseSearchParams:
 
         assert result is not None
         # Init params threaded into the DG call.
-        assert init_kwargs["n_center_rotations"] == 256
+        assert init_kwargs["n_orientation_samples"] == 256
         assert init_kwargs["n_translation_samples"] == 96
         assert init_kwargs["center_fraction"] == pytest.approx(0.25)
         # n_extra_confs is derived from the ligand's rotatable-bond count:

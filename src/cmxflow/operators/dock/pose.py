@@ -583,6 +583,41 @@ def constraint_weight_for_rmsd(target_rmsd_angstrom: float) -> float:
 # =============================================================================
 
 
+def _super_fibonacci_quat(n: int) -> NDArray[np.floating]:
+    """n near-uniform unit quaternions covering SO(3) via Super-Fibonacci spirals.
+
+    Alexa, "Super-Fibonacci Spirals: Fast, Low-Discrepancy Sampling of SO(3)"
+    (CVPR 2022). Deterministic, O(n), no RNG. Returns (n, 4) as scipy [x,y,z,w].
+    """
+    if n <= 0:
+        return np.zeros((0, 4))
+    phi = np.sqrt(2.0)
+    psi = 1.533751168755204288118041
+    i = np.arange(n) + 0.5
+    s = i / n
+    r = np.sqrt(s)
+    rr = np.sqrt(1.0 - s)
+    alpha = 2.0 * np.pi * i / phi
+    beta = 2.0 * np.pi * i / psi
+    return np.stack(
+        [r * np.sin(alpha), r * np.cos(alpha), rr * np.sin(beta), rr * np.cos(beta)],
+        axis=1,
+    )
+
+
+def _sample_orientation_rotvecs(n: int) -> NDArray[np.floating]:
+    """Sample n near-uniform SO(3) orientations, returned as rotvecs (n, 3).
+
+    Uses Super-Fibonacci -- a deterministic, Haar-uniform, low-discrepancy cover
+    of SO(3). (Replaces the legacy Sobol-in-rotvec-cube sampler, which was not
+    Haar-uniform: ~48% of draws aliased into the |r|>pi corners and the
+    worst-case coverage hole was ~37deg vs Super-Fibonacci's ~21deg at N=1024.)
+    """
+    if n <= 0:
+        return np.zeros((0, 3))
+    return Rotation.from_quat(_super_fibonacci_quat(n)).as_rotvec()
+
+
 def optimize_dg_restarts(
     ligand_mol: Chem.Mol,
     protein_coords: np.ndarray,
@@ -592,9 +627,9 @@ def optimize_dg_restarts(
     site_center: np.ndarray | None = None,
     ligand_conf_id: int = 0,
     n_extra_confs: int = 0,
-    n_center_rotations: int = 128,
+    n_orientation_samples: int = 128,
     n_translation_samples: int = 128,
-    center_fraction: float = 0.5,
+    center_fraction: float = 0.2,
     diversity_rmsd: float = 0.0,
     protein_tree: cKDTree | None = None,
 ) -> list[tuple[float, Chem.Mol]]:
@@ -610,18 +645,25 @@ def optimize_dg_restarts(
       conformer plus ``n_extra_confs`` ETKDGv3 conformers, adding torsion
       diversity on the physical low-energy manifold.
 
-    The placements split into two groups so the search puts a deliberate prior on
-    the binding-site center (where confidence is highest and the convergence
-    funnel lives):
+    Each conformer gets a fixed budget of ``n_orientation_samples`` placements,
+    split by ``center_fraction`` between a center group and a spread group so the
+    search puts a deliberate prior on the binding-site center (where confidence is
+    highest and the convergence funnel lives):
 
     * **Center group** (``translation = 0``): the identity placement plus
-      ``n_center_rotations`` Sobol rotations, so every conformer is sampled at the
-      anchor in many orientations. At the exact center the pocket is full, so all
+      ``round(center_fraction * n_orientation_samples)`` near-uniform SO(3)
+      orientations (Super-Fibonacci), so every conformer is sampled at the anchor
+      in many orientations. At the exact center the pocket is full, so all
       orientations clash -- but a near-native orientation clashes *less*, so
       ranking these by score biases toward native-like orientations.
-    * **Spread group** (``translation != 0``): ``n_translation_samples`` Sobol
-      samples over translation (uniform in ``+/- box/2``) and rotation (rotvec
-      uniform in ``+/- pi``), covering nearby placements.
+    * **Spread group** (``translation != 0``): the remaining
+      ``round((1 - center_fraction) * n_orientation_samples)`` placements, split
+      equally over ``n_translation_samples`` Sobol offsets (uniform in
+      ``+/- box/2``); each offset gets its own near-uniform SO(3) orientation set.
+      Because the offsets *share* this remainder rather than each taking a full
+      orientation set, total candidates per conformer stay equal to
+      ``n_orientation_samples`` -- so peak RAM is ``n_conf * n_orientation_samples``
+      and does not grow with the translation count.
 
     Algorithm:
 
@@ -656,13 +698,15 @@ def optimize_dg_restarts(
         ligand_conf_id: Conformer ID of the input pose (becomes ensemble member 0).
         n_extra_confs: ETKDGv3 conformers to embed beyond the input conformer.
             ``0`` is the rigid path (input conformer only, no DG sampling).
-        n_center_rotations: Sobol orientations sampled at the anchor (translation
-            0), per conformer, in addition to the identity placement.
-        n_translation_samples: Sobol (translation + rotation) placements sampled in
-            the spread group, per conformer.
-        center_fraction: Fraction of ``params.n_starts`` reserved for center-group
-            seeds (kept even when they clash). The rest are filled from the whole
-            grid by score.
+        n_orientation_samples: Total placement budget per conformer. Split by
+            ``center_fraction`` between center orientations (at the anchor) and
+            spread placements (over the translation offsets).
+        n_translation_samples: Number of nearby Sobol translation offsets the
+            spread budget is divided over (each gets its own SO(3) orientation set).
+        center_fraction: Fraction of the per-conformer budget placed at the center
+            (the rest goes to the spread offsets); also the fraction of
+            ``params.n_starts`` reserved for center-group seeds (kept even when
+            they clash). The rest are filled from the whole grid by score.
         diversity_rmsd: Minimum heavy-atom RMSD (Angstroms) between selected
             starts. ``0`` (default) disables the spacing gate.
         protein_tree: Optional cached protein KD-tree for sparse scoring.
@@ -715,36 +759,40 @@ def optimize_dg_restarts(
     # --- Step 2: anchor (binding-site centroid, or input position if no site) ---
     anchor = site_center if site_center is not None else centroids[0]
 
-    # --- Step 3: placement sets (split translation / rotation sampling) ---
+    # --- Step 3: split a per-conformer orientation budget by center_fraction ---
+    # Each conformer gets ``n_orientation_samples`` placements: center_fraction of
+    # them are near-uniform SO(3) orientations at the anchor (t=0, the most likely
+    # centroid for redocking); the rest are spread over ``n_translation_samples``
+    # nearby Sobol offsets, each offset getting its own SO(3) orientation set. The
+    # offsets SHARE the remainder (rather than each taking a full orientation set),
+    # so total candidates per conformer stay = budget -- peak RAM is bounded by
+    # n_conf * budget and does not grow with the translation count.
     box_size = max(abs(params.translation_bounds[0]), abs(params.translation_bounds[1]))
     spread_box = box_size / 2.0  # spread translations stay near the pocket
-    lo_r, hi_r = [-np.pi] * 3, [np.pi] * 3
 
-    # Center group rotations: identity first, then Sobol orientations at the anchor.
+    budget = int(n_orientation_samples)
+    n_center = max(1, int(round(center_fraction * budget)))
+    trans_budget = max(0, budget - n_center)
+    n_offsets = int(n_translation_samples) if trans_budget > 0 else 0
+    per_offset = trans_budget // n_offsets if n_offsets > 0 else 0
+    if per_offset == 0:
+        n_offsets = 0  # nothing left to spread after the center allocation
+
+    # Center group: identity first, then near-uniform SO(3) cover at the anchor.
     center_rotvecs = [np.zeros(3)]
-    if n_center_rotations > 0:
-        rot_sampler = qmc.Sobol(d=3, scramble=True, seed=0)
-        center_rotvecs += list(
-            qmc.scale(rot_sampler.random(n_center_rotations), lo_r, hi_r)
-        )
+    if n_center > 0:
+        center_rotvecs += list(_sample_orientation_rotvecs(n_center))
 
-    # Spread group: paired translation + rotation Sobol draws (separate sequences
-    # give better per-axis coverage than a single 6-D draw).
-    spread_trans: list[NDArray] = []
+    # Spread group: Sobol translation offsets (uniform in +/- box/2), each carrying
+    # the same shared SO(3) orientation set.
+    spread_offsets: NDArray = np.zeros((0, 3))
     spread_rotvecs: list[NDArray] = []
-    if n_translation_samples > 0:
+    if n_offsets > 0:
         t_sampler = qmc.Sobol(d=3, scramble=True, seed=1)
-        r_sampler = qmc.Sobol(d=3, scramble=True, seed=2)
-        spread_trans = list(
-            qmc.scale(
-                t_sampler.random(n_translation_samples),
-                [-spread_box] * 3,
-                [spread_box] * 3,
-            )
+        spread_offsets = qmc.scale(
+            t_sampler.random(n_offsets), [-spread_box] * 3, [spread_box] * 3
         )
-        spread_rotvecs = list(
-            qmc.scale(r_sampler.random(n_translation_samples), lo_r, hi_r)
-        )
+        spread_rotvecs = list(_sample_orientation_rotvecs(per_offset))
 
     # Pocket subset: every candidate's ligand atoms lie within (extent + max
     # spread translation) of the anchor, so one ball around the anchor holds every
@@ -771,33 +819,41 @@ def optimize_dg_restarts(
         if spread_rotvecs
         else np.zeros((0, 3, 3))
     )
-    spread_t = np.asarray(spread_trans) if spread_trans else np.zeros((0, 3))
 
     # A candidate conformer rotated about its centroid and shifted so the centroid
     # lands at ``anchor + t`` is ``(coords - centroid) @ R^T + anchor + t``. The
     # ordering (conformer 0 center group first, identity placement first) makes the
     # first row the input pose at the anchor -- the unconditional start 0.
-    blocks: list[NDArray] = []
-    conf_idx: list[int] = []
-    is_center: list[bool] = []
+    #
+    # Preallocate the full candidate array once and fill per-conformer blocks in
+    # place: this avoids the transient 2x peak of ``np.concatenate(blocks)`` (the
+    # dominant RAM cost of screening), so a given RAM budget covers ~2x the
+    # candidates. Metadata are numpy arrays, not per-candidate Python lists.
+    n_conf = len(ensemble)
+    n_lig = _positions(ensemble[0]).shape[0]
+    n_rc = center_rmats.shape[0]  # center orientations (incl identity)
+    n_ro = spread_rmats.shape[0]  # orientations per translation offset
+    n_off = spread_offsets.shape[0]  # translation offsets
+    n_spread = n_off * n_ro  # spread placements per conformer
+    per_conf = n_rc + n_spread
+    coords_batch = np.empty((n_conf * per_conf, n_lig, 3), dtype=np.float64)
+    conf_idx = np.repeat(np.arange(n_conf, dtype=np.int32), per_conf)
+    is_center_arr = np.zeros(n_conf * per_conf, dtype=bool)
     for ci, (conf, centroid) in enumerate(zip(ensemble, centroids)):
         centered = _positions(conf) - centroid  # (n_lig, 3)
-        cpos = np.einsum("mij,nj->mni", center_rmats, centered) + anchor
-        blocks.append(cpos)
-        conf_idx += [ci] * cpos.shape[0]
-        is_center += [True] * cpos.shape[0]
-        if spread_rmats.shape[0]:
-            spos = (
-                np.einsum("mij,nj->mni", spread_rmats, centered)
-                + anchor
-                + spread_t[:, None, :]
-            )
-            blocks.append(spos)
-            conf_idx += [ci] * spos.shape[0]
-            is_center += [False] * spos.shape[0]
+        base = ci * per_conf
+        coords_batch[base : base + n_rc] = (
+            np.einsum("mij,nj->mni", center_rmats, centered) + anchor
+        )
+        is_center_arr[base : base + n_rc] = True
+        if n_spread:
+            # every offset x every shared orientation: (n_off, n_ro, n_lig, 3),
+            # row order offset-major so placement p -> offset p // n_ro.
+            rotated = np.einsum("mij,nj->mni", spread_rmats, centered)  # (n_ro,n_lig,3)
+            coords_batch[base + n_rc : base + per_conf] = (
+                rotated[None, :, :, :] + spread_offsets[:, None, None, :] + anchor
+            ).reshape(n_spread, n_lig, 3)
 
-    coords_batch = np.ascontiguousarray(np.concatenate(blocks, axis=0))
-    is_center_arr = np.array(is_center, dtype=bool)
     scores = empirical_score_pocket_batch(
         coords_batch,
         pocket_coords,
@@ -855,10 +911,12 @@ def optimize_dg_restarts(
                 kept_pos.append(coords_batch[i])
 
     logger.info(
-        "dg_restarts: %d confs x (1 + %d center rot + %d spread) -> %d starts.",
+        "dg_restarts: %d conf x budget %d (%d center + %d off x %d rot) -> %d starts.",
         len(ensemble),
-        n_center_rotations,
-        n_translation_samples,
+        budget,
+        n_rc,
+        n_off,
+        n_ro,
         len(kept),
     )
     return [_build(i) for i in kept]

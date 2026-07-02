@@ -322,31 +322,37 @@ class MoleculeDockBlock(MoleculeBlock):
             # minima, each ~max_iterations L-BFGS-B steps; the bounds keep the
             # worst-case config tractable.
             #   n_starts: number of L-BFGS-B seeds refined per molecule.
-            Integer("n_starts", 32, 16, 64),
+            Integer("n_starts", 32, 16, 128),
             #   basin_hops: extra iterated-local-search refinement per start.
-            #   Default 0 (init + single minimize); hi=16 caps runtime.
-            Integer("basin_hops", 0, 0, 8),
+            #   Default 0 (init + single minimize); hi raised for deep-ILS sweeps.
+            Integer("basin_hops", 0, 0, 24),
             #   max_iterations hi=200: L-BFGS-B converges well before then.
             Integer("max_iterations", 100, 50, 200),
             Continuous("box_size", 10.0, 5.0, 20.0),
             Categorical("rigid", False, [True, False]),
             # Initialization grid: the DG conformer ensemble (sized by ligand
-            # flexibility, see conf_scale/max_confs) is placed at the site center
-            # over n_center_rotations orientations plus n_translation_samples
-            # nearby Sobol placements. A center_fraction quota of n_starts is
-            # reserved for center placements (kept even when clashing); the rest
-            # are the lowest-scoring, at least diversity_rmsd apart.
+            # flexibility, see conf_scale/max_confs) is placed at the site center.
+            # Each conformer gets n_orientation_samples placements, split by
+            # center_fraction: that fraction are near-uniform SO(3) orientations at
+            # the center, the rest are spread over n_translation_samples nearby
+            # Sobol offsets (each with its own SO(3) orientation set). The offsets
+            # share the remainder, so peak init RAM = n_conf * n_orientation_samples
+            # * n_lig * 24 B regardless of the split; the max below keeps the
+            # worst case (~100 heavy atoms x max_confs) near 1 GB/worker. A
+            # center_fraction quota of n_starts is also reserved for center
+            # placements (kept even when clashing); the rest are the lowest-scoring,
+            # at least diversity_rmsd apart.
             #   Conformer ensemble size scales with rotatable-bond count:
             #   n_extra_confs = min(n_rot * conf_scale, max_confs). Rigid ligands
             #   need orientation coverage (rotations), not torsion diversity, so
             #   they get few/no extra conformers; flexible ligands get more, which
             #   is also where the (embedding) cost is actually warranted.
-            Continuous("conf_scale", 3.0, 1.0, 4.0),
-            Integer("max_confs", 32, 1, 64),
-            Integer("n_center_rotations", 1024, 128, 2048),
-            Integer("n_translation_samples", 128, 64, 256),
-            Continuous("center_fraction", 0.5, 0.25, 1.0),
-            Continuous("diversity_rmsd", 1.0, 0.5, 2.0),
+            Continuous("conf_scale", 6.0, 1.0, 8.0),
+            Integer("max_confs", 128, 1, 256),
+            Integer("n_orientation_samples", 1024, 128, 3200),
+            Integer("n_translation_samples", 32, 1, 256),
+            Continuous("center_fraction", 0.2, 0.1, 1.0),
+            Continuous("diversity_rmsd", 1.0, 0.1, 2.0),
             # Mode toggle: scaffold-indexed (template) docking on/off
             Categorical("index_poses", False, [True, False]),
         )
@@ -767,7 +773,7 @@ class MoleculeDockBlock(MoleculeBlock):
                 score_params=score_params,
                 site_center=site_center,
                 n_extra_confs=n_extra_confs,
-                n_center_rotations=self.get_param("n_center_rotations"),
+                n_orientation_samples=self.get_param("n_orientation_samples"),
                 n_translation_samples=self.get_param("n_translation_samples"),
                 center_fraction=self.get_param("center_fraction"),
                 diversity_rmsd=self.get_param("diversity_rmsd"),

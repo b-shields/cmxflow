@@ -3,6 +3,26 @@
 This module provides a MoleculeBlock implementation for docking ligands
 into protein binding sites using the empirical (default Vinardo) scoring
 function and rigid-body + torsional pose optimization.
+
+Memory scaling
+--------------
+Init screening builds every candidate pose for one ligand at once, so peak RAM
+per worker is set by the *flexible + large* ligand, not the median::
+
+    peak_bytes ~= n_conf * placements_per_conf * heavy_atoms * 24
+      n_conf             = 1 + min(round(n_rot * conf_scale), max_confs)
+      placements_per_conf = budget * n_orientation_samples  (+1 identity pose)
+
+Only ``n_conf`` grows with rotatable-bond count; the per-conformer placement
+budget is fixed. At n_orientation_samples=2048, conf_scale=8, max_confs=256,
+budget=1 and a 50-heavy-atom ligand, per worker:
+
+    n_rot   0 ->   2 MB      n_rot  10 -> 199 MB
+    n_rot   5 -> 101 MB      n_rot  20 -> 396 MB
+
+RAM scales linearly with ``budget``, ``n_orientation_samples`` and heavy-atom
+count, and runs N workers in parallel -- size the box (blind docking) or the
+worker count to the flexible tail of the library, not its median.
 """
 
 import dataclasses
@@ -249,6 +269,10 @@ class MoleculeDockBlock(MoleculeBlock):
             minimizes from the aligned pose; rows 1+ sample the binding site box.
         - basin_hops: Iterated-local-search refinement steps per restart
             (0 = single minimize). Higher finds lower-energy poses at more cost.
+        - basin_hop_starts: Number of top-scoring minimized starts to carry into
+            basin hopping (two-stage: minimize all starts, hop only the best few).
+            0 (default) or >= n_starts hops every start. No effect when
+            basin_hops = 0.
         - max_iterations: Maximum L-BFGS-B iterations per restart.
         - box_size: Translation search box half-width in Angstroms (default 5.0).
             Centred on site_reference centroid when provided, otherwise on the
@@ -264,6 +288,7 @@ class MoleculeDockBlock(MoleculeBlock):
         score_strain: bool = False,
         score_only: bool = False,
         receptor_most_populated_only: bool = False,
+        budget: int = 1,
         **kwargs: Any,
     ) -> None:
         """Initialize the molecular docking block.
@@ -271,6 +296,15 @@ class MoleculeDockBlock(MoleculeBlock):
         Args:
             score_components: If True (default), write per-term weighted score
                 components as SDF properties on each docked molecule.
+            budget: Integer sampling-budget multiplier on the per-conformer
+                orientation budget (default 1). Scales both the center
+                orientations and the per-offset spread together, so a larger
+                search box (blind docking) is met by raising budget rather than
+                starving each translation offset. Denominated for RAM: at the
+                schema ceiling (~100 heavy atoms, n_orientation_samples at its
+                3200 max, default max_confs) each unit costs roughly 1 GB of RAM
+                per process, so set budget to about the GB you can allot per
+                worker. A resource/deployment knob, not an optimized parameter.
             score_only: If True, skip pose optimization entirely and score the
                 input pose as-is. Useful for rescoring pre-docked poses and for
                 isolating scoring-function cost from the search. Not a mutable
@@ -307,6 +341,7 @@ class MoleculeDockBlock(MoleculeBlock):
         self._score_strain = score_strain
         self._score_only = score_only
         self._most_populated_only = receptor_most_populated_only
+        self._budget = max(1, int(budget))
         self._scaffold_store: ScaffoldPoseStore | None = None
         self._reference_seeded = False
 
@@ -326,8 +361,15 @@ class MoleculeDockBlock(MoleculeBlock):
             #   basin_hops: extra iterated-local-search refinement per start.
             #   Default 0 (init + single minimize); hi raised for deep-ILS sweeps.
             Integer("basin_hops", 0, 0, 24),
-            #   max_iterations hi=200: L-BFGS-B converges well before then.
-            Integer("max_iterations", 100, 50, 200),
+            #   basin_hop_starts: how many starts carry into basin hopping. All
+            #   starts are cheaply minimized first; only the top-scoring
+            #   basin_hop_starts of them then pay the (expensive) hops -- the bet
+            #   is that the lowest-energy minima are the best places to hop from.
+            #   0 (default/sentinel) or >= n_starts hops every start (the prior
+            #   single-pass behavior). Only bites when basin_hops > 0.
+            Integer("basin_hop_starts", 0, 0, 128),
+            #   max_iterations hi=300: L-BFGS-B converges well before then.
+            Integer("max_iterations", 200, 10, 300),
             Continuous("box_size", 10.0, 5.0, 20.0),
             Categorical("rigid", False, [True, False]),
             # Initialization grid: the DG conformer ensemble (sized by ligand
@@ -336,9 +378,11 @@ class MoleculeDockBlock(MoleculeBlock):
             # center_fraction: that fraction are near-uniform SO(3) orientations at
             # the center, the rest are spread over n_translation_samples nearby
             # Sobol offsets (each with its own SO(3) orientation set). The offsets
-            # share the remainder, so peak init RAM = n_conf * n_orientation_samples
-            # * n_lig * 24 B regardless of the split; the max below keeps the
-            # worst case (~100 heavy atoms x max_confs) near 1 GB/worker. A
+            # share the remainder, so peak init RAM = n_conf * budget *
+            # n_orientation_samples * n_lig * 24 B regardless of the split; at the
+            # maxima below (~100 heavy atoms x max_confs) one budget unit is near
+            # 1 GB/worker, and the block-init ``budget`` multiplier scales it
+            # linearly (raise it for a larger box / blind docking). A
             # center_fraction quota of n_starts is also reserved for center
             # placements (kept even when clashing); the rest are the lowest-scoring,
             # at least diversity_rmsd apart.
@@ -347,12 +391,16 @@ class MoleculeDockBlock(MoleculeBlock):
             #   need orientation coverage (rotations), not torsion diversity, so
             #   they get few/no extra conformers; flexible ligands get more, which
             #   is also where the (embedding) cost is actually warranted.
-            Continuous("conf_scale", 6.0, 1.0, 8.0),
+            Continuous("conf_scale", 6.0, 1.0, 10.0),
             Integer("max_confs", 128, 1, 256),
             Integer("n_orientation_samples", 1024, 128, 3200),
             Integer("n_translation_samples", 32, 1, 256),
-            Continuous("center_fraction", 0.2, 0.1, 1.0),
-            Continuous("diversity_rmsd", 1.0, 0.1, 2.0),
+            # Capped at 0.5: center_fraction is the budget bet that the true
+            # centroid sits on the anchor. Redocking hands us the exact centroid,
+            # so >0.5 would overfit that gift; <=0.5 is a defensible pocket-finder
+            # prior that still generalizes to blind docking.
+            Continuous("center_fraction", 0.5, 0.1, 0.5),
+            Continuous("diversity_rmsd", 0.1, 0.1, 2.0),
             # Mode toggle: scaffold-indexed (template) docking on/off
             Categorical("index_poses", False, [True, False]),
         )
@@ -438,7 +486,7 @@ class MoleculeDockBlock(MoleculeBlock):
         """
         items = sorted((name, p.get()) for name, p in self.params.items())
         payload = (
-            f"{items}|score_strain={self._score_strain}"
+            f"{items}|score_strain={self._score_strain}|budget={self._budget}"
             f"|receptor={self._index_rel_path('receptor')}"
             f"|site_reference={self._index_rel_path('site_reference')}"
         )
@@ -765,6 +813,12 @@ class MoleculeDockBlock(MoleculeBlock):
                     round(n_rot * self.get_param("conf_scale")),
                     self.get_param("max_confs"),
                 )
+            # ``budget`` (block-init resource knob) scales the per-conformer
+            # orientation budget: it multiplies both the center orientations and
+            # the per-offset spread, so a larger search box (blind docking) is met
+            # by raising budget rather than starving each translation offset. Peak
+            # init RAM scales linearly with it (~1 GB/process per unit at ceiling).
+            orientation_budget = self._budget * self.get_param("n_orientation_samples")
             starts = optimize_dg_restarts(
                 mol,
                 protein_coords=self._protein_coords,
@@ -773,7 +827,7 @@ class MoleculeDockBlock(MoleculeBlock):
                 score_params=score_params,
                 site_center=site_center,
                 n_extra_confs=n_extra_confs,
-                n_orientation_samples=self.get_param("n_orientation_samples"),
+                n_orientation_samples=orientation_budget,
                 n_translation_samples=self.get_param("n_translation_samples"),
                 center_fraction=self.get_param("center_fraction"),
                 diversity_rmsd=self.get_param("diversity_rmsd"),
@@ -781,12 +835,13 @@ class MoleculeDockBlock(MoleculeBlock):
             )
 
             # Phase 2: L-BFGS-B refinement from each starting pose.
+            basin_hops = self.get_param("basin_hops")
             refine_params = PoseParams(
                 max_iterations=self.get_param("max_iterations"),
                 translation_bounds=(-box_size, box_size),
                 optimize_torsions=not rigid_only,
                 n_starts=1,
-                basin_hops=self.get_param("basin_hops"),
+                basin_hops=basin_hops,
             )
 
             # Selection objective: intermolecular score, plus strain when the strain
@@ -794,19 +849,49 @@ class MoleculeDockBlock(MoleculeBlock):
             def _effective(r: OptimizationResult) -> float:
                 return r.score + (r.strain if self._score_strain else 0.0)
 
-            for idx, (_, start_mol) in enumerate(starts):
-                candidate = optimize_pose_cached(
+            def _refine(start_mol, seed: int, params: PoseParams) -> OptimizationResult:
+                # Distinct seed per chain so basin-hopping walks decorrelate.
+                assert self._protein_coords is not None
+                assert isinstance(self._protein_typing, AtomTyping)
+                return optimize_pose_cached(
                     start_mol,
                     protein_coords=self._protein_coords,
                     protein_typing=self._protein_typing,
-                    # Distinct seed per chain so basin-hopping walks decorrelate.
-                    params=dataclasses.replace(refine_params, seed=idx),
+                    params=dataclasses.replace(params, seed=seed),
                     score_params=score_params,
                     site_center=None,
                     protein_tree=self._protein_tree,
                 )
-                if result is None or _effective(candidate) < _effective(result):
-                    result = candidate
+
+            # ``basin_hop_starts`` gates a two-stage search: minimize every start
+            # cheaply, then spend the expensive hops only on the top-scoring few
+            # (the bet: lowest-energy minima are the best places to hop from). A
+            # sentinel of 0, or a value >= the number of starts, hops every start
+            # (single pass). Only two-stage when hopping is on and the cap bites.
+            hop_starts = self.get_param("basin_hop_starts")
+            two_stage = basin_hops > 0 and 0 < hop_starts < len(starts)
+
+            if two_stage:
+                # Stage 1: minimize all starts, no hops.
+                min_params = dataclasses.replace(refine_params, basin_hops=0)
+                stage1 = [
+                    _refine(start_mol, idx, min_params)
+                    for idx, (_, start_mol) in enumerate(starts)
+                ]
+                # Stage 2: hop the top-``hop_starts`` by selection score; the hopped
+                # result replaces its stage-1 minimum in the candidate pool.
+                top = sorted(range(len(stage1)), key=lambda i: _effective(stage1[i]))
+                hop_idx = set(top[:hop_starts])
+                for i, candidate in enumerate(stage1):
+                    if i in hop_idx:
+                        candidate = _refine(stage1[i].mol, i, refine_params)
+                    if result is None or _effective(candidate) < _effective(result):
+                        result = candidate
+            else:
+                for idx, (_, start_mol) in enumerate(starts):
+                    candidate = _refine(start_mol, idx, refine_params)
+                    if result is None or _effective(candidate) < _effective(result):
+                        result = candidate
 
             assert result is not None
             result = dataclasses.replace(result, initial_score=starts[0][0])

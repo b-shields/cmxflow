@@ -5,6 +5,7 @@ binding site using rigid-body transformations and torsion angle optimization.
 """
 
 import logging
+import warnings
 from collections import deque
 from dataclasses import dataclass, field
 from typing import TypeAlias
@@ -42,6 +43,20 @@ Coords: TypeAlias = NDArray[np.floating]
 # Amide bonds have ~20 kcal/mol rotational barrier (partial double-bond character)
 # and are treated as rigid in docking, consistent with smina/Vina.
 _AMIDE_SMARTS: Chem.Mol = Chem.MolFromSmarts("[#7;X3]-[#6;X3]=[O,S]")  # type: ignore[assignment]
+
+# Reference spread-cube edge (Angstroms) at which ``n_translation_samples`` is
+# calibrated. The number of spread offsets scales with (box / this)**3 so the
+# translation grid spacing stays ~constant as the search box grows (blind
+# docking): at box == this the count is exactly ``n_translation_samples``.
+_TRANSLATION_REFERENCE_BOX: float = 10.0
+
+# Burial rejection for spread translation offsets: an offset whose centroid
+# (anchor + offset) has more than ``max_buried`` protein atoms within this radius
+# is inside the protein rather than in the pocket, so it is skipped and resampled.
+_BURIED_RADIUS: float = 2.0
+# Cap on extra Sobol points drawn while resampling rejected offsets, so a fully
+# occluded box can never spin forever: attempts <= n_target + this.
+_SOBOL_MAX_OVERDRAW: int = 1000
 
 
 # =============================================================================
@@ -631,6 +646,7 @@ def optimize_dg_restarts(
     n_translation_samples: int = 128,
     center_fraction: float = 0.2,
     diversity_rmsd: float = 0.0,
+    max_buried: int = 0,
     protein_tree: cKDTree | None = None,
 ) -> list[tuple[float, Chem.Mol]]:
     """Screen starting poses for L-BFGS-B refinement (rigid + flexible paths).
@@ -658,8 +674,9 @@ def optimize_dg_restarts(
       ranking these by score biases toward native-like orientations.
     * **Spread group** (``translation != 0``): the remaining
       ``round((1 - center_fraction) * n_orientation_samples)`` placements, split
-      equally over ``n_translation_samples`` Sobol offsets (uniform in
-      ``+/- box/2``); each offset gets its own near-uniform SO(3) orientation set.
+      equally over the Sobol offsets (uniform in ``+/- box/2``); each offset gets
+      its own near-uniform SO(3) orientation set. The offset count scales with box
+      volume from ``n_translation_samples`` so grid spacing holds as the box grows.
       Because the offsets *share* this remainder rather than each taking a full
       orientation set, total candidates per conformer stay equal to
       ``n_orientation_samples`` -- so peak RAM is ``n_conf * n_orientation_samples``
@@ -702,13 +719,22 @@ def optimize_dg_restarts(
             ``center_fraction`` between center orientations (at the anchor) and
             spread placements (over the translation offsets).
         n_translation_samples: Number of nearby Sobol translation offsets the
-            spread budget is divided over (each gets its own SO(3) orientation set).
+            spread budget is divided over (each gets its own SO(3) orientation
+            set), calibrated at a 10 A spread cube. The actual offset count scales
+            with box volume -- ``round(n_translation_samples * (box / 10)**3)`` --
+            so the grid spacing holds ~constant as the box grows (blind docking),
+            capped at the spread budget so each offset keeps >= 1 orientation.
         center_fraction: Fraction of the per-conformer budget placed at the center
             (the rest goes to the spread offsets); also the fraction of
             ``params.n_starts`` reserved for center-group seeds (kept even when
             they clash). The rest are filled from the whole grid by score.
         diversity_rmsd: Minimum heavy-atom RMSD (Angstroms) between selected
             starts. ``0`` (default) disables the spacing gate.
+        max_buried: Max protein atoms allowed within ``_BURIED_RADIUS`` of a
+            spread offset's centroid before it is rejected as buried and
+            resampled from later in the Sobol sequence. ``0`` (default) rejects
+            any offset landing inside the protein; ``< 0`` disables the filter.
+            Only the spread offsets are filtered; the center point is always kept.
         protein_tree: Optional cached protein KD-tree for sparse scoring.
 
     Returns:
@@ -773,26 +799,71 @@ def optimize_dg_restarts(
     budget = int(n_orientation_samples)
     n_center = max(1, int(round(center_fraction * budget)))
     trans_budget = max(0, budget - n_center)
-    n_offsets = int(n_translation_samples) if trans_budget > 0 else 0
-    per_offset = trans_budget // n_offsets if n_offsets > 0 else 0
-    if per_offset == 0:
-        n_offsets = 0  # nothing left to spread after the center allocation
+    # Scale the offset count with box volume so the spread grid spacing stays
+    # ~constant as the box grows: the spread cube edge is ``box_size``, so an
+    # L-wide box needs (L / reference)**3 as many offsets to hold the reference
+    # spacing. Capped at ``trans_budget`` so each offset keeps >= 1 orientation
+    # (a huge box never silently collapses the spread group to zero placements).
+    if trans_budget > 0:
+        vol_scale = (box_size / _TRANSLATION_REFERENCE_BOX) ** 3
+        n_target = max(1, int(round(int(n_translation_samples) * vol_scale)))
+        n_target = min(n_target, trans_budget)
+    else:
+        n_target = 0
 
     # Center group: identity first, then near-uniform SO(3) cover at the anchor.
+    # The center point (t=0) is always kept -- burial rejection touches only the
+    # spread offsets.
     center_rotvecs = [np.zeros(3)]
     if n_center > 0:
         center_rotvecs += list(_sample_orientation_rotvecs(n_center))
 
-    # Spread group: Sobol translation offsets (uniform in +/- box/2), each carrying
-    # the same shared SO(3) orientation set.
+    # Spread group: Sobol translation offsets in the +/- box/2 cube. With
+    # ``max_buried >= 0`` we rejection-sample the sequence, skipping any offset
+    # whose centroid (anchor + offset) has more than ``max_buried`` protein atoms
+    # within ``_BURIED_RADIUS`` -- i.e. it lands inside the protein, not the
+    # pocket. We draw until ``n_target`` offsets are accepted or the attempt budget
+    # (n_target + _SOBOL_MAX_OVERDRAW) is spent; any shortfall is reallocated as
+    # extra orientations per accepted offset so the candidate count is held (and
+    # peak RAM never exceeds the unfiltered path). ``max_buried < 0`` disables the
+    # filter (first ``n_target`` offsets as-is, the prior behavior).
     spread_offsets: NDArray = np.zeros((0, 3))
     spread_rotvecs: list[NDArray] = []
-    if n_offsets > 0:
+    n_offsets = 0
+    per_offset = 0
+    if n_target > 0:
         t_sampler = qmc.Sobol(d=3, scramble=True, seed=1)
-        spread_offsets = qmc.scale(
-            t_sampler.random(n_offsets), [-spread_box] * 3, [spread_box] * 3
-        )
-        spread_rotvecs = list(_sample_orientation_rotvecs(per_offset))
+        n_attempts = n_target if max_buried < 0 else n_target + _SOBOL_MAX_OVERDRAW
+        with warnings.catch_warnings():  # silence Sobol non-power-of-2 balance note
+            warnings.simplefilter("ignore")
+            pool = qmc.scale(
+                t_sampler.random(n_attempts), [-spread_box] * 3, [spread_box] * 3
+            )
+        if max_buried < 0:
+            spread_offsets = pool
+        else:
+            burial_tree = (
+                protein_tree if protein_tree is not None else cKDTree(protein_coords)
+            )
+            kept_offsets: list[NDArray] = []
+            for offset in pool:
+                n_near = len(
+                    burial_tree.query_ball_point(anchor + offset, _BURIED_RADIUS)
+                )
+                if n_near <= max_buried:
+                    kept_offsets.append(offset)
+                    if len(kept_offsets) >= n_target:
+                        break
+            spread_offsets = (
+                np.asarray(kept_offsets) if kept_offsets else np.zeros((0, 3))
+            )
+        n_offsets = len(spread_offsets)
+        per_offset = trans_budget // n_offsets if n_offsets > 0 else 0
+        if per_offset == 0:  # nothing left to spread after the center allocation
+            n_offsets = 0
+            spread_offsets = np.zeros((0, 3))
+        else:
+            spread_rotvecs = list(_sample_orientation_rotvecs(per_offset))
 
     # Pocket subset: every candidate's ligand atoms lie within (extent + max
     # spread translation) of the anchor, so one ball around the anchor holds every

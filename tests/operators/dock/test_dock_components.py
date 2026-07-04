@@ -142,14 +142,14 @@ class TestPoseSearchParams:
     DEFAULTS = {
         "n_starts": 32,
         "basin_hops": 0,
-        "max_iterations": 100,
+        "max_iterations": 200,
         "box_size": 10.0,
         "conf_scale": 6.0,
         "max_confs": 128,
         "n_orientation_samples": 1024,
         "n_translation_samples": 32,
-        "center_fraction": 0.2,
-        "diversity_rmsd": 1.0,
+        "center_fraction": 0.5,
+        "diversity_rmsd": 0.1,
     }
 
     def test_defaults_registered(self) -> None:
@@ -228,3 +228,28 @@ class TestPoseSearchParams:
         assert refine_params[0].basin_hops == 7
         # Actual start count recorded for true-compute / starvation tracking.
         assert result.GetIntProp("docking_n_starts_used") == 2
+
+    def test_budget_scales_orientation_budget(self) -> None:
+        """The block-init ``budget`` kwarg multiplies the per-conformer
+        orientation budget threaded into the DG call (RAM-denominated dial)."""
+        block = _make_block()
+        block._budget = 3
+        block.set_inputs(n_orientation_samples=256)
+
+        mol = _make_mol()
+        init_kwargs: dict = {}
+
+        def _fake_init(*_args, **kwargs):
+            init_kwargs.update(kwargs)
+            return [(-5.0, mol)]
+
+        with patch(
+            "cmxflow.operators.dock.dock.optimize_dg_restarts",
+            side_effect=_fake_init,
+        ), patch(
+            "cmxflow.operators.dock.dock.optimize_pose_cached",
+            side_effect=lambda *_a, **_k: _mock_result(mol),
+        ):
+            block._forward(mol)
+
+        assert init_kwargs["n_orientation_samples"] == 3 * 256

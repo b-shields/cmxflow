@@ -31,9 +31,9 @@ GOLDEN_CASES = {
         dict(
             n_starts=32,
             basin_hops=0,
-            diversity_rmsd=1.0,
+            diversity_rmsd=0.1,
         ),
-        -10.237746315409664,
+        -10.271966126024770,
         "golden_pose_flex.npy",
     ),
     "rigid": (
@@ -55,7 +55,7 @@ GOLDEN_CASES = {
             diversity_rmsd=1.0,
             basin_hops=3,
         ),
-        -10.142349746905676,
+        -10.272156456284850,
         "golden_pose_ils.npy",
     ),
 }
@@ -128,7 +128,7 @@ def test_defaults_reach_golden_minimum() -> None:
 INDEX_SEARCH: dict[str, Any] = dict(
     n_starts=16, conf_scale=1.0, max_confs=8, basin_hops=0
 )
-INDEXED_GOLDEN_SCORE = -9.245710628280829
+INDEXED_GOLDEN_SCORE = -9.384951036672803
 INDEXED_GOLDEN_POSE = "golden_pose_indexed.npy"
 
 

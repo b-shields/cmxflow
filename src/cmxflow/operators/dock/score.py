@@ -11,8 +11,8 @@ Reference:
 """
 
 import logging
-from dataclasses import dataclass
-from typing import Protocol, TypeAlias
+from dataclasses import dataclass, field
+from typing import Protocol, TypeAlias, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -72,9 +72,14 @@ class EmpiricalParams:
 class ScoreComponents:
     """Per-term raw sums and weights from a scoring evaluation.
 
-    Raw values are the unweighted sums over all atom pairs. Weighted
-    properties divide each raw sum by the torsion divisor so that
-    ``total`` equals the score returned by the scoring function.
+    Raw values are the unweighted sums over all atom pairs. The per-term weighted
+    properties (``gauss1``, ``repulsion``, ``hydrophobic``, ``hbond``) are
+    ``weight * raw`` with NO torsion divisor applied -- they match smina's
+    pre-weighting term log directly. The torsion divisor (smina's
+    ``num_tors_div`` / ``conf_independent`` correction) is applied once to their
+    sum in ``total``, which is the score returned by the scoring function. This
+    is identical to dividing each term (``sum(w*raw)/d == sum(w*raw/d)``) but
+    cheaper and clearer.
 
     Attributes:
         gauss1_raw: Unweighted sum of Gaussian attractive term.
@@ -106,23 +111,25 @@ class ScoreComponents:
 
     @property
     def gauss1(self) -> float:
-        return self.w_gauss1 * self.gauss1_raw / self._torsion_divisor
+        return self.w_gauss1 * self.gauss1_raw
 
     @property
     def repulsion(self) -> float:
-        return self.w_repulsion * self.repulsion_raw / self._torsion_divisor
+        return self.w_repulsion * self.repulsion_raw
 
     @property
     def hydrophobic(self) -> float:
-        return self.w_hydrophobic * self.hydrophobic_raw / self._torsion_divisor
+        return self.w_hydrophobic * self.hydrophobic_raw
 
     @property
     def hbond(self) -> float:
-        return self.w_hbond * self.hbond_raw / self._torsion_divisor
+        return self.w_hbond * self.hbond_raw
 
     @property
     def total(self) -> float:
-        return self.gauss1 + self.repulsion + self.hydrophobic + self.hbond
+        return (
+            self.gauss1 + self.repulsion + self.hydrophobic + self.hbond
+        ) / self._torsion_divisor
 
 
 # =============================================================================
@@ -154,11 +161,11 @@ HYDROPHOBIC_SMARTS = (
     "[$([#6;a]),$([#6;A;!$([#6]~[#7,#8,#15,#16])]),$([#9,#17,#35,#53])]"
 )
 HBOND_DONOR_SMARTS = (
-    "[$([N;!H0;v3]),$([N;!H0;+1;v4]),$([O;H1;+0]),$([n;H1;+0]),$([n;!H0;+1])"
+    "[$([N;!H0;v3]),$([N;!H0;+1;v4]),$([O;!H0;+0]),$([n;H1;+0]),$([n;!H0;+1])"
     ",Li+1,Na+1,K+1,Cs+1,Mg+2,Ca+2,Mn+2,Zn+2]"
 )
 HBOND_ACCEPTOR_SMARTS = (
-    "[$([O;H1;v2]-[!$(*=[O,N,P,S])]),$([O;H0;v2]),$([O;-]),"
+    "[$([O;H1;v2]-[!$(*=[O,N,P,S])]),$([O;H0;v2]),$([O;H2;v2]),$([O;-]),"
     "$([N;v3;!$(N-*=!@[O,N,P,S]);!$(N-c)]),$([nH0,o;+0])]"
 )
 
@@ -172,12 +179,24 @@ class AtomTyping:
         is_hydrophobic: Boolean mask for hydrophobic atoms.
         is_hbond_donor: Boolean mask for H-bond donors.
         is_hbond_acceptor: Boolean mask for H-bond acceptors.
+        weights: Per-atom occupancy weight applied to every pairwise term this
+            atom contributes (1.0 for ordinary atoms). Used to occupancy-weight
+            crystallographic alternate-location (altLoc) conformers so a residue
+            sampling two states contributes the ensemble-averaged interaction.
+            Defaults to all-ones when not provided.
     """
 
     radii: NDArray[np.floating]
     is_hydrophobic: NDArray[np.bool_]
     is_hbond_donor: NDArray[np.bool_]
     is_hbond_acceptor: NDArray[np.bool_]
+    # Defaults to all-ones in __post_init__; type-ignore the None sentinel so
+    # downstream use sites see a plain (non-Optional) array.
+    weights: NDArray[np.floating] = field(default=None)  # type: ignore[arg-type]
+
+    def __post_init__(self) -> None:
+        if self.weights is None:
+            self.weights = np.ones(len(self.radii), dtype=np.float64)
 
 
 def get_atom_radii(mol: Chem.Mol) -> NDArray[np.floating]:
@@ -418,6 +437,12 @@ def hbond_term(
 # >=3.6 Å, where even the Gaussian tail is ~1e-9. So 8 Å is numerically exact.
 INTERACTION_CUTOFF: float = 8.0
 
+# Verlet skin margin (Angstroms). A reused neighbor list is built at
+# ``INTERACTION_CUTOFF + NEIGHBOR_SKIN`` and stays exact until a ligand atom
+# drifts past the skin, so the per-minimize rebuild count trades against pairs
+# scored per call. 2.0 Å is a safe default for local L-BFGS-B trajectories.
+NEIGHBOR_SKIN: float = 2.0
+
 
 def build_protein_tree(protein_coords: np.ndarray) -> cKDTree:
     """Build a KD-tree over protein atoms for neighbor queries.
@@ -467,6 +492,7 @@ def _pair_term_sums_and_grad(
     hbond_pair: NDArray[np.bool_],
     params: EmpiricalParams,
     torsion_divisor: float,
+    weights: NDArray[np.floating] | float,
 ) -> tuple[tuple[float, float, float, float], NDArray[np.floating]]:
     """Per-pair Vinardo term sums and ``d(score)/d(surface_distance)``.
 
@@ -479,6 +505,8 @@ def _pair_term_sums_and_grad(
         hbond_pair: H-bond donor/acceptor-pair mask, broadcastable to ``d``.
         params: Scoring parameters.
         torsion_divisor: ``1 + w_rot * n_rot`` (applied to df_dd only).
+        weights: Per-pair occupancy weight (protein-atom weight broadcast to
+            ``d``); scales each term sum and df_dd. Use ``1.0`` for unweighted.
 
     Returns:
         ((gauss1_raw, repulsion_raw, hydrophobic_raw, hbond_raw), df_dd) where
@@ -504,20 +532,281 @@ def _pair_term_sums_and_grad(
     hb = np.where(hb_inner, 1.0, np.where(hb_trans, -d / (-params.hbond_good), 0.0))
 
     raws = (
-        float(np.sum(g1)),
-        float(np.sum(rep)),
-        float(np.sum(hydro)),
-        float(np.sum(hb)),
+        float(np.sum(g1 * weights)),
+        float(np.sum(rep * weights)),
+        float(np.sum(hydro * weights)),
+        float(np.sum(hb * weights)),
     )
 
     df_dd = (
-        params.w_gauss1 * (-2.0 * z / params.gauss1_width) * g1
-        + params.w_repulsion * np.where(rep_mask, 2.0 * d, 0.0)
-        + params.w_hydrophobic * np.where(hydro_trans, -1.0 / range_hydro, 0.0)
-        + params.w_hbond * np.where(hb_trans, -1.0 / (-params.hbond_good), 0.0)
-    ) / torsion_divisor
+        (
+            params.w_gauss1 * (-2.0 * z / params.gauss1_width) * g1
+            + params.w_repulsion * np.where(rep_mask, 2.0 * d, 0.0)
+            + params.w_hydrophobic * np.where(hydro_trans, -1.0 / range_hydro, 0.0)
+            + params.w_hbond * np.where(hb_trans, -1.0 / (-params.hbond_good), 0.0)
+        )
+        * weights
+        / torsion_divisor
+    )
 
     return raws, df_dd
+
+
+# Lazily-bound numba kernel. Imported on first use (not at module import) so the
+# ~0.3 s numba import stays off ``score.py``'s widely-imported path / CLI startup.
+_SCORE_GRAD_KERNEL = None
+
+
+def _get_score_grad_kernel():
+    """Return the cached numba ``score_grad_pairs`` kernel, importing on first use."""
+    global _SCORE_GRAD_KERNEL
+    if _SCORE_GRAD_KERNEL is None:
+        from cmxflow.operators.dock._kernels import score_grad_pairs
+
+        _SCORE_GRAD_KERNEL = score_grad_pairs
+    return _SCORE_GRAD_KERNEL
+
+
+_SCORE_POCKET_KERNEL = None
+_SCORE_POCKET_BATCH_KERNEL = None
+
+
+def _get_score_pocket_kernel():
+    """Return the cached numba ``score_pocket`` kernel, importing on first use."""
+    global _SCORE_POCKET_KERNEL
+    if _SCORE_POCKET_KERNEL is None:
+        from cmxflow.operators.dock._kernels import score_pocket
+
+        _SCORE_POCKET_KERNEL = score_pocket
+    return _SCORE_POCKET_KERNEL
+
+
+def _get_score_pocket_batch_kernel():
+    """Return the cached numba ``score_pocket_batch`` kernel, import on first use."""
+    global _SCORE_POCKET_BATCH_KERNEL
+    if _SCORE_POCKET_BATCH_KERNEL is None:
+        from cmxflow.operators.dock._kernels import score_pocket_batch
+
+        _SCORE_POCKET_BATCH_KERNEL = score_pocket_batch
+    return _SCORE_POCKET_BATCH_KERNEL
+
+
+def build_pocket_subset(
+    protein_coords: np.ndarray,
+    protein_typing: "AtomTyping",
+    anchor: np.ndarray,
+    radius: float,
+    protein_tree: cKDTree | None = None,
+) -> tuple[np.ndarray, "AtomTyping"]:
+    """Protein atoms within ``radius`` of ``anchor`` (coords + sliced typing).
+
+    Used to pre-screen docking restarts: when every candidate placement of a
+    molecule lies within a bounded distance of the binding-site anchor, the
+    atoms that could contact *any* placement all fall in one ball around the
+    anchor. Scoring against this fixed subset is exact (atoms outside the ball
+    are beyond ``INTERACTION_CUTOFF`` of every placement) and pays the KD-tree
+    query once instead of once per candidate.
+
+    Args:
+        protein_coords: Full protein atom coordinates (n_atoms, 3).
+        protein_typing: Full protein atom typing.
+        anchor: Binding-site anchor point (3,).
+        radius: Inclusion radius (Angstroms).
+        protein_tree: Optional cached KD-tree over ``protein_coords``.
+
+    Returns:
+        ``(pocket_coords, pocket_typing)`` restricted to the in-radius atoms.
+    """
+    tree = (
+        protein_tree if protein_tree is not None else build_protein_tree(protein_coords)
+    )
+    idx = np.asarray(tree.query_ball_point(anchor, r=radius), dtype=np.intp)
+    pocket_coords = np.ascontiguousarray(protein_coords[idx])
+    pocket_typing = AtomTyping(
+        radii=protein_typing.radii[idx],
+        is_hydrophobic=protein_typing.is_hydrophobic[idx],
+        is_hbond_donor=protein_typing.is_hbond_donor[idx],
+        is_hbond_acceptor=protein_typing.is_hbond_acceptor[idx],
+        weights=protein_typing.weights[idx],
+    )
+    return pocket_coords, pocket_typing
+
+
+def empirical_score_pocket(
+    ligand_coords: np.ndarray,
+    pocket_coords: np.ndarray,
+    pocket_typing: "AtomTyping",
+    ligand_typing: "AtomTyping",
+    params: EmpiricalParams,
+    torsion_divisor: float,
+    cutoff: float = INTERACTION_CUTOFF,
+) -> float:
+    """Empirical score over a pre-built pocket subset -- score only, no gradient.
+
+    Restart-screening hot path. Pairs every ligand atom with every pocket atom in
+    the numba ``score_pocket`` kernel (cutoff-gated), so there is no per-call
+    KD-tree query. Numerically equal to ``empirical_score_cached(...).total`` when
+    the pocket subset contains every protein atom within ``cutoff`` of the ligand.
+
+    Args:
+        ligand_coords: Ligand heavy-atom coordinates (n_lig, 3).
+        pocket_coords: Pocket protein coordinates (n_pocket, 3).
+        pocket_typing: Pocket atom typing (from ``build_pocket_subset``).
+        ligand_typing: Ligand atom typing.
+        params: Scoring parameters.
+        torsion_divisor: ``1 + w_rot * n_rot`` (fixed topology; computed once).
+        cutoff: Euclidean interaction cutoff.
+
+    Returns:
+        Scalar empirical score.
+    """
+    kernel = _get_score_pocket_kernel()
+    g1, rep, hydro, hb = kernel(
+        np.ascontiguousarray(ligand_coords),
+        pocket_coords,
+        ligand_typing.radii,
+        pocket_typing.radii,
+        ligand_typing.is_hydrophobic,
+        pocket_typing.is_hydrophobic,
+        ligand_typing.is_hbond_donor,
+        ligand_typing.is_hbond_acceptor,
+        pocket_typing.is_hbond_donor,
+        pocket_typing.is_hbond_acceptor,
+        pocket_typing.weights,
+        params.gauss1_offset,
+        params.gauss1_width,
+        params.hydro_good,
+        params.hydro_bad,
+        params.hbond_good,
+        cutoff,
+    )
+    score = (
+        params.w_gauss1 * g1
+        + params.w_repulsion * rep
+        + params.w_hydrophobic * hydro
+        + params.w_hbond * hb
+    ) / torsion_divisor
+    return float(score)
+
+
+def empirical_score_pocket_batch(
+    coords_batch: np.ndarray,
+    pocket_coords: np.ndarray,
+    pocket_typing: "AtomTyping",
+    ligand_typing: "AtomTyping",
+    params: EmpiricalParams,
+    torsion_divisor: float,
+    cutoff: float = INTERACTION_CUTOFF,
+) -> NDArray[np.floating]:
+    """Empirical score for K candidate poses over a pre-built pocket subset.
+
+    Batched restart-screening hot path: one numba dispatch scores the whole
+    candidate grid (vs one call per candidate), and the caller generates the
+    coordinates with vectorized numpy rather than per-candidate RDKit conformer
+    copies. Per-pose result equals :func:`empirical_score_pocket`.
+
+    Args:
+        coords_batch: Candidate ligand coordinates (K, n_lig, 3).
+        pocket_coords: Pocket protein coordinates (n_pocket, 3).
+        pocket_typing: Pocket atom typing (from ``build_pocket_subset``).
+        ligand_typing: Ligand atom typing.
+        params: Scoring parameters.
+        torsion_divisor: ``1 + w_rot * n_rot`` (fixed topology; computed once).
+        cutoff: Euclidean interaction cutoff.
+
+    Returns:
+        ``(K,)`` array of empirical scores.
+    """
+    kernel = _get_score_pocket_batch_kernel()
+    raws = kernel(
+        np.ascontiguousarray(coords_batch, dtype=np.float64),
+        pocket_coords,
+        ligand_typing.radii,
+        pocket_typing.radii,
+        ligand_typing.is_hydrophobic,
+        pocket_typing.is_hydrophobic,
+        ligand_typing.is_hbond_donor,
+        ligand_typing.is_hbond_acceptor,
+        pocket_typing.is_hbond_donor,
+        pocket_typing.is_hbond_acceptor,
+        pocket_typing.weights,
+        params.gauss1_offset,
+        params.gauss1_width,
+        params.hydro_good,
+        params.hydro_bad,
+        params.hbond_good,
+        cutoff,
+    )
+    weights = np.array(
+        [params.w_gauss1, params.w_repulsion, params.w_hydrophobic, params.w_hbond]
+    )
+    return (raws @ weights) / torsion_divisor
+
+
+def _sparse_score_grad(
+    ligand_coords: NDArray[np.floating],
+    protein_coords: np.ndarray,
+    i_idx: NDArray[np.intp],
+    j_idx: NDArray[np.intp],
+    ligand_typing: "AtomTyping",
+    protein_typing: "AtomTyping",
+    params: EmpiricalParams,
+    inv_divisor: float,
+    cutoff: float = INTERACTION_CUTOFF,
+) -> tuple[float, float, float, float, NDArray]:
+    """Gather per-pair arrays for the neighbor list and run the numba kernel.
+
+    Shared by the sparse paths of ``empirical_score_cached`` (gradient ignored)
+    and ``empirical_score_and_grad_cached``. The KD-tree query itself stays in
+    the caller; this only fuses the gather + term sums + gradient scatter.
+
+    Args:
+        ligand_coords: Ligand heavy-atom coordinates (n_lig, 3).
+        protein_coords: Protein coordinates (n_prot, 3).
+        i_idx: Ligand atom index per neighbor pair.
+        j_idx: Protein atom index per neighbor pair.
+        ligand_typing: Ligand atom typing.
+        protein_typing: Protein atom typing.
+        params: Scoring parameters.
+        inv_divisor: ``1 / (1 + w_rot * n_rot)`` (applied to the gradient only).
+        cutoff: Euclidean core cutoff passed to the kernel's Verlet gate. Pairs
+            already within ``cutoff`` (the per-call path) are unaffected; a
+            skin-padded Verlet list is trimmed back to ``cutoff`` here.
+
+    Returns:
+        ``(gauss1_raw, repulsion_raw, hydrophobic_raw, hbond_raw, atom_grad)``.
+    """
+    kernel = _get_score_grad_kernel()
+    # ``asarray`` (not ``astype``) avoids a copy when indices are already int64
+    # (intp on 64-bit), which is the common case for both the per-call and
+    # reused-Verlet paths.
+    result = kernel(
+        np.ascontiguousarray(ligand_coords),
+        protein_coords,
+        np.asarray(i_idx, dtype=np.int64),
+        np.asarray(j_idx, dtype=np.int64),
+        ligand_typing.radii,
+        protein_typing.radii,
+        ligand_typing.is_hydrophobic,
+        protein_typing.is_hydrophobic,
+        ligand_typing.is_hbond_donor,
+        ligand_typing.is_hbond_acceptor,
+        protein_typing.is_hbond_donor,
+        protein_typing.is_hbond_acceptor,
+        params.w_gauss1,
+        params.w_repulsion,
+        params.w_hydrophobic,
+        params.w_hbond,
+        params.gauss1_offset,
+        params.gauss1_width,
+        params.hydro_good,
+        params.hydro_bad,
+        params.hbond_good,
+        cutoff,
+        protein_typing.weights,
+        inv_divisor,
+    )
+    return cast(tuple[float, float, float, float, NDArray], result)
 
 
 # =============================================================================
@@ -577,7 +866,7 @@ def intramolecular_score_and_grad(
     eucl = np.linalg.norm(diff, axis=-1)
     d = eucl - pairs.radii_sum
     (g1_raw, rep_raw, hydro_raw, hb_raw), df_dd = _pair_term_sums_and_grad(
-        d, pairs.hydro_pair, pairs.hbond_pair, params, torsion_divisor
+        d, pairs.hydro_pair, pairs.hbond_pair, params, torsion_divisor, 1.0
     )
     score = (
         params.w_gauss1 * g1_raw
@@ -702,24 +991,17 @@ def empirical_score_cached(
 
     if protein_tree is not None:
         i_idx, j_idx = _neighbor_pairs(ligand_coords, protein_tree, cutoff)
-        diff = ligand_coords[i_idx] - protein_coords[j_idx]
-        d = (
-            np.linalg.norm(diff, axis=-1)
-            - ligand_typing.radii[i_idx]
-            - protein_typing.radii[j_idx]
-        )
-        hydro_pair = (
-            ligand_typing.is_hydrophobic[i_idx] & protein_typing.is_hydrophobic[j_idx]
-        )
-        hbond_pair = (
-            ligand_typing.is_hbond_donor[i_idx]
-            & protein_typing.is_hbond_acceptor[j_idx]
-        ) | (
-            ligand_typing.is_hbond_acceptor[i_idx]
-            & protein_typing.is_hbond_donor[j_idx]
-        )
-        (g1_raw, rep_raw, hydro_raw, hb_raw), _ = _pair_term_sums_and_grad(
-            d, hydro_pair, hbond_pair, params, 1.0
+        # Gradient unused on the score-only path; inv_divisor is irrelevant.
+        g1_raw, rep_raw, hydro_raw, hb_raw, _ = _sparse_score_grad(
+            ligand_coords,
+            protein_coords,
+            i_idx,
+            j_idx,
+            ligand_typing,
+            protein_typing,
+            params,
+            1.0,
+            cutoff=cutoff,
         )
     else:
         distances = compute_surface_distances(
@@ -729,10 +1011,14 @@ def empirical_score_cached(
             protein_typing.radii,
         )
 
+        # Occupancy weight per protein atom, broadcast across ligand-atom rows.
+        w = protein_typing.weights[None, :]
         g1_raw = float(
-            np.sum(gauss1_term(distances, params.gauss1_offset, params.gauss1_width))
+            np.sum(
+                gauss1_term(distances, params.gauss1_offset, params.gauss1_width) * w
+            )
         )
-        rep_raw = float(np.sum(repulsion_term(distances)))
+        rep_raw = float(np.sum(repulsion_term(distances) * w))
         hydro_raw = float(
             np.sum(
                 hydrophobic_term(
@@ -742,6 +1028,7 @@ def empirical_score_cached(
                     params.hydro_good,
                     params.hydro_bad,
                 )
+                * w
             )
         )
         hb_raw = float(
@@ -754,6 +1041,7 @@ def empirical_score_cached(
                     protein_typing.is_hbond_acceptor,
                     params.hbond_good,
                 )
+                * w
             )
         )
 
@@ -820,27 +1108,23 @@ def empirical_score_and_grad_cached(
     if ligand_typing is None:
         ligand_typing = get_atom_typing(ligand_heavy)
     n_rot = rdMolDescriptors.CalcNumRotatableBonds(ligand_heavy, strict=False)
-    n_lig = len(ligand_coords)
     torsion_divisor = 1.0 + params.w_rot * n_rot
 
     if protein_tree is not None:
         # --- Sparse path: only atom pairs within cutoff ---
+        # The numba kernel fuses the gather, term sums, and gradient scatter into
+        # a single pass; the gradient is scaled by 1/torsion_divisor internally.
         i_idx, j_idx = _neighbor_pairs(ligand_coords, protein_tree, cutoff)
-        diff = ligand_coords[i_idx] - protein_coords[j_idx]  # (n_pairs, 3)
-        eucl = np.linalg.norm(diff, axis=-1)  # (n_pairs,)
-        d = eucl - ligand_typing.radii[i_idx] - protein_typing.radii[j_idx]
-        hydro_pair = (
-            ligand_typing.is_hydrophobic[i_idx] & protein_typing.is_hydrophobic[j_idx]
-        )
-        hbond_pair = (
-            ligand_typing.is_hbond_donor[i_idx]
-            & protein_typing.is_hbond_acceptor[j_idx]
-        ) | (
-            ligand_typing.is_hbond_acceptor[i_idx]
-            & protein_typing.is_hbond_donor[j_idx]
-        )
-        (g1_raw, rep_raw, hydro_raw, hb_raw), df_dd = _pair_term_sums_and_grad(
-            d, hydro_pair, hbond_pair, params, torsion_divisor
+        g1_raw, rep_raw, hydro_raw, hb_raw, atom_grad = _sparse_score_grad(
+            ligand_coords,
+            protein_coords,
+            i_idx,
+            j_idx,
+            ligand_typing,
+            protein_typing,
+            params,
+            1.0 / torsion_divisor,
+            cutoff=cutoff,
         )
         score = (
             params.w_gauss1 * g1_raw
@@ -848,16 +1132,6 @@ def empirical_score_and_grad_cached(
             + params.w_hydrophobic * hydro_raw
             + params.w_hbond * hb_raw
         ) / torsion_divisor
-
-        # Chain rule + scatter-add onto ligand atoms (bincount per axis)
-        safe_eucl = np.where(eucl > 1e-8, eucl, 1.0)
-        unit = np.where(eucl[:, None] > 1e-8, diff / safe_eucl[:, None], 0.0)
-        contrib = df_dd[:, None] * unit  # (n_pairs, 3)
-        atom_grad = np.zeros((n_lig, 3))
-        for axis in range(3):
-            atom_grad[:, axis] = np.bincount(
-                i_idx, weights=contrib[:, axis], minlength=n_lig
-            )
         return float(score), atom_grad
 
     # --- Dense path: full (n_lig, n_prot) ---
@@ -876,7 +1150,12 @@ def empirical_score_and_grad_cached(
         & protein_typing.is_hbond_donor[None, :]
     )
     (g1_raw, rep_raw, hydro_raw, hb_raw), df_dd = _pair_term_sums_and_grad(
-        d, hydro_pair, hbond_pair, params, torsion_divisor
+        d,
+        hydro_pair,
+        hbond_pair,
+        params,
+        torsion_divisor,
+        protein_typing.weights[None, :],
     )
     score = (
         params.w_gauss1 * g1_raw
@@ -891,6 +1170,107 @@ def empirical_score_and_grad_cached(
     unit = np.where(eucl[:, :, None] > 1e-8, unit, 0.0)
     atom_grad = np.einsum("ij,ijk->ik", df_dd, unit)  # (n_heavy, 3)
 
+    return float(score), atom_grad
+
+
+class NeighborList:
+    """Reusable (Verlet) ligand/protein neighbor-pair list for one local minimize.
+
+    The per-call KD-tree query in ``empirical_score_and_grad_cached`` dominates
+    the optimizer hot path, yet the ligand barely moves between gradient evals.
+    This builds the pair list once at ``cutoff + skin`` and reuses it, rebuilding
+    only when a ligand atom has moved more than ``skin`` since the last build.
+    The kernel gates each pair at ``cutoff`` (see ``score_grad_pairs``), so the
+    scored set is identical to a fresh ``cutoff`` query for as long as no atom has
+    drifted past the skin -- which the rebuild check guarantees. Results therefore
+    match the per-call path to summation order (~1e-13).
+
+    Built once per ``optimize_pose_cached`` start; persists across all L-BFGS-B
+    iterations and basin hops of that start.
+    """
+
+    def __init__(
+        self,
+        protein_coords: np.ndarray,
+        protein_typing: AtomTyping,
+        ligand_typing: AtomTyping,
+        cutoff: float = INTERACTION_CUTOFF,
+        skin: float = NEIGHBOR_SKIN,
+        protein_tree: cKDTree | None = None,
+    ) -> None:
+        self.protein_coords = np.ascontiguousarray(protein_coords)
+        self.protein_typing = protein_typing
+        self.ligand_typing = ligand_typing
+        self.cutoff = cutoff
+        self.skin = skin
+        # Reuse the caller's tree when given (it spans the same atoms); the build
+        # radius (cutoff + skin) is just a query argument, not baked into the tree.
+        self._tree = (
+            protein_tree
+            if protein_tree is not None
+            else build_protein_tree(self.protein_coords)
+        )
+        self._ref_coords: np.ndarray | None = None  # ligand coords at last build
+        self.i_idx: NDArray[np.intp] = np.empty(0, dtype=np.intp)
+        self.j_idx: NDArray[np.intp] = np.empty(0, dtype=np.intp)
+
+    def update(self, ligand_coords: np.ndarray) -> None:
+        """Rebuild the pair list iff a ligand atom moved more than ``skin``."""
+        if self._ref_coords is not None:
+            max_disp = np.sqrt(
+                ((ligand_coords - self._ref_coords) ** 2).sum(axis=1).max()
+            )
+            if max_disp <= self.skin:
+                return  # cached list still covers every within-cutoff pair
+        self.i_idx, self.j_idx = _neighbor_pairs(
+            ligand_coords, self._tree, self.cutoff + self.skin
+        )
+        self._ref_coords = ligand_coords.copy()
+
+
+def empirical_score_and_grad_fast(
+    ligand_coords: np.ndarray,
+    neighbor_list: NeighborList,
+    params: EmpiricalParams,
+    torsion_divisor: float,
+) -> tuple[float, NDArray]:
+    """Score + per-atom gradient over a reused Verlet neighbor list.
+
+    Optimizer hot path. Unlike ``empirical_score_and_grad_cached`` this takes
+    coordinates directly -- no Mol, so no per-call conformer extraction or
+    ``CalcNumRotatableBonds`` -- and reuses ``neighbor_list``'s KD-tree pairs
+    across evals, paying the query only on rebuilds. Numerically equal to the
+    cached path (same pair set, summation-order ~1e-13) at the same ``cutoff``.
+
+    Args:
+        ligand_coords: Ligand heavy-atom coordinates (n_lig, 3).
+        neighbor_list: Verlet list for this minimize; updated in place.
+        params: Scoring parameters.
+        torsion_divisor: ``1 + w_rot * n_rot`` (fixed topology; computed once by
+            the caller). Scales the score and, via ``1/torsion_divisor``, the grad.
+
+    Returns:
+        Tuple of (score, atom_grad) with atom_grad shape (n_lig, 3).
+    """
+    ligand_coords = np.ascontiguousarray(ligand_coords)
+    neighbor_list.update(ligand_coords)
+    g1_raw, rep_raw, hydro_raw, hb_raw, atom_grad = _sparse_score_grad(
+        ligand_coords,
+        neighbor_list.protein_coords,
+        neighbor_list.i_idx,
+        neighbor_list.j_idx,
+        neighbor_list.ligand_typing,
+        neighbor_list.protein_typing,
+        params,
+        1.0 / torsion_divisor,
+        cutoff=neighbor_list.cutoff,
+    )
+    score = (
+        params.w_gauss1 * g1_raw
+        + params.w_repulsion * rep_raw
+        + params.w_hydrophobic * hydro_raw
+        + params.w_hbond * hb_raw
+    ) / torsion_divisor
     return float(score), atom_grad
 
 

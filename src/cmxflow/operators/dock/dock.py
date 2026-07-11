@@ -3,6 +3,26 @@
 This module provides a MoleculeBlock implementation for docking ligands
 into protein binding sites using the empirical (default Vinardo) scoring
 function and rigid-body + torsional pose optimization.
+
+Memory scaling
+--------------
+Init screening builds every candidate pose for one ligand at once, so peak RAM
+per worker is set by the *flexible + large* ligand, not the median::
+
+    peak_bytes ~= n_conf * placements_per_conf * heavy_atoms * 24
+      n_conf             = 1 + min(round(n_rot * conf_scale), max_confs)
+      placements_per_conf = budget * n_orientation_samples  (+1 identity pose)
+
+Only ``n_conf`` grows with rotatable-bond count; the per-conformer placement
+budget is fixed. At n_orientation_samples=2048, conf_scale=8, max_confs=256,
+budget=1 and a 50-heavy-atom ligand, per worker:
+
+    n_rot   0 ->   2 MB      n_rot  10 -> 199 MB
+    n_rot   5 -> 101 MB      n_rot  20 -> 396 MB
+
+RAM scales linearly with ``budget``, ``n_orientation_samples`` and heavy-atom
+count, and runs N workers in parallel -- size the box (blind docking) or the
+worker count to the flexible tail of the library, not its median.
 """
 
 import dataclasses
@@ -14,7 +34,7 @@ from typing import Any
 
 import numpy as np
 from rdkit import Chem
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, rdMolDescriptors
 from scipy.spatial import cKDTree
 
 from cmxflow.operators.base import MoleculeBlock
@@ -61,6 +81,114 @@ _INDEX_DB_NAME = "scaffold_index.db"
 _INDEX_CONSTRAINT_WEIGHT = 25.0
 _INDEX_CONSTRAINT_TOL = 0.5
 
+# An atom and its altLoc copy are at most ~1.5 Å apart; this matches a parsed
+# record to the RDKit-kept conformer so the others can be flagged as dropped.
+_ALTLOC_MATCH_TOL = 0.05
+
+
+@dataclasses.dataclass
+class _AltLocAtoms:
+    """Recovered altLoc conformer atoms (see ``_recover_dropped_altlocs``)."""
+
+    coords: np.ndarray
+    radii: np.ndarray
+    is_hydrophobic: np.ndarray
+    is_hbond_donor: np.ndarray
+    is_hbond_acceptor: np.ndarray
+    weights: np.ndarray
+
+
+def _recover_dropped_altlocs(
+    mol: Chem.Mol,
+    coords: np.ndarray,
+    typing: AtomTyping,
+    receptor_path: Path,
+) -> _AltLocAtoms:
+    """Recover altLoc conformers RDKit dropped, inheriting their primary typing.
+
+    RDKit keeps one (highest-occupancy) atom per ``(chain, resSeq, iCode, resName,
+    atomName)`` site; the alternates are present in the PDB but absent from ``mol``.
+    This re-reads heavy ``ATOM``/``HETATM`` records carrying an altLoc indicator,
+    skips the one RDKit already kept (nearest primary atom within
+    ``_ALTLOC_MATCH_TOL``), and returns the rest mapped onto their primary atom's
+    radius/masks (same element and connectivity) with occupancy as the weight.
+
+    Args:
+        mol: Heavy-atom receptor Mol (the primary, highest-occupancy structure).
+        coords: Primary atom coordinates (n_primary, 3).
+        typing: Primary atom typing (radii + masks).
+        receptor_path: Source PDB path.
+
+    Returns:
+        ``_AltLocAtoms`` with the recovered atoms (possibly empty).
+    """
+    # key -> primary atom index, for inheriting type/radius onto the alternate.
+    key_to_idx: dict[tuple, int] = {}
+    for idx, atom in enumerate(mol.GetAtoms()):
+        info = atom.GetPDBResidueInfo()
+        if info is None:
+            continue
+        key = (
+            info.GetChainId(),
+            info.GetResidueNumber(),
+            info.GetInsertionCode(),
+            info.GetResidueName().strip(),
+            info.GetName().strip(),
+        )
+        key_to_idx[key] = idx
+
+    primary_tree = cKDTree(coords)
+    coords_out, radii, hydro, don, acc, wts = [], [], [], [], [], []
+    unmapped = 0
+    for line in receptor_path.read_text().splitlines():
+        if not line.startswith(("ATOM", "HETATM")):
+            continue
+        if line[16] == " ":  # no altLoc indicator
+            continue
+        if line[76:78].strip() == "H":  # united-atom: heavy atoms only
+            continue
+        xyz = np.array([float(line[30:38]), float(line[38:46]), float(line[46:54])])
+        if primary_tree.query(xyz)[0] <= _ALTLOC_MATCH_TOL:
+            continue  # this is the conformer RDKit kept
+        key = (
+            line[21],
+            int(line[22:26]),
+            line[26],
+            line[17:20].strip(),
+            line[12:16].strip(),
+        )
+        idx = key_to_idx.get(key)
+        if idx is None:
+            unmapped += 1
+            continue
+        try:
+            occ = float(line[54:60])
+        except ValueError:
+            occ = 1.0
+        coords_out.append(xyz)
+        radii.append(typing.radii[idx])
+        hydro.append(typing.is_hydrophobic[idx])
+        don.append(typing.is_hbond_donor[idx])
+        acc.append(typing.is_hbond_acceptor[idx])
+        wts.append(occ)
+
+    if unmapped:
+        logger.warning(
+            "altLoc recovery: %d dropped record(s) in %s had no matching primary "
+            "atom and were skipped",
+            unmapped,
+            receptor_path,
+        )
+
+    return _AltLocAtoms(
+        coords=np.array(coords_out, dtype=np.float64).reshape(-1, 3),
+        radii=np.array(radii, dtype=np.float64),
+        is_hydrophobic=np.array(hydro, dtype=bool),
+        is_hbond_donor=np.array(don, dtype=bool),
+        is_hbond_acceptor=np.array(acc, dtype=bool),
+        weights=np.array(wts, dtype=np.float64),
+    )
+
 
 class MoleculeDockBlock(MoleculeBlock):
     """MoleculeBlock for docking ligands into protein binding sites.
@@ -103,11 +231,13 @@ class MoleculeDockBlock(MoleculeBlock):
         - docking_strain: Ligand strain penalty — intramolecular energy added vs
           the input conformer (>=0). Reported regardless of ``score_strain``.
         - docking_converged: Whether optimization converged.
-        When ``score_components=True`` (default), also writes:
-        - docking_gauss1: Gaussian term contribution to docking_score.
-        - docking_repulsion: Repulsion term contribution to docking_score.
-        - docking_hydrophobic: Hydrophobic term contribution to docking_score.
-        - docking_hbond: H-bond term contribution to docking_score.
+        When ``score_components=True`` (default), also writes the raw
+        (pre-torsion-divisor) weighted terms, matching smina's term log; the
+        torsion divisor is applied only to docking_score/docking_empirical:
+        - docking_gauss1: Gaussian term (weight * raw sum, no torsion divisor).
+        - docking_repulsion: Repulsion term (weight * raw sum, no torsion divisor).
+        - docking_hydrophobic: Hydrophobic term (weight * raw sum, no divisor).
+        - docking_hbond: H-bond term (weight * raw sum, no torsion divisor).
         - docking_n_rot: Torsional entropy energetic term (w_rot * N_rot).
         - docking_scoring_function: Scoring weights used, for reproducibility.
 
@@ -139,6 +269,10 @@ class MoleculeDockBlock(MoleculeBlock):
             minimizes from the aligned pose; rows 1+ sample the binding site box.
         - basin_hops: Iterated-local-search refinement steps per restart
             (0 = single minimize). Higher finds lower-energy poses at more cost.
+        - basin_hop_starts: Number of top-scoring minimized starts to carry into
+            basin hopping (two-stage: minimize all starts, hop only the best few).
+            0 (default) or >= n_starts hops every start. No effect when
+            basin_hops = 0.
         - max_iterations: Maximum L-BFGS-B iterations per restart.
         - box_size: Translation search box half-width in Angstroms (default 5.0).
             Centred on site_reference centroid when provided, otherwise on the
@@ -152,6 +286,9 @@ class MoleculeDockBlock(MoleculeBlock):
         self,
         score_components: bool = True,
         score_strain: bool = False,
+        score_only: bool = False,
+        receptor_most_populated_only: bool = False,
+        budget: int = 1,
         **kwargs: Any,
     ) -> None:
         """Initialize the molecular docking block.
@@ -159,11 +296,27 @@ class MoleculeDockBlock(MoleculeBlock):
         Args:
             score_components: If True (default), write per-term weighted score
                 components as SDF properties on each docked molecule.
+            budget: Integer sampling-budget multiplier on the per-conformer
+                orientation budget (default 1). Scales both the center
+                orientations and the per-offset spread together, so a larger
+                search box (blind docking) is met by raising budget rather than
+                starving each translation offset. Denominated for RAM: at the
+                schema ceiling (~100 heavy atoms, n_orientation_samples at its
+                3200 max, default max_confs) each unit costs roughly 1 GB of RAM
+                per process, so set budget to about the GB you can allot per
+                worker. A resource/deployment knob, not an optimized parameter.
+            score_only: If True, skip pose optimization entirely and score the
+                input pose as-is. Useful for rescoring pre-docked poses and for
+                isolating scoring-function cost from the search. Not a mutable
+                parameter -- it changes the behavior of the forward pass only.
             score_strain: If True, add the ligand strain penalty (intramolecular
                 energy added vs the input conformer, >=0) into ``docking_score``
                 and into multistart selection. Default False keeps
                 ``docking_score`` purely intermolecular (smina-comparable). The
                 strain value is always written as ``docking_strain`` regardless.
+            receptor_most_populated_only: If True, only the most populated altloc
+                is used in loaded PDB file. If False, all altlocs are used for
+                weighted scoring by occupancy.
             **kwargs: Passed to ``set_inputs``. Accepts the inputs ``receptor`` and
                 ``site_reference`` (file paths) and any mutable parameter by name
                 (``n_starts``, ``basin_hops``, ``max_iterations``, ``box_size``,
@@ -186,12 +339,15 @@ class MoleculeDockBlock(MoleculeBlock):
         )
         self._score_components = score_components
         self._score_strain = score_strain
+        self._score_only = score_only
+        self._most_populated_only = receptor_most_populated_only
+        self._budget = max(1, int(budget))
         self._scaffold_store: ScaffoldPoseStore | None = None
         self._reference_seeded = False
 
         # Register mutable parameters
         self.mutable(
-            # Vinardo score weights
+            # Empirical score weights
             Continuous("w_gauss1", -0.045, -0.065, -0.025),
             Continuous("w_repulsion", 0.8, 0.8, 1.2),
             Continuous("w_hydrophobic", -0.035, -0.065, -0.015),
@@ -200,21 +356,51 @@ class MoleculeDockBlock(MoleculeBlock):
             # Pose search. Per-mol runtime ~ n_starts x (1 + basin_hops) local
             # minima, each ~max_iterations L-BFGS-B steps; the bounds keep the
             # worst-case config tractable.
-            #   n_starts hi=33: start diversity saturates near 32.
-            Integer("n_starts", 32, 1, 33),
+            #   n_starts: number of L-BFGS-B seeds refined per molecule.
+            Integer("n_starts", 32, 16, 128),
             #   basin_hops: extra iterated-local-search refinement per start.
-            #   Default 0 (init + single minimize); hi=16 caps runtime.
-            Integer("basin_hops", 0, 0, 16),
-            #   max_iterations hi=200: L-BFGS-B converges well before then.
-            Integer("max_iterations", 100, 50, 200),
+            #   Default 0 (init + single minimize); hi raised for deep-ILS sweeps.
+            Integer("basin_hops", 0, 0, 24),
+            #   basin_hop_starts: how many starts carry into basin hopping. All
+            #   starts are cheaply minimized first; only the top-scoring
+            #   basin_hop_starts of them then pay the (expensive) hops -- the bet
+            #   is that the lowest-energy minima are the best places to hop from.
+            #   0 (default/sentinel) or >= n_starts hops every start (the prior
+            #   single-pass behavior). Only bites when basin_hops > 0.
+            Integer("basin_hop_starts", 0, 0, 128),
+            #   max_iterations hi=300: L-BFGS-B converges well before then.
+            Integer("max_iterations", 200, 10, 300),
             Continuous("box_size", 10.0, 5.0, 20.0),
             Categorical("rigid", False, [True, False]),
-            # Initialization grid: max_distance_geometry_samples (M) ETKDGv3
-            # conformers crossed with sobol_max_tries // M Sobol rigid placements;
-            # the lowest-scoring starts at least diversity_rmsd apart are kept.
-            Integer("sobol_max_tries", 2048, 512, 4096),
-            Integer("max_distance_geometry_samples", 32, 1, 64),
-            Continuous("diversity_rmsd", 1.0, 0.0, 5.0),
+            # Initialization grid: the DG conformer ensemble (sized by ligand
+            # flexibility, see conf_scale/max_confs) is placed at the site center.
+            # Each conformer gets n_orientation_samples placements, split by
+            # center_fraction: that fraction are near-uniform SO(3) orientations at
+            # the center, the rest are spread over n_translation_samples nearby
+            # Sobol offsets (each with its own SO(3) orientation set). The offsets
+            # share the remainder, so peak init RAM = n_conf * budget *
+            # n_orientation_samples * n_lig * 24 B regardless of the split; at the
+            # maxima below (~100 heavy atoms x max_confs) one budget unit is near
+            # 1 GB/worker, and the block-init ``budget`` multiplier scales it
+            # linearly (raise it for a larger box / blind docking). A
+            # center_fraction quota of n_starts is also reserved for center
+            # placements (kept even when clashing); the rest are the lowest-scoring,
+            # at least diversity_rmsd apart.
+            #   Conformer ensemble size scales with rotatable-bond count:
+            #   n_extra_confs = min(n_rot * conf_scale, max_confs). Rigid ligands
+            #   need orientation coverage (rotations), not torsion diversity, so
+            #   they get few/no extra conformers; flexible ligands get more, which
+            #   is also where the (embedding) cost is actually warranted.
+            Continuous("conf_scale", 6.0, 1.0, 10.0),
+            Integer("max_confs", 128, 1, 256),
+            Integer("n_orientation_samples", 1024, 128, 3200),
+            Integer("n_translation_samples", 32, 1, 256),
+            # Capped at 0.5: center_fraction is the budget bet that the true
+            # centroid sits on the anchor. Redocking hands us the exact centroid,
+            # so >0.5 would overfit that gift; <=0.5 is a defensible pocket-finder
+            # prior that still generalizes to blind docking.
+            Continuous("center_fraction", 0.5, 0.1, 0.5),
+            Continuous("diversity_rmsd", 0.1, 0.1, 2.0),
             # Mode toggle: scaffold-indexed (template) docking on/off
             Categorical("index_poses", False, [True, False]),
         )
@@ -300,7 +486,7 @@ class MoleculeDockBlock(MoleculeBlock):
         """
         items = sorted((name, p.get()) for name, p in self.params.items())
         payload = (
-            f"{items}|score_strain={self._score_strain}"
+            f"{items}|score_strain={self._score_strain}|budget={self._budget}"
             f"|receptor={self._index_rel_path('receptor')}"
             f"|site_reference={self._index_rel_path('site_reference')}"
         )
@@ -341,8 +527,25 @@ class MoleculeDockBlock(MoleculeBlock):
                 self._scaffold_store.put(f"{self._index_namespace()}:{key}", posed)
             return
 
-    def _load_receptor(self) -> None:
+    def _load_receptor(self, most_populated_only: bool = False) -> None:
         """Load and validate receptor from a PDB file.
+
+        Alternate locations (altLocs): ``Chem.MolFromPDBFile`` keeps a single,
+        highest-occupancy conformer per atom. For empirical scoring we instead
+        keep *all* altLoc conformers and scale each atom's pairwise contribution
+        by its crystallographic occupancy (``AtomTyping.weights``), so a residue
+        sampling two states contributes the ensemble-averaged interaction
+        (reduces to the single-atom result when occupancy == 1). See
+        ``_occupancy_weighted_protein``.
+
+        NOTE this differs from smina/Vina two ways: their OpenBabel parser keeps
+        every altLoc conformer but counts each at full weight (1.0), double-counting
+        partial-occupancy atoms; RDKit alone keeps only the top conformer. Our
+        occupancy weighting sits between the two, so on altLoc-containing structures
+        (~40% of CASF2016) cmxflow reproduces neither exactly by design.
+
+        Args:
+            most_populated_only: Only load the most populated positions (no altlocs).
 
         Raises:
             FileNotFoundError: If the receptor PDB file does not exist.
@@ -366,10 +569,86 @@ class MoleculeDockBlock(MoleculeBlock):
         if not self._has_3d_conformer(mol):
             raise ValueError(f"Receptor {receptor_path} does not have a 3D conformer.")
 
-        protein_conf = mol.GetConformer()
-        self._protein_coords = np.array(protein_conf.GetPositions())
-        self._protein_typing = get_atom_typing(mol)
+        self._protein_coords, self._protein_typing = self._occupancy_weighted_protein(
+            mol, receptor_path, most_populated_only=most_populated_only
+        )
         self._protein_tree = build_protein_tree(self._protein_coords)
+
+    @staticmethod
+    def _occupancy_weighted_protein(
+        mol: Chem.Mol, receptor_path: Path, most_populated_only: bool = False
+    ) -> tuple[np.ndarray, AtomTyping]:
+        """Protein coords + typing with altLoc conformers occupancy-weighted.
+
+        ``mol`` is the heavy-atom RDKit receptor (one highest-occupancy atom per
+        altLoc site). This recovers the altLoc conformers RDKit dropped directly
+        from the PDB text and appends them as extra protein atoms that inherit
+        their primary atom's type/radius (same element and connectivity). Every
+        atom's ``weights`` entry is its crystallographic occupancy (1.0 for
+        ordinary atoms), which the scorer multiplies into each pairwise term.
+
+        RDKit does the fragile work (bond perception, typing); the only added
+        parsing reads fixed-column altLoc/occupancy/coordinate fields, purely
+        additively. On any failure it falls back to the RDKit-only structure with
+        occupancy weights and logs a warning -- worst case equals plain RDKit.
+
+        Args:
+            mol: Heavy-atom receptor Mol from ``Chem.MolFromPDBFile``.
+            receptor_path: Path to the source PDB (re-read for dropped altLocs).
+            most_populated_only: Only load the most populated positions (no altlocs).
+
+        Returns:
+            ``(coords, typing)`` where ``coords`` is (n_atoms, 3) and ``typing``
+            carries per-atom radii/masks/occupancy weights, both extended with the
+            recovered altLoc atoms.
+        """
+        coords = np.array(mol.GetConformer().GetPositions())
+        typing = get_atom_typing(mol)
+
+        if most_populated_only:
+            typing.weights = np.ones(len(coords))
+            return coords, typing
+
+        def occupancy(atom: Chem.Atom) -> float:
+            info = atom.GetPDBResidueInfo()
+            return info.GetOccupancy() if info is not None else 1.0
+
+        weights = np.array([occupancy(a) for a in mol.GetAtoms()], dtype=np.float64)
+
+        try:
+            extra = _recover_dropped_altlocs(mol, coords, typing, receptor_path)
+        except Exception:  # noqa: BLE001 - never let altLoc recovery break loading
+            logger.warning(
+                "altLoc recovery failed for %s; using highest-occupancy atoms only",
+                receptor_path,
+                exc_info=True,
+            )
+            extra = None
+
+        if extra is None or not len(extra.coords):
+            typing.weights = weights
+            return coords, typing
+
+        coords = np.vstack([coords, extra.coords])
+        typing = AtomTyping(
+            radii=np.concatenate([typing.radii, extra.radii]),
+            is_hydrophobic=np.concatenate(
+                [typing.is_hydrophobic, extra.is_hydrophobic]
+            ),
+            is_hbond_donor=np.concatenate(
+                [typing.is_hbond_donor, extra.is_hbond_donor]
+            ),
+            is_hbond_acceptor=np.concatenate(
+                [typing.is_hbond_acceptor, extra.is_hbond_acceptor]
+            ),
+            weights=np.concatenate([weights, extra.weights]),
+        )
+        logger.debug(
+            "recovered %d altLoc conformer atoms for %s",
+            len(extra.coords),
+            receptor_path,
+        )
+        return coords, typing
 
     def _prune_to_single_conformer(self, mol: Chem.Mol) -> Chem.Mol:
         """Reduce molecule to single conformer for docking.
@@ -393,6 +672,47 @@ class MoleculeDockBlock(MoleculeBlock):
             new_mol.AddConformer(Chem.Conformer(conf), assignId=True)
             return new_mol
 
+    def _score_input_pose(
+        self, mol: Chem.Mol, score_params: EmpiricalParams
+    ) -> Chem.Mol:
+        """Score the input pose as-is (no optimization) and set properties.
+
+        Used by ``score_only`` mode. Writes the same ``docking_*`` properties as
+        the full path so downstream consumers and ``check_output`` see a uniform
+        schema; the optimized-vs-initial scores are identical by construction.
+
+        Args:
+            mol: Ligand RDKit Mol with a 3D conformer (already pruned to one).
+            score_params: Empirical scoring parameters.
+
+        Returns:
+            The input molecule with docking properties set.
+        """
+        assert isinstance(self._protein_coords, np.ndarray)
+        assert isinstance(self._protein_typing, AtomTyping)
+
+        ligand_heavy = Chem.RemoveAllHs(mol)
+        comps = empirical_score_cached(
+            ligand_heavy,
+            self._protein_coords,
+            self._protein_typing,
+            params=score_params,
+            protein_tree=self._protein_tree,
+        )
+        mol.SetDoubleProp("docking_initial_pose_score", comps.total)
+        mol.SetDoubleProp("docking_score", comps.total)
+        mol.SetDoubleProp("docking_empirical", comps.total)
+        mol.SetDoubleProp("docking_strain", 0.0)
+        mol.SetDoubleProp("docking_ec", 0.0)
+        mol.SetBoolProp("docking_converged", True)
+        if self._score_components:
+            mol.SetDoubleProp("docking_gauss1", comps.gauss1)
+            mol.SetDoubleProp("docking_repulsion", comps.repulsion)
+            mol.SetDoubleProp("docking_hydrophobic", comps.hydrophobic)
+            mol.SetDoubleProp("docking_hbond", comps.hbond)
+            mol.SetDoubleProp("docking_n_rot", comps.n_rot * comps.w_rot)
+        return mol
+
     def _forward(self, mol: Chem.Mol) -> Chem.Mol | None:
         """Dock a ligand molecule into the receptor binding site.
 
@@ -412,7 +732,7 @@ class MoleculeDockBlock(MoleculeBlock):
         mol = self._prune_to_single_conformer(mol)
 
         if self._protein_coords is None:
-            self._load_receptor()
+            self._load_receptor(most_populated_only=self._most_populated_only)
         assert isinstance(self._protein_coords, np.ndarray)
         assert isinstance(self._protein_typing, AtomTyping)
 
@@ -423,6 +743,12 @@ class MoleculeDockBlock(MoleculeBlock):
             w_hbond=self.get_param("w_hbond"),
             w_rot=self.get_param("w_rot"),
         )
+
+        # Score-only mode: score the input pose as-is and return. No search, no
+        # EC, no coordinate changes -- isolates the scoring-function cost.
+        if self._score_only:
+            return self._score_input_pose(mol, score_params)
+
         box_size = self.get_param("box_size")
         rigid_only = self.get_param("rigid")
         site_center = self._load_site_reference()
@@ -471,6 +797,28 @@ class MoleculeDockBlock(MoleculeBlock):
                 translation_bounds=(-box_size, box_size),
                 n_starts=self.get_param("n_starts"),
             )
+            # Rigid docking screens the input conformer only (no torsion search,
+            # so conformer diversity is wasted); flexible docking adds a DG
+            # conformer ensemble sized by the ligand's rotatable-bond count
+            # (n_rot * conf_scale, capped at max_confs) -- rigid ligands need
+            # orientation coverage, not torsion diversity. Both run through the
+            # same screening method.
+            if rigid_only:
+                n_extra_confs = 0
+            else:
+                n_rot = rdMolDescriptors.CalcNumRotatableBonds(
+                    Chem.RemoveAllHs(mol), strict=False
+                )
+                n_extra_confs = min(
+                    round(n_rot * self.get_param("conf_scale")),
+                    self.get_param("max_confs"),
+                )
+            # ``budget`` (block-init resource knob) scales the per-conformer
+            # orientation budget: it multiplies both the center orientations and
+            # the per-offset spread, so a larger search box (blind docking) is met
+            # by raising budget rather than starving each translation offset. Peak
+            # init RAM scales linearly with it (~1 GB/process per unit at ceiling).
+            orientation_budget = self._budget * self.get_param("n_orientation_samples")
             starts = optimize_dg_restarts(
                 mol,
                 protein_coords=self._protein_coords,
@@ -478,22 +826,22 @@ class MoleculeDockBlock(MoleculeBlock):
                 params=init_params,
                 score_params=score_params,
                 site_center=site_center,
-                rigid=rigid_only,
-                max_tries=self.get_param("sobol_max_tries"),
-                max_distance_geometry_samples=self.get_param(
-                    "max_distance_geometry_samples"
-                ),
+                n_extra_confs=n_extra_confs,
+                n_orientation_samples=orientation_budget,
+                n_translation_samples=self.get_param("n_translation_samples"),
+                center_fraction=self.get_param("center_fraction"),
                 diversity_rmsd=self.get_param("diversity_rmsd"),
                 protein_tree=self._protein_tree,
             )
 
             # Phase 2: L-BFGS-B refinement from each starting pose.
+            basin_hops = self.get_param("basin_hops")
             refine_params = PoseParams(
                 max_iterations=self.get_param("max_iterations"),
                 translation_bounds=(-box_size, box_size),
                 optimize_torsions=not rigid_only,
                 n_starts=1,
-                basin_hops=self.get_param("basin_hops"),
+                basin_hops=basin_hops,
             )
 
             # Selection objective: intermolecular score, plus strain when the strain
@@ -501,19 +849,49 @@ class MoleculeDockBlock(MoleculeBlock):
             def _effective(r: OptimizationResult) -> float:
                 return r.score + (r.strain if self._score_strain else 0.0)
 
-            for idx, (_, start_mol) in enumerate(starts):
-                candidate = optimize_pose_cached(
+            def _refine(start_mol, seed: int, params: PoseParams) -> OptimizationResult:
+                # Distinct seed per chain so basin-hopping walks decorrelate.
+                assert self._protein_coords is not None
+                assert isinstance(self._protein_typing, AtomTyping)
+                return optimize_pose_cached(
                     start_mol,
                     protein_coords=self._protein_coords,
                     protein_typing=self._protein_typing,
-                    # Distinct seed per chain so basin-hopping walks decorrelate.
-                    params=dataclasses.replace(refine_params, seed=idx),
+                    params=dataclasses.replace(params, seed=seed),
                     score_params=score_params,
                     site_center=None,
                     protein_tree=self._protein_tree,
                 )
-                if result is None or _effective(candidate) < _effective(result):
-                    result = candidate
+
+            # ``basin_hop_starts`` gates a two-stage search: minimize every start
+            # cheaply, then spend the expensive hops only on the top-scoring few
+            # (the bet: lowest-energy minima are the best places to hop from). A
+            # sentinel of 0, or a value >= the number of starts, hops every start
+            # (single pass). Only two-stage when hopping is on and the cap bites.
+            hop_starts = self.get_param("basin_hop_starts")
+            two_stage = basin_hops > 0 and 0 < hop_starts < len(starts)
+
+            if two_stage:
+                # Stage 1: minimize all starts, no hops.
+                min_params = dataclasses.replace(refine_params, basin_hops=0)
+                stage1 = [
+                    _refine(start_mol, idx, min_params)
+                    for idx, (_, start_mol) in enumerate(starts)
+                ]
+                # Stage 2: hop the top-``hop_starts`` by selection score; the hopped
+                # result replaces its stage-1 minimum in the candidate pool.
+                top = sorted(range(len(stage1)), key=lambda i: _effective(stage1[i]))
+                hop_idx = set(top[:hop_starts])
+                for i, candidate in enumerate(stage1):
+                    if i in hop_idx:
+                        candidate = _refine(stage1[i].mol, i, refine_params)
+                    if result is None or _effective(candidate) < _effective(result):
+                        result = candidate
+            else:
+                for idx, (_, start_mol) in enumerate(starts):
+                    candidate = _refine(start_mol, idx, refine_params)
+                    if result is None or _effective(candidate) < _effective(result):
+                        result = candidate
 
             assert result is not None
             result = dataclasses.replace(result, initial_score=starts[0][0])

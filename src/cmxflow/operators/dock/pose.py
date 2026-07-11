@@ -5,6 +5,7 @@ binding site using rigid-body transformations and torsion angle optimization.
 """
 
 import logging
+import warnings
 from collections import deque
 from dataclasses import dataclass, field
 from typing import TypeAlias
@@ -19,11 +20,16 @@ from scipy.spatial.transform import Rotation
 from scipy.stats import qmc
 
 from cmxflow.operators.dock.score import (
+    INTERACTION_CUTOFF,
     AtomTyping,
     EmpiricalParams,
     IntramolecularPairs,
+    NeighborList,
+    build_pocket_subset,
     empirical_score_and_grad_cached,
+    empirical_score_and_grad_fast,
     empirical_score_cached,
+    empirical_score_pocket_batch,
     get_atom_typing,
     intramolecular_score_and_grad,
 )
@@ -37,6 +43,20 @@ Coords: TypeAlias = NDArray[np.floating]
 # Amide bonds have ~20 kcal/mol rotational barrier (partial double-bond character)
 # and are treated as rigid in docking, consistent with smina/Vina.
 _AMIDE_SMARTS: Chem.Mol = Chem.MolFromSmarts("[#7;X3]-[#6;X3]=[O,S]")  # type: ignore[assignment]
+
+# Reference spread-cube edge (Angstroms) at which ``n_translation_samples`` is
+# calibrated. The number of spread offsets scales with (box / this)**3 so the
+# translation grid spacing stays ~constant as the search box grows (blind
+# docking): at box == this the count is exactly ``n_translation_samples``.
+_TRANSLATION_REFERENCE_BOX: float = 10.0
+
+# Burial rejection for spread translation offsets: an offset whose centroid
+# (anchor + offset) has more than ``max_buried`` protein atoms within this radius
+# is inside the protein rather than in the pocket, so it is skipped and resampled.
+_BURIED_RADIUS: float = 2.0
+# Cap on extra Sobol points drawn while resampling rejected offsets, so a fully
+# occluded box can never spin forever: attempts <= n_target + this.
+_SOBOL_MAX_OVERDRAW: int = 1000
 
 
 # =============================================================================
@@ -574,137 +594,43 @@ def constraint_weight_for_rmsd(target_rmsd_angstrom: float) -> float:
 
 
 # =============================================================================
-# Sobol Restart Sampling
+# Restart Screening (rigid + flexible initialization)
 # =============================================================================
 
 
-# TODO(pose-search): if the distance-geometry initializer (optimize_dg_restarts)
-# consistently beats uniform-Sobol torsion sampling on the benchmark, factor out
-# this pure-Sobol path and make DG the single restart initializer (Sobol would
-# then only place the rigid body). Keep in mind that if sobol is kept we need to
-# modify this method to do the full screen and take the n_best under constraints
-# rather than the ready approach
-def _rigid_sobol_restarts(
-    ligand_mol: Chem.Mol,
-    protein_coords: np.ndarray,
-    protein_typing: AtomTyping,
-    params: PoseParams,
-    score_params: EmpiricalParams,
-    site_center: np.ndarray | None = None,
-    ligand_conf_id: int = 0,
-    max_tries: int = 1024,
-    max_score_per_heavy_atom: float = 3.0,
-    diversity_rmsd: float = 0.0,
-    protein_tree: cKDTree | None = None,
-) -> list[tuple[float, Chem.Mol]]:
-    """Rigid-body Sobol screening, returning starting poses for minimization.
+def _super_fibonacci_quat(n: int) -> NDArray[np.floating]:
+    """n near-uniform unit quaternions covering SO(3) via Super-Fibonacci spirals.
 
-    Used for rigid docking, where there are no torsions to diversify. Row 0 is
-    always the input aligned pose (unconditional), preserving MCS/overlay
-    behaviour where the aligned start is the binding hypothesis. Rows 1+ are
-    Sobol translation+rotation samples kept when they clear a clash gate
-    (``max_score_per_heavy_atom``) and a ``diversity_rmsd`` spacing constraint.
-
-    Candidates are sampled within ``box_size / 2`` so they land near the pocket;
-    L-BFGS-B bounds remain at the full ``box_size``.
-
-    Args:
-        ligand_mol: Ligand with 3D coordinates.
-        protein_coords: Pre-computed protein atom coordinates (n_atoms, 3).
-        protein_typing: Pre-computed protein atom typing.
-        params: Pose params; ``n_starts`` sets how many starts are returned.
-        score_params: Scoring function parameters.
-        site_center: Optional binding site centroid — anchors restarts to the
-            pocket (rows 1+). Row 0 always starts from the input pose.
-        ligand_conf_id: Ligand conformer ID.
-        max_tries: Maximum number of Sobol candidates to evaluate when
-            searching for ``n_starts - 1`` acceptable starts.
-        max_score_per_heavy_atom: Clash-gate score threshold per heavy atom.
-        diversity_rmsd: Minimum heavy-atom RMSD (Å) between selected starts.
-        protein_tree: Optional cached protein KD-tree for sparse scoring.
-
-    Returns:
-        List of (score, mol) tuples of max length ``n_starts`` (params).
+    Alexa, "Super-Fibonacci Spirals: Fast, Low-Discrepancy Sampling of SO(3)"
+    (CVPR 2022). Deterministic, O(n), no RNG. Returns (n, 4) as scipy [x,y,z,w].
     """
-    ligand_heavy = Chem.RemoveAllHs(ligand_mol)
-    p0_heavy = np.array(ligand_heavy.GetConformer(ligand_conf_id).GetPositions())
-    centroid = np.mean(p0_heavy, axis=0)
-    ligand_typing = get_atom_typing(ligand_heavy)  # fixed topology; compute once
-
-    max_score = ligand_heavy.GetNumHeavyAtoms() * max_score_per_heavy_atom
-
-    box_size = max(abs(params.translation_bounds[0]), abs(params.translation_bounds[1]))
-    site_offset: NDArray | None = None
-    if site_center is not None:
-        site_offset = site_center - centroid
-
-    # Sobol translation + rotation sampling.
-    n_random = params.n_starts - 1  # row 0 reserved for aligned pose
-    sample_box = box_size / 2.0
-    lo = np.array([-sample_box] * 3 + [-np.pi] * 3)
-    hi = np.array([sample_box] * 3 + [np.pi] * 3)
-    sampler = qmc.Sobol(d=6, scramble=True, seed=0)
-
-    # Generate all max_tries points upfront so the Sobol sequence is contiguous.
-    xs_sobol = qmc.scale(sampler.random(max_tries), lo, hi)
-    if site_offset is not None:
-        xs_sobol[:, :3] += site_offset
-
-    # Merge with initial point (always score the starting pose).
-    x0 = np.zeros(shape=(1, 6), dtype=np.float64)
-    xs_all = np.vstack([x0, xs_sobol])
-
-    # Rejection sampling loop: max_score and RMSD constraint.
-    passed: list[tuple[float, Chem.Mol, NDArray]] = []  # (score, mol, positions)
-    n_tried = 0
-    for x in xs_all:
-        n_tried += 1
-        mol_c = apply_rigid_transform(
-            ligand_heavy,
-            x[:3],
-            Rotation.from_rotvec(x[3:6]),
-            ligand_conf_id,
-            center=centroid,
-        )
-        pos = np.array(mol_c.GetConformer(ligand_conf_id).GetPositions())
-
-        if len(passed) > 1 and not all(
-            np.sqrt(np.mean(np.sum((pos - p[2]) ** 2, axis=1))) >= diversity_rmsd
-            for p in passed
-        ):
-            continue
-
-        sc = empirical_score_cached(
-            mol_c,
-            protein_coords,
-            protein_typing,
-            ligand_conf_id,
-            score_params,
-            protein_tree=protein_tree,
-            ligand_typing=ligand_typing,
-        ).total
-
-        if len(passed) == 0 or sc < max_score:
-            passed.append((sc, mol_c, pos))
-
-        if len(passed) >= n_random:
-            break
-
-    logger.info(
-        "rigid_sobol_restarts: %d/%d candidates passed score < %.1f after %d tries.",
-        len(passed),
-        n_random,
-        max_score,
-        n_tried,
+    if n <= 0:
+        return np.zeros((0, 4))
+    phi = np.sqrt(2.0)
+    psi = 1.533751168755204288118041
+    i = np.arange(n) + 0.5
+    s = i / n
+    r = np.sqrt(s)
+    rr = np.sqrt(1.0 - s)
+    alpha = 2.0 * np.pi * i / phi
+    beta = 2.0 * np.pi * i / psi
+    return np.stack(
+        [r * np.sin(alpha), r * np.cos(alpha), rr * np.sin(beta), rr * np.cos(beta)],
+        axis=1,
     )
-    if len(passed) < n_random:
-        logger.warning(
-            "rigid_sobol_restarts: only %d of %d non-clashing starts found.",
-            len(passed),
-            n_random,
-        )
 
-    return [(p[0], p[1]) for p in passed]
+
+def _sample_orientation_rotvecs(n: int) -> NDArray[np.floating]:
+    """Sample n near-uniform SO(3) orientations, returned as rotvecs (n, 3).
+
+    Uses Super-Fibonacci -- a deterministic, Haar-uniform, low-discrepancy cover
+    of SO(3). (Replaces the legacy Sobol-in-rotvec-cube sampler, which was not
+    Haar-uniform: ~48% of draws aliased into the |r|>pi corners and the
+    worst-case coverage hole was ~37deg vs Super-Fibonacci's ~21deg at N=1024.)
+    """
+    if n <= 0:
+        return np.zeros((0, 3))
+    return Rotation.from_quat(_super_fibonacci_quat(n)).as_rotvec()
 
 
 def optimize_dg_restarts(
@@ -714,90 +640,117 @@ def optimize_dg_restarts(
     params: PoseParams,
     score_params: EmpiricalParams,
     site_center: np.ndarray | None = None,
-    rigid: bool = False,
     ligand_conf_id: int = 0,
-    max_tries: int = 1024,
+    n_extra_confs: int = 0,
+    n_orientation_samples: int = 128,
+    n_translation_samples: int = 128,
+    center_fraction: float = 0.2,
     diversity_rmsd: float = 0.0,
-    max_distance_geometry_samples: int = 8,
+    max_buried: int = 0,
     protein_tree: cKDTree | None = None,
 ) -> list[tuple[float, Chem.Mol]]:
-    """Distance-geometry multi-start screening, returning starts for minimization.
+    """Screen starting poses for L-BFGS-B refinement (rigid + flexible paths).
 
-    Diversifies *torsions* via an ETKDGv3 conformer ensemble instead of uniform
-    Sobol throws over torsion space. Uniform torsion sampling scales badly with
-    rotatable-bond count and spends most candidates on self-clashing, high-strain
-    geometries; a
-    distance-geometry ensemble samples the physical low-energy conformer manifold,
-    giving far better coverage per start for flexible ligands.
+    Builds a candidate grid of ``conformer x rigid-body placement``, scores every
+    candidate, and returns a diversity-spaced subset as minimization starts. A
+    single method serves both docking modes via ``n_extra_confs``:
 
-    The candidate grid is the Cartesian product of up to
-    ``max_distance_geometry_samples`` conformers (M) and ``max_tries // M`` Sobol
-    rigid-body placements (translation + rotation), so the total candidate budget
-    matches ``max_tries`` for parity with the Sobol path.
+    * ``n_extra_confs == 0`` -- **rigid path**. The ensemble is just the input
+      conformer, so this is pure rigid-body (translation + rotation) screening.
+    * ``n_extra_confs > 0`` -- **flexible path**. The ensemble is the input
+      conformer plus ``n_extra_confs`` ETKDGv3 conformers, adding torsion
+      diversity on the physical low-energy manifold.
 
-    Selection: start 0 is always the input pose (unconditional). The full grid is
-    then scored and the lowest-energy poses at least ``diversity_rmsd`` apart are
-    kept up to ``n_starts - 1`` -- i.e. strictly the best screened points under
-    the (default-off) diversity constraint. Ranking across the whole grid (rather
-    than a nested loop with early-stopping) is what gives *both* conformer-torsion
-    and rigid-placement diversity, so neither axis is starved.
+    Each conformer gets a fixed budget of ``n_orientation_samples`` placements,
+    split by ``center_fraction`` between a center group and a spread group so the
+    search puts a deliberate prior on the binding-site center (where confidence is
+    highest and the convergence funnel lives):
 
-    When ``rigid`` is True there are no torsions to diversify, so this delegates
-    to :func:`_rigid_sobol_restarts`.
+    * **Center group** (``translation = 0``): the identity placement plus
+      ``round(center_fraction * n_orientation_samples)`` near-uniform SO(3)
+      orientations (Super-Fibonacci), so every conformer is sampled at the anchor
+      in many orientations. At the exact center the pocket is full, so all
+      orientations clash -- but a near-native orientation clashes *less*, so
+      ranking these by score biases toward native-like orientations.
+    * **Spread group** (``translation != 0``): the remaining
+      ``round((1 - center_fraction) * n_orientation_samples)`` placements, split
+      equally over the Sobol offsets (uniform in ``+/- box/2``); each offset gets
+      its own near-uniform SO(3) orientation set. The offset count scales with box
+      volume from ``n_translation_samples`` so grid spacing holds as the box grows.
+      Because the offsets *share* this remainder rather than each taking a full
+      orientation set, total candidates per conformer stay equal to
+      ``n_orientation_samples`` -- so peak RAM is ``n_conf * n_orientation_samples``
+      and does not grow with the translation count.
+
+    Algorithm:
+
+    1. **Ensemble.** ``[input_conformer]`` plus ``n_extra_confs`` distance-geometry
+       conformers (empty extra set on embed failure). Every member keeps the input
+       heavy-atom ordering so refinement / RMSD indices line up.
+    2. **Anchor.** ``site_center`` when provided (blind docking onto a known
+       pocket), else the input conformer's own centroid (overlay refinement).
+    3. **Placements / grid.** The center + spread placements above, taken as a
+       Cartesian product with the conformer ensemble. Each conformer is rotated
+       about its own centroid and translated so that centroid lands at
+       ``anchor + translation`` -- so any center placement puts that conformer's
+       centroid exactly on ``anchor`` in the sampled orientation.
+    4. **Selection.** Start 0 is always the input conformer at the identity
+       placement (the input pose translated to the reference centroid). Then a
+       reserved quota of ``round(center_fraction * n_starts)`` seeds is filled from
+       the center group by ascending score under the ``diversity_rmsd`` spacing
+       gate -- guaranteeing center coverage even though those poses clash. The
+       remaining slots up to ``params.n_starts`` are filled from all leftover
+       candidates (center + spread) by ascending score, same spacing gate.
 
     Args:
-        ligand_mol: Ligand with 3D coordinates.
+        ligand_mol: Ligand with 3D coordinates (the input pose / conformer 0).
         protein_coords: Pre-computed protein atom coordinates (n_atoms, 3).
         protein_typing: Pre-computed protein atom typing.
         params: Pose params. ``n_starts`` sets how many starts are returned,
             ``seed`` seeds conformer embedding, ``translation_bounds`` sets the
-            sampling box.
+            sampling box (spread translations use ``box/2``).
         score_params: Scoring function parameters.
-        site_center: Optional binding-site centroid. Each conformer centroid is
-            anchored here before the sampled translation offset.
-        rigid: If True, delegate to the Sobol path (no conformer diversity).
-        ligand_conf_id: Conformer ID of the input pose (start 0).
-        max_tries: Total candidate budget; the per-conformer Sobol placement
-            count is ``max_tries // max_distance_geometry_samples``.
-        diversity_rmsd: Minimum heavy-atom RMSD (Å) between selected starts.
-        max_distance_geometry_samples: Max ETKDGv3 conformers to embed (grid M).
+        site_center: Optional binding-site centroid. Anchors the whole grid to the
+            pocket; ``None`` anchors it to the input conformer's own position.
+        ligand_conf_id: Conformer ID of the input pose (becomes ensemble member 0).
+        n_extra_confs: ETKDGv3 conformers to embed beyond the input conformer.
+            ``0`` is the rigid path (input conformer only, no DG sampling).
+        n_orientation_samples: Total placement budget per conformer. Split by
+            ``center_fraction`` between center orientations (at the anchor) and
+            spread placements (over the translation offsets).
+        n_translation_samples: Number of nearby Sobol translation offsets the
+            spread budget is divided over (each gets its own SO(3) orientation
+            set), calibrated at a 10 A spread cube. The actual offset count scales
+            with box volume -- ``round(n_translation_samples * (box / 10)**3)`` --
+            so the grid spacing holds ~constant as the box grows (blind docking),
+            capped at the spread budget so each offset keeps >= 1 orientation.
+        center_fraction: Fraction of the per-conformer budget placed at the center
+            (the rest goes to the spread offsets); also the fraction of
+            ``params.n_starts`` reserved for center-group seeds (kept even when
+            they clash). The rest are filled from the whole grid by score.
+        diversity_rmsd: Minimum heavy-atom RMSD (Angstroms) between selected
+            starts. ``0`` (default) disables the spacing gate.
+        max_buried: Max protein atoms allowed within ``_BURIED_RADIUS`` of a
+            spread offset's centroid before it is rejected as buried and
+            resampled from later in the Sobol sequence. ``0`` (default) rejects
+            any offset landing inside the protein; ``< 0`` disables the filter.
+            Only the spread offsets are filtered; the center point is always kept.
         protein_tree: Optional cached protein KD-tree for sparse scoring.
 
     Returns:
-        List of (score, mol) tuples of max length ``n_starts`` (params), the
-        first being the input pose.
+        List of ``(score, mol)`` of length <= ``params.n_starts``, index 0 being
+        the input conformer placed at the anchor.
     """
-    if rigid:
-        # No torsions to diversify — rigid translation/rotation screening only.
-        return _rigid_sobol_restarts(
-            ligand_mol,
-            protein_coords,
-            protein_typing,
-            params,
-            score_params,
-            site_center=site_center,
-            ligand_conf_id=ligand_conf_id,
-            max_tries=max_tries,
-            diversity_rmsd=diversity_rmsd,
-            protein_tree=protein_tree,
-        )
-
     ligand_heavy = Chem.RemoveAllHs(ligand_mol)
     ligand_typing = get_atom_typing(ligand_heavy)  # fixed topology; compute once
+    # Torsion divisor is fixed by topology, so it is constant across candidates
+    # (does not affect ranking) but is applied so screen scores stay on the same
+    # scale as the reported empirical score.
+    n_rot = rdMolDescriptors.CalcNumRotatableBonds(ligand_heavy, strict=False)
+    torsion_divisor = 1.0 + score_params.w_rot * n_rot
 
     def _positions(mol: Chem.Mol) -> NDArray[np.floating]:
         return np.array(mol.GetConformer(0).GetPositions())
-
-    def _score(mol: Chem.Mol) -> float:
-        return empirical_score_cached(
-            mol,
-            protein_coords,
-            protein_typing,
-            0,
-            score_params,
-            protein_tree=protein_tree,
-            ligand_typing=ligand_typing,
-        ).total
 
     def _single_conformer(mol: Chem.Mol, conf_id: int) -> Chem.Mol:
         """Copy ``mol`` keeping only ``conf_id``, renumbered to id 0."""
@@ -808,79 +761,236 @@ def optimize_dg_restarts(
         out.AddConformer(conf, assignId=False)
         return out
 
-    # Start 0: the input pose, always included (binding hypothesis / aligned pose).
-    start0 = _single_conformer(ligand_heavy, ligand_conf_id)
-    passed: list[tuple[float, Chem.Mol, NDArray]] = [
-        (_score(start0), start0, _positions(start0))
-    ]
-    n_keep = params.n_starts - 1  # start 0 is the input pose
-    if n_keep <= 0:
-        return [(s, m) for s, m, _ in passed]
+    # --- Step 1: conformer ensemble (input pose first, then DG extras) ---
+    ensemble: list[Chem.Mol] = [_single_conformer(ligand_heavy, ligand_conf_id)]
+    if n_extra_confs > 0:
+        # Embed from ligand_heavy so heavy-atom order matches the input exactly.
+        mol_h = Chem.AddHs(ligand_heavy)
+        mol_h.RemoveAllConformers()
+        dg_params = rdDistGeom.ETKDGv3()
+        # ETKDG with randomSeed=0 degenerates to identical conformers, and
+        # params.seed defaults to 0 -- offset to a nonzero, deterministic seed so a
+        # single EmbedMultipleConfs call yields a diverse ensemble. No pruning: we
+        # want exactly the requested conformers.
+        dg_params.randomSeed = params.seed + 1
+        dg_params.numThreads = 1  # deterministic + safe under block-level parallelism
+        rdDistGeom.EmbedMultipleConfs(mol_h, numConfs=n_extra_confs, params=dg_params)
+        dg_heavy = Chem.RemoveAllHs(mol_h)
+        ensemble.extend(
+            _single_conformer(dg_heavy, c.GetId()) for c in dg_heavy.GetConformers()
+        )
 
-    # Distance-geometry ensemble: torsion diversity on the physical manifold.
-    # Embed from ligand_heavy so heavy-atom order matches the input start exactly.
-    mol_h = Chem.AddHs(ligand_heavy)
-    mol_h.RemoveAllConformers()
-    dg_params = rdDistGeom.ETKDGv3()
-    # ETKDG with randomSeed=0 degenerates to identical conformers, and
-    # params.seed defaults to 0 -- offset to a nonzero, deterministic seed so a
-    # single EmbedMultipleConfs call yields a diverse ensemble. No pruning: we
-    # want exactly the requested conformers (the block's pruneRmsThresh default
-    # collapses small flexible ligands to one conformer).
-    dg_params.randomSeed = params.seed + 1
-    dg_params.numThreads = 1  # deterministic + safe under block-level parallelism
-    rdDistGeom.EmbedMultipleConfs(
-        mol_h, numConfs=max_distance_geometry_samples, params=dg_params
-    )
-    dg_heavy = Chem.RemoveAllHs(mol_h)
-    if dg_heavy.GetNumConformers() == 0:  # embedding failed — fall back to input
-        dg_heavy, conf_ids = ligand_heavy, [ligand_conf_id]
-    else:
-        conf_ids = [c.GetId() for c in dg_heavy.GetConformers()]
+    centroids = [np.mean(_positions(c), axis=0) for c in ensemble]
 
-    singles = [_single_conformer(dg_heavy, c) for c in conf_ids]
-    centroids = [np.mean(_positions(s), axis=0) for s in singles]
+    # --- Step 2: anchor (binding-site centroid, or input position if no site) ---
+    anchor = site_center if site_center is not None else centroids[0]
 
-    # Sobol rigid-body grid (translation + rotation), shared across conformers.
+    # --- Step 3: split a per-conformer orientation budget by center_fraction ---
+    # Each conformer gets ``n_orientation_samples`` placements: center_fraction of
+    # them are near-uniform SO(3) orientations at the anchor (t=0, the most likely
+    # centroid for redocking); the rest are spread over ``n_translation_samples``
+    # nearby Sobol offsets, each offset getting its own SO(3) orientation set. The
+    # offsets SHARE the remainder (rather than each taking a full orientation set),
+    # so total candidates per conformer stay = budget -- peak RAM is bounded by
+    # n_conf * budget and does not grow with the translation count.
     box_size = max(abs(params.translation_bounds[0]), abs(params.translation_bounds[1]))
-    sample_box = box_size / 2.0
-    n_rigid = max(1, max_tries // len(singles))
-    lo = np.array([-sample_box] * 3 + [-np.pi] * 3)
-    hi = np.array([sample_box] * 3 + [np.pi] * 3)
-    sampler = qmc.Sobol(d=6, scramble=True, seed=0)
-    xs_rigid = qmc.scale(sampler.random(n_rigid), lo, hi)
-    rots = [Rotation.from_rotvec(x[3:6]) for x in xs_rigid]
+    spread_box = box_size / 2.0  # spread translations stay near the pocket
 
-    # Score the full M x n_rigid candidate grid (cheap: scoring only, no
-    # minimization). Selecting the best points across the whole grid -- rather
-    # than draining one placement/conformer via early-stop -- is what yields both
-    # conformer (torsion) and rigid-placement diversity.
-    scored: list[tuple[float, Chem.Mol, NDArray]] = []
-    for single, centroid in zip(singles, centroids):
-        offset = site_center - centroid if site_center is not None else np.zeros(3)
-        for x, rot in zip(xs_rigid, rots):
-            cand = apply_rigid_transform(single, x[:3] + offset, rot, 0, centroid)
-            scored.append((_score(cand), cand, _positions(cand)))
+    budget = int(n_orientation_samples)
+    n_center = max(1, int(round(center_fraction * budget)))
+    trans_budget = max(0, budget - n_center)
+    # Scale the offset count with box volume so the spread grid spacing stays
+    # ~constant as the box grows: the spread cube edge is ``box_size``, so an
+    # L-wide box needs (L / reference)**3 as many offsets to hold the reference
+    # spacing. Capped at ``trans_budget`` so each offset keeps >= 1 orientation
+    # (a huge box never silently collapses the spread group to zero placements).
+    if trans_budget > 0:
+        vol_scale = (box_size / _TRANSLATION_REFERENCE_BOX) ** 3
+        n_target = max(1, int(round(int(n_translation_samples) * vol_scale)))
+        n_target = min(n_target, trans_budget)
+    else:
+        n_target = 0
 
-    # Strictly the lowest-energy starts, under the (default-off) diversity gate.
-    scored.sort(key=lambda t: t[0])
-    for sc, cand, pos in scored:
-        if len(passed) >= n_keep:
-            break
-        if all(
-            np.sqrt(np.mean(np.sum((pos - p[2]) ** 2, axis=1))) >= diversity_rmsd
-            for p in passed
-        ):
-            passed.append((sc, cand, pos))
+    # Center group: identity first, then near-uniform SO(3) cover at the anchor.
+    # The center point (t=0) is always kept -- burial rejection touches only the
+    # spread offsets.
+    center_rotvecs = [np.zeros(3)]
+    if n_center > 0:
+        center_rotvecs += list(_sample_orientation_rotvecs(n_center))
+
+    # Spread group: Sobol translation offsets in the +/- box/2 cube. With
+    # ``max_buried >= 0`` we rejection-sample the sequence, skipping any offset
+    # whose centroid (anchor + offset) has more than ``max_buried`` protein atoms
+    # within ``_BURIED_RADIUS`` -- i.e. it lands inside the protein, not the
+    # pocket. We draw until ``n_target`` offsets are accepted or the attempt budget
+    # (n_target + _SOBOL_MAX_OVERDRAW) is spent; any shortfall is reallocated as
+    # extra orientations per accepted offset so the candidate count is held (and
+    # peak RAM never exceeds the unfiltered path). ``max_buried < 0`` disables the
+    # filter (first ``n_target`` offsets as-is, the prior behavior).
+    spread_offsets: NDArray = np.zeros((0, 3))
+    spread_rotvecs: list[NDArray] = []
+    n_offsets = 0
+    per_offset = 0
+    if n_target > 0:
+        t_sampler = qmc.Sobol(d=3, scramble=True, seed=1)
+        n_attempts = n_target if max_buried < 0 else n_target + _SOBOL_MAX_OVERDRAW
+        with warnings.catch_warnings():  # silence Sobol non-power-of-2 balance note
+            warnings.simplefilter("ignore")
+            pool = qmc.scale(
+                t_sampler.random(n_attempts), [-spread_box] * 3, [spread_box] * 3
+            )
+        if max_buried < 0:
+            spread_offsets = pool
+        else:
+            burial_tree = (
+                protein_tree if protein_tree is not None else cKDTree(protein_coords)
+            )
+            kept_offsets: list[NDArray] = []
+            for offset in pool:
+                n_near = len(
+                    burial_tree.query_ball_point(anchor + offset, _BURIED_RADIUS)
+                )
+                if n_near <= max_buried:
+                    kept_offsets.append(offset)
+                    if len(kept_offsets) >= n_target:
+                        break
+            spread_offsets = (
+                np.asarray(kept_offsets) if kept_offsets else np.zeros((0, 3))
+            )
+        n_offsets = len(spread_offsets)
+        per_offset = trans_budget // n_offsets if n_offsets > 0 else 0
+        if per_offset == 0:  # nothing left to spread after the center allocation
+            n_offsets = 0
+            spread_offsets = np.zeros((0, 3))
+        else:
+            spread_rotvecs = list(_sample_orientation_rotvecs(per_offset))
+
+    # Pocket subset: every candidate's ligand atoms lie within (extent + max
+    # spread translation) of the anchor, so one ball around the anchor holds every
+    # protein atom that could contact any placement. Scoring against it is exact
+    # (outside atoms are beyond the cutoff for all placements) and pays the KD
+    # query once instead of once per candidate. The +/-spread_box cube reaches
+    # spread_box*sqrt(3) at its corner.
+    extent = max(
+        float(np.max(np.linalg.norm(_positions(c) - cen, axis=1)))
+        for c, cen in zip(ensemble, centroids)
+    )
+    pocket_radius = extent + spread_box * np.sqrt(3.0) + INTERACTION_CUTOFF
+    pocket_coords, pocket_typing = build_pocket_subset(
+        protein_coords, protein_typing, anchor, pocket_radius, protein_tree=protein_tree
+    )
+
+    # --- Step 4: build candidate coordinates (vectorized) and batch-score ---
+    # Geometry is pure numpy -- no per-candidate RDKit Mol -- and the rotation
+    # matrices are shared across conformers, so build them once. Mol objects are
+    # materialized only for the selected starts (Step 5).
+    center_rmats = Rotation.from_rotvec(np.asarray(center_rotvecs)).as_matrix()
+    spread_rmats = (
+        Rotation.from_rotvec(np.asarray(spread_rotvecs)).as_matrix()
+        if spread_rotvecs
+        else np.zeros((0, 3, 3))
+    )
+
+    # A candidate conformer rotated about its centroid and shifted so the centroid
+    # lands at ``anchor + t`` is ``(coords - centroid) @ R^T + anchor + t``. The
+    # ordering (conformer 0 center group first, identity placement first) makes the
+    # first row the input pose at the anchor -- the unconditional start 0.
+    #
+    # Preallocate the full candidate array once and fill per-conformer blocks in
+    # place: this avoids the transient 2x peak of ``np.concatenate(blocks)`` (the
+    # dominant RAM cost of screening), so a given RAM budget covers ~2x the
+    # candidates. Metadata are numpy arrays, not per-candidate Python lists.
+    n_conf = len(ensemble)
+    n_lig = _positions(ensemble[0]).shape[0]
+    n_rc = center_rmats.shape[0]  # center orientations (incl identity)
+    n_ro = spread_rmats.shape[0]  # orientations per translation offset
+    n_off = spread_offsets.shape[0]  # translation offsets
+    n_spread = n_off * n_ro  # spread placements per conformer
+    per_conf = n_rc + n_spread
+    coords_batch = np.empty((n_conf * per_conf, n_lig, 3), dtype=np.float64)
+    conf_idx = np.repeat(np.arange(n_conf, dtype=np.int32), per_conf)
+    is_center_arr = np.zeros(n_conf * per_conf, dtype=bool)
+    for ci, (conf, centroid) in enumerate(zip(ensemble, centroids)):
+        centered = _positions(conf) - centroid  # (n_lig, 3)
+        base = ci * per_conf
+        coords_batch[base : base + n_rc] = (
+            np.einsum("mij,nj->mni", center_rmats, centered) + anchor
+        )
+        is_center_arr[base : base + n_rc] = True
+        if n_spread:
+            # every offset x every shared orientation: (n_off, n_ro, n_lig, 3),
+            # row order offset-major so placement p -> offset p // n_ro.
+            rotated = np.einsum("mij,nj->mni", spread_rmats, centered)  # (n_ro,n_lig,3)
+            coords_batch[base + n_rc : base + per_conf] = (
+                rotated[None, :, :, :] + spread_offsets[:, None, None, :] + anchor
+            ).reshape(n_spread, n_lig, 3)
+
+    scores = empirical_score_pocket_batch(
+        coords_batch,
+        pocket_coords,
+        pocket_typing,
+        ligand_typing,
+        score_params,
+        torsion_divisor,
+    )
+
+    # --- Step 5: select start 0 + reserved center seeds + score-ranked fill ---
+    def _diverse(pos: NDArray, kept_pos: list[NDArray]) -> bool:
+        return all(
+            np.sqrt(np.mean(np.sum((pos - kp) ** 2, axis=1))) >= diversity_rmsd
+            for kp in kept_pos
+        )
+
+    def _build(idx: int) -> tuple[float, Chem.Mol]:
+        """Materialize the RDKit Mol for a selected candidate (heavy-atom)."""
+        mol = Chem.Mol(ensemble[conf_idx[idx]])
+        conf = mol.GetConformer(0)
+        for i, xyz in enumerate(coords_batch[idx]):
+            conf.SetAtomPosition(i, (float(xyz[0]), float(xyz[1]), float(xyz[2])))
+        return float(scores[idx]), mol
+
+    # Candidate 0 is conformer 0 at the identity placement (input pose at anchor).
+    kept: list[int] = [0]
+    kept_pos: list[NDArray] = [coords_batch[0]]
+    n_keep = params.n_starts
+    order = np.argsort(scores, kind="stable")
+
+    if n_keep > 1:
+        kept_set = {0}
+        # Reserve a center-group quota so well-placed (but clashing) center seeds
+        # are not outranked by low-clash peripheral poses.
+        center_target = max(1, round(center_fraction * n_keep))
+        for i in order:
+            if len(kept) >= center_target or len(kept) >= n_keep:
+                break
+            if i in kept_set or not is_center_arr[i]:
+                continue
+            if _diverse(coords_batch[i], kept_pos):
+                kept.append(int(i))
+                kept_set.add(int(i))
+                kept_pos.append(coords_batch[i])
+
+        # Fill the rest from all remaining candidates by ascending score.
+        for i in order:
+            if len(kept) >= n_keep:
+                break
+            if i in kept_set:
+                continue
+            if _diverse(coords_batch[i], kept_pos):
+                kept.append(int(i))
+                kept_set.add(int(i))
+                kept_pos.append(coords_batch[i])
 
     logger.info(
-        "dg_restarts: %d conformers x %d placements (%d grid) -> %d starts.",
-        len(singles),
-        n_rigid,
-        len(scored),
-        len(passed),
+        "dg_restarts: %d conf x budget %d (%d center + %d off x %d rot) -> %d starts.",
+        len(ensemble),
+        budget,
+        n_rc,
+        n_off,
+        n_ro,
+        len(kept),
     )
-    return [(s, m) for s, m, _ in passed]
+    return [_build(i) for i in kept]
 
 
 # =============================================================================
@@ -1087,20 +1197,38 @@ def optimize_pose_cached(
     # --- Select objective (analytical grad or finite differences) ---
     use_grad = params.use_analytical_grad
 
+    # Reused Verlet neighbor list for the sparse hot path: built once here and
+    # shared across every L-BFGS-B eval and basin hop of this start, so the
+    # KD-tree query is paid only on rebuilds (ligand displacement > skin), not
+    # per call. Only when a protein_tree is supplied -- the tree-less callers
+    # (tests) keep the exact dense per-call path below.
+    neighbor_list = (
+        NeighborList(
+            protein_coords, protein_typing, ligand_typing, protein_tree=protein_tree
+        )
+        if protein_tree is not None
+        else None
+    )
+
     if use_grad:
 
         def objective(x: NDArray) -> tuple[float, NDArray]:
             transformed = _apply_pose_heavy(x)
             pos = np.array(transformed.GetConformer(ligand_conf_id).GetPositions())
-            score, atom_grad = empirical_score_and_grad_cached(
-                transformed,
-                protein_coords,
-                protein_typing,
-                ligand_conf_id,
-                score_params,
-                protein_tree=protein_tree,
-                ligand_typing=ligand_typing,
-            )
+            if neighbor_list is not None:
+                score, atom_grad = empirical_score_and_grad_fast(
+                    pos, neighbor_list, score_params, torsion_divisor
+                )
+            else:
+                score, atom_grad = empirical_score_and_grad_cached(
+                    transformed,
+                    protein_coords,
+                    protein_typing,
+                    ligand_conf_id,
+                    score_params,
+                    protein_tree=protein_tree,
+                    ligand_typing=ligand_typing,
+                )
             # Intramolecular ligand energy (search objective only). Both atoms of
             # each pair move, so its gradient adds to atom_grad and propagates
             # through the DOF chain rule below.

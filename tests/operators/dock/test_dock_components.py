@@ -6,7 +6,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 from rdkit import Chem
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, rdMolDescriptors
 from scipy.spatial.transform import Rotation
 
 from cmxflow.operators.dock.pose import OptimizationResult
@@ -142,11 +142,14 @@ class TestPoseSearchParams:
     DEFAULTS = {
         "n_starts": 32,
         "basin_hops": 0,
-        "max_iterations": 100,
+        "max_iterations": 200,
         "box_size": 10.0,
-        "sobol_max_tries": 2048,
-        "max_distance_geometry_samples": 32,
-        "diversity_rmsd": 1.0,
+        "conf_scale": 6.0,
+        "max_confs": 128,
+        "n_orientation_samples": 1024,
+        "n_translation_samples": 32,
+        "center_fraction": 0.5,
+        "diversity_rmsd": 0.1,
     }
 
     def test_defaults_registered(self) -> None:
@@ -161,8 +164,11 @@ class TestPoseSearchParams:
 
         overrides: dict[str, Any] = {
             "n_starts": 16,
-            "sobol_max_tries": 1024,
-            "max_distance_geometry_samples": 8,
+            "n_orientation_samples": 256,
+            "n_translation_samples": 96,
+            "center_fraction": 0.25,
+            "conf_scale": 3.0,
+            "max_confs": 8,
             "diversity_rmsd": 1.5,
             "basin_hops": 5,
         }
@@ -176,8 +182,11 @@ class TestPoseSearchParams:
         PoseParams; n_starts_used records the actual start count."""
         block = _make_block()
         block.set_inputs(
-            sobol_max_tries=1024,
-            max_distance_geometry_samples=8,
+            n_orientation_samples=256,
+            n_translation_samples=96,
+            center_fraction=0.25,
+            conf_scale=2.0,
+            max_confs=64,
             diversity_rmsd=1.5,
             basin_hops=7,
         )
@@ -205,10 +214,42 @@ class TestPoseSearchParams:
 
         assert result is not None
         # Init params threaded into the DG call.
-        assert init_kwargs["max_tries"] == 1024
-        assert init_kwargs["max_distance_geometry_samples"] == 8
+        assert init_kwargs["n_orientation_samples"] == 256
+        assert init_kwargs["n_translation_samples"] == 96
+        assert init_kwargs["center_fraction"] == pytest.approx(0.25)
+        # n_extra_confs is derived from the ligand's rotatable-bond count:
+        # min(n_rot * conf_scale, max_confs).
+        n_rot = rdMolDescriptors.CalcNumRotatableBonds(
+            Chem.RemoveAllHs(mol), strict=False
+        )
+        assert init_kwargs["n_extra_confs"] == min(round(n_rot * 2.0), 64)
         assert init_kwargs["diversity_rmsd"] == pytest.approx(1.5)
         # basin_hops threaded into refine PoseParams.
         assert refine_params[0].basin_hops == 7
         # Actual start count recorded for true-compute / starvation tracking.
         assert result.GetIntProp("docking_n_starts_used") == 2
+
+    def test_budget_scales_orientation_budget(self) -> None:
+        """The block-init ``budget`` kwarg multiplies the per-conformer
+        orientation budget threaded into the DG call (RAM-denominated dial)."""
+        block = _make_block()
+        block._budget = 3
+        block.set_inputs(n_orientation_samples=256)
+
+        mol = _make_mol()
+        init_kwargs: dict = {}
+
+        def _fake_init(*_args, **kwargs):
+            init_kwargs.update(kwargs)
+            return [(-5.0, mol)]
+
+        with patch(
+            "cmxflow.operators.dock.dock.optimize_dg_restarts",
+            side_effect=_fake_init,
+        ), patch(
+            "cmxflow.operators.dock.dock.optimize_pose_cached",
+            side_effect=lambda *_a, **_k: _mock_result(mol),
+        ):
+            block._forward(mol)
+
+        assert init_kwargs["n_orientation_samples"] == 3 * 256
